@@ -1,6 +1,6 @@
 {
   "name": "@qcksys/qlipq-ffmpeg",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Pure ffmpeg/ffprobe command builders and output parsers for qlipq.",
   "license": "MIT",
   "files": [
