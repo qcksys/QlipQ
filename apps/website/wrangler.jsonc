@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "qlipq-website",
+  "compatibility_date": "2026-06-01",
+  // Serve the static Astro build directly from Cloudflare's edge.
+  // `wrangler deploy` uploads ./dist as Workers Static Assets.
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page",
+  },
+}

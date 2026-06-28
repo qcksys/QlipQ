@@ -1,0 +1,248 @@
+:root {
+  --bg: #0f1014;
+  --bg-elev: #181a21;
+  --border: #262a35;
+  --text: #e7e9ee;
+  --muted: #9aa0b0;
+  --accent: #6d5cff;
+  --accent-hover: #8676ff;
+  --max: 980px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  line-height: 1.65;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+.container {
+  width: 100%;
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+main {
+  min-height: 60vh;
+  padding: 48px 0 80px;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.25;
+}
+h1 {
+  font-size: clamp(2rem, 5vw, 3rem);
+  letter-spacing: -0.02em;
+}
+
+/* Header */
+.site-header {
+  border-bottom: 1px solid var(--border);
+  background: rgba(15, 16, 20, 0.8);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.site-header .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 60px;
+}
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  color: var(--text);
+}
+.nav {
+  display: flex;
+  gap: 22px;
+  align-items: center;
+}
+.nav a {
+  color: var(--muted);
+}
+.nav a:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  padding: 11px 20px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.btn:hover {
+  background: var(--accent-hover);
+  text-decoration: none;
+}
+.btn.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+/* Hero */
+.hero {
+  text-align: center;
+  padding: 80px 0 40px;
+}
+.hero p.lead {
+  color: var(--muted);
+  font-size: 1.2rem;
+  max-width: 640px;
+  margin: 18px auto 28px;
+}
+.hero-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* Feature grid */
+.features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px;
+  margin: 56px 0;
+}
+.card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
+}
+.card h3 {
+  margin: 0 0 8px;
+}
+.card p {
+  color: var(--muted);
+  margin: 0;
+}
+
+/* Prose (guide pages) */
+.prose {
+  max-width: 760px;
+}
+.prose h2 {
+  margin-top: 42px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.prose code {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 0.9em;
+}
+.prose pre {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  overflow-x: auto;
+}
+.prose pre code {
+  border: none;
+  padding: 0;
+  background: none;
+}
+.prose ol,
+.prose ul {
+  padding-left: 22px;
+}
+.prose li {
+  margin: 8px 0;
+}
+.callout {
+  background: rgba(109, 92, 255, 0.1);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 20px 0;
+}
+.callout strong {
+  color: var(--accent-hover);
+}
+
+/* Guide index list */
+.guide-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 14px;
+}
+.guide-list a {
+  display: block;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  color: var(--text);
+}
+.guide-list a:hover {
+  border-color: var(--accent);
+  text-decoration: none;
+}
+.guide-list .desc {
+  color: var(--muted);
+  margin: 4px 0 0;
+}
+
+/* Footer */
+.site-footer {
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  padding: 28px 0;
+  font-size: 0.9rem;
+}
+.site-footer .container {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* Download */
+.platforms {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin: 32px 0;
+}

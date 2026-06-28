@@ -1,0 +1,15 @@
+---
+import Base from "../layouts/Base.astro";
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+---
+
+<Base title="Page not found — qlipq">
+  <section class="hero">
+    <h1>404</h1>
+    <p class="lead">That page wandered off. Let's get you back.</p>
+    <div class="hero-actions">
+      <a class="btn" href={`${base}/`}>Home</a>
+      <a class="btn secondary" href={`${base}/guide`}>User guide</a>
+    </div>
+  </section>
+</Base>

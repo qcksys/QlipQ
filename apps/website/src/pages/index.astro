@@ -1,0 +1,54 @@
+---
+import Base from "../layouts/Base.astro";
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+---
+
+<Base title="qlipq — recording queue & clip editor">
+  <section class="hero">
+    <h1>Turn raw recordings into clips, fast.</h1>
+    <p class="lead">
+      qlipq watches your capture folders, queues every new recording, and gives you a focused editor
+      to trim, crop, pick audio tracks, and export — all powered by FFmpeg.
+    </p>
+    <div class="hero-actions">
+      <a class="btn" href={`${base}/download`}>Download for desktop</a>
+      <a class="btn secondary" href={`${base}/guide/obs-replay-buffer`}>Set up OBS replay buffer</a>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="card">
+      <h3>📂 Folder watching</h3>
+      <p>Point qlipq at one or more folders. New recordings appear in the queue automatically.</p>
+    </div>
+    <div class="card">
+      <h3>✂️ Trim &amp; crop</h3>
+      <p>Scrub the timeline, set in/out points, and crop the frame — no timeline scrubbing in a NLE.</p>
+    </div>
+    <div class="card">
+      <h3>🎚️ Audio tracks</h3>
+      <p>Keep desktop, mute the mic, or rebalance levels per track before you export.</p>
+    </div>
+    <div class="card">
+      <h3>🏷️ Smart renaming</h3>
+      <p>Rename recordings with templates that read the date and game from OBS filenames.</p>
+    </div>
+    <div class="card">
+      <h3>⚡ FFmpeg exports</h3>
+      <p>Stream-copy when possible for instant trims, or re-encode when you crop or adjust audio.</p>
+    </div>
+    <div class="card">
+      <h3>🔭 Highlights (soon)</h3>
+      <p>A future local AI pass will scan clips and surface likely highlights for you.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>How it works</h2>
+    <ol class="prose">
+      <li>Record gameplay with OBS (we recommend the <a href={`${base}/guide/obs-replay-buffer`}>replay buffer</a>).</li>
+      <li>qlipq adds each new file to the queue with its date and game parsed from the name.</li>
+      <li>Open a clip, trim and crop it, choose audio tracks, and export to your output folder.</li>
+    </ol>
+  </section>
+</Base>

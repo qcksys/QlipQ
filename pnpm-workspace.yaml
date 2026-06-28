@@ -7,13 +7,10 @@ catalogMode: prefer
 
 catalog:
   "@types/node": ^24
+  esbuild: ^0.28.1
   typescript: ^5
   vite: npm:@voidzero-dev/vite-plus-core@latest
-  vitest: npm:@voidzero-dev/vite-plus-test@latest
   vite-plus: latest
-overrides:
-  vite: "catalog:"
-  vitest: "catalog:"
 peerDependencyRules:
   allowAny:
     - vite
@@ -21,3 +18,7 @@ peerDependencyRules:
   allowedVersions:
     vite: "*"
     vitest: "*"
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true

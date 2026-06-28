@@ -1,0 +1,41 @@
+---
+import Base from "../layouts/Base.astro";
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+const repo = "https://github.com/tomalle/qlipq";
+---
+
+<Base title="Download qlipq" description="Download qlipq for Windows, macOS, and Linux.">
+  <h1>Download qlipq</h1>
+  <p class="lead" style="color:var(--muted)">
+    qlipq is a small desktop app built with Tauri. Grab the latest build for your platform from the
+    releases page.
+  </p>
+
+  <div class="platforms">
+    <div class="card">
+      <h3>Windows</h3>
+      <p>Windows 10/11 (x64). <code>.msi</code> / <code>.exe</code> installer.</p>
+      <p style="margin-top:14px"><a class="btn" href={`${repo}/releases/latest`}>Latest release</a></p>
+    </div>
+    <div class="card">
+      <h3>macOS</h3>
+      <p>Apple Silicon &amp; Intel. <code>.dmg</code> bundle.</p>
+      <p style="margin-top:14px"><a class="btn" href={`${repo}/releases/latest`}>Latest release</a></p>
+    </div>
+    <div class="card">
+      <h3>Linux</h3>
+      <p><code>.AppImage</code> and <code>.deb</code> packages.</p>
+      <p style="margin-top:14px"><a class="btn" href={`${repo}/releases/latest`}>Latest release</a></p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Heads up:</strong> qlipq calls <code>ffmpeg</code> and <code>ffprobe</code>. Install
+    FFmpeg and make sure it is on your <code>PATH</code>, or set the paths in qlipq's settings.
+  </div>
+
+  <p>
+    Prefer to build from source? See the <a href={`${base}/guide/getting-started`}>getting started</a>
+    guide.
+  </p>
+</Base>

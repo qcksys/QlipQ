@@ -1,0 +1,58 @@
+---
+import Base from "../../layouts/Base.astro";
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+---
+
+<Base title="Getting started with qlipq" description="Install qlipq and export your first clip.">
+  <article class="prose">
+    <h1>Getting started</h1>
+
+    <h2>1. Install FFmpeg</h2>
+    <p>
+      qlipq shells out to <code>ffmpeg</code> and <code>ffprobe</code> for probing and exporting.
+      Install FFmpeg and ensure it is available on your <code>PATH</code>:
+    </p>
+    <ul>
+      <li><strong>Windows:</strong> <code>winget install Gyan.FFmpeg</code></li>
+      <li><strong>macOS:</strong> <code>brew install ffmpeg</code></li>
+      <li><strong>Linux:</strong> <code>sudo apt install ffmpeg</code></li>
+    </ul>
+    <p>
+      If FFmpeg is not on your <code>PATH</code>, open qlipq's <strong>Settings</strong> and set the
+      full paths to the <code>ffmpeg</code> and <code>ffprobe</code> binaries.
+    </p>
+
+    <h2>2. Add watched folders</h2>
+    <p>
+      In <strong>Settings → Watched folders</strong>, add the folder(s) where your recordings land
+      (for OBS this is your recording or replay-buffer output path). qlipq scans them on launch and
+      watches for new files while it runs.
+    </p>
+
+    <h2>3. Choose an output folder and naming template</h2>
+    <p>
+      Set an <strong>Output folder</strong> for exports. The <strong>naming template</strong>
+      controls how exported (and renamed) files are named. Available tokens:
+    </p>
+    <pre><code>{"{date}      → 2026-06-28\n{time}      → 18-09-05\n{datetime}  → 2026-06-28_18-09-05\n{source}    → game/scene parsed from the filename\n{name}      → original file name\n{index}     → a number you provide"}</code></pre>
+    <p>The default <code>{"{date}_{source}_{name}"}</code> works well with OBS filenames.</p>
+
+    <h2>4. Edit and export</h2>
+    <ol>
+      <li>Pick a clip from the <strong>Queue</strong>.</li>
+      <li>Set the <strong>in/out</strong> points on the timeline (or at the playhead).</li>
+      <li>Optionally enable <strong>crop</strong> and adjust the rectangle.</li>
+      <li>Toggle <strong>audio tracks</strong> and set their levels.</li>
+      <li>Click <strong>Export clip</strong>. Trims stream-copy for speed; crop or volume changes re-encode.</li>
+    </ol>
+
+    <div class="callout">
+      <strong>Tip:</strong> Use <strong>Rename</strong> on a queued item to tidy file names in place
+      using the same template — handy before archiving raw recordings.
+    </div>
+
+    <p>
+      Next: <a href={`${base}/guide/obs-replay-buffer`}>set up the OBS replay buffer →</a>
+    </p>
+  </article>
+</Base>

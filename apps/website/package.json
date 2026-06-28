@@ -1,16 +1,21 @@
 {
-  "name": "website",
+  "name": "qlipq-website",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vp dev",
-    "build": "tsc && vp build",
-    "preview": "vp preview"
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "deploy": "astro build && wrangler deploy"
+  },
+  "dependencies": {
+    "astro": "^5"
   },
   "devDependencies": {
-    "typescript": "~6.0.2",
-    "vite": "catalog:",
-    "vite-plus": "catalog:"
+    "@astrojs/check": "^0.9",
+    "typescript": "catalog:",
+    "wrangler": "^4"
   }
 }

@@ -4,11 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "ready": "vp fmt && vp lint && vp run test -r && vp run build -r",
-    "dev": "vp run website#dev",
+    "ready": "vp fmt && vp lint && vp run -r test && vp run -r build",
+    "dev": "vp run qlipq-website#dev",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "vp run -r build && changeset publish",
     "prepare": "vp config"
   },
   "devDependencies": {
+    "@changesets/cli": "^2",
     "vite-plus": "catalog:"
   },
   "engines": {

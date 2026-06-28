@@ -1,0 +1,100 @@
+---
+import Base from "../../layouts/Base.astro";
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+---
+
+<Base
+  title="Set up the OBS replay buffer for qlipq"
+  description="Configure OBS Studio's replay buffer to capture the last few minutes on a hotkey — the ideal source for qlipq."
+>
+  <article class="prose">
+    <h1>Set up the OBS replay buffer</h1>
+    <p>
+      The <strong>replay buffer</strong> keeps the last few minutes of gameplay in memory and writes
+      them to disk only when you press a hotkey. It is the perfect companion to qlipq: you capture
+      moments as they happen, and qlipq queues each saved clip for editing.
+    </p>
+
+    <h2>1. Choose an output mode</h2>
+    <p>
+      Open <strong>Settings → Output</strong>. Either <em>Simple</em> or <em>Advanced</em> mode works;
+      Advanced unlocks multiple audio tracks (recommended for qlipq's per-track mixing).
+    </p>
+
+    <h2>2. Enable the replay buffer</h2>
+    <ul>
+      <li>
+        <strong>Simple mode:</strong> tick <code>Enable Replay Buffer</code>, then set
+        <code>Maximum Replay Time</code> (e.g. 120s).
+      </li>
+      <li>
+        <strong>Advanced mode:</strong> go to the <code>Replay Buffer</code> tab and set
+        <code>Maximum Replay Time</code>.
+      </li>
+    </ul>
+    <div class="callout">
+      <strong>Format:</strong> choose <code>mkv</code> (or fragmented <code>mp4</code>) as the
+      recording format. Plain <code>mp4</code> can corrupt if OBS crashes mid-record; qlipq reads
+      <code>mkv</code> happily and you can remux on export.
+    </div>
+
+    <h2>3. Set the recording path</h2>
+    <p>
+      Under <strong>Settings → Output → Recording</strong>, set the <code>Recording Path</code>. This
+      is the folder you will add to qlipq's <strong>watched folders</strong>.
+    </p>
+
+    <h2>4. Enable multiple audio tracks (optional but recommended)</h2>
+    <p>In Advanced output mode you can record each audio source to its own track:</p>
+    <ol>
+      <li>
+        <strong>Settings → Output → Recording → Audio Track:</strong> tick the tracks you want to
+        record (e.g. Track 1 = mix, Track 2 = desktop, Track 3 = mic).
+      </li>
+      <li>
+        In the main window's <strong>Audio Mixer</strong>, open the gear → <code>Advanced Audio
+        Properties</code> and assign each source to tracks via the <code>Tracks</code> checkboxes.
+      </li>
+    </ol>
+    <p>
+      qlipq detects every audio track in the file, so you can mute the mic or rebalance levels per
+      clip at export time.
+    </p>
+
+    <h2>5. Set a filename format qlipq can read</h2>
+    <p>
+      Go to <strong>Settings → Advanced → Recording → Filename Formatting</strong>. qlipq parses the
+      timestamp from the name and treats any leading text as the <em>source</em> (game/scene). Good
+      options:
+    </p>
+    <pre><code>{"%CCYY-%MM-%DD %hh-%mm-%ss\n%CCYY-%MM-%DD_%hh-%mm-%ss"}</code></pre>
+    <p>
+      Want the game name in the clip too? Prefix it, e.g. set the format to
+      <code>{"Apex %CCYY-%MM-%DD %hh-%mm-%ss"}</code> or include the scene name. qlipq will surface it
+      as the <code>{"{source}"}</code> token in your naming template.
+    </p>
+
+    <h2>6. Assign hotkeys</h2>
+    <p>
+      Open <strong>Settings → Hotkeys</strong> and bind:
+    </p>
+    <ul>
+      <li><code>Start Replay Buffer</code></li>
+      <li><code>Save Replay</code> — press this to write the last N minutes to disk</li>
+      <li><code>Stop Replay Buffer</code></li>
+    </ul>
+
+    <h2>7. Run it</h2>
+    <ol>
+      <li>Start the replay buffer (hotkey, or the button in the Controls dock).</li>
+      <li>Play. When something good happens, press <strong>Save Replay</strong>.</li>
+      <li>OBS writes a clip into your recording folder.</li>
+      <li>qlipq picks it up in the <strong>Queue</strong> — open it, trim, and export.</li>
+    </ol>
+
+    <div class="callout">
+      <strong>Next:</strong> point qlipq at your recording folder in
+      <a href={`${base}/guide/getting-started`}>Getting started</a>.
+    </div>
+  </article>
+</Base>
