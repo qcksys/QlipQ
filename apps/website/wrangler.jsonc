@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "qlipq-website",
   "compatibility_date": "2026-06-01",
+  "account_id": "923e3a86a572d6d6d05230ccadbbbe34",
   // Base config (used by `wrangler dev` locally and as a workers.dev fallback).
   // `assets` and `routes` are NOT inherited by named environments, so each env
   // below redeclares `assets`.
