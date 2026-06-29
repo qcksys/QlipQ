@@ -36,7 +36,9 @@ The editor shows an estimated file size for the current clip, and you can overri
 1. Pick a clip from the **Queue** (each shows its date, length, and size).
 2. Set the **in/out** points on the timeline. The player remembers your position and has −60/−5/−1 and +1/+5/+60 second jump buttons.
 3. Optionally enable **crop** and adjust the rectangle.
-4. Toggle **audio tracks** and set their levels (your selection carries to the next clip).
-5. Click **Export clip**. You'll be warned before overwriting an existing file, and the **After export** setting decides what happens to the original (keep, delete, move, rename, or prompt). Use **Show file** to reveal the exported clip.
+4. Toggle **audio tracks** and set their levels (your selection carries to the next clip). Boosting a single track above 100% is applied on export, though the in-app preview plays it at 100%.
+5. Click **Export clip**. If a file with the same name already exists you can **overwrite** it or **append a timestamp** to keep both, and the **After export** setting decides what happens to the original (keep, delete, move, rename, or prompt). Use **Show file** to reveal the exported clip.
+
+> Clips the player can't open directly (MKV, HEVC) are previewed via a small cached proxy; exports always use the original file. Clear it anytime from **Settings → Preview cache**.
 
 **Next:** [set up the OBS replay buffer](/guide/obs-replay-buffer).

@@ -56,6 +56,16 @@ export function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
   return invoke("run_ffmpeg_blocking", { ffmpegPath, args });
 }
 
+/** Total bytes used by the cached preview proxies in the app data dir. */
+export function proxyCacheSize(): Promise<number> {
+  return invoke<number>("proxy_cache_size");
+}
+
+/** Delete all cached preview proxies; resolves with the number of bytes freed. */
+export function clearProxyCache(): Promise<number> {
+  return invoke<number>("clear_proxy_cache");
+}
+
 /** Read a named file from the app data dir (null if absent). */
 export function readAppFile(name: string): Promise<string | null> {
   return invoke<string | null>("read_app_file", { name });

@@ -1,13 +1,14 @@
-import type {
-  AfterExportAction,
-  AppConfig,
-  ContainerFormat,
-  OutputSettings,
-  QualityMode,
-  QualityPreset,
-  VideoCodecChoice,
+import {
+  type AfterExportAction,
+  type AppConfig,
+  type ContainerFormat,
+  formatBytes,
+  type OutputSettings,
+  type QualityMode,
+  type QualityPreset,
+  type VideoCodecChoice,
 } from "@qcksys/qlipq-core";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import type { CapturePresets } from "../lib/api.ts";
 import * as api from "../lib/api.ts";
 import { Button } from "@/components/ui/button";
@@ -70,6 +71,24 @@ interface BinaryStatus {
 
 export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPanelProps) {
   const [tests, setTests] = useState<{ ffmpeg?: BinaryStatus; ffprobe?: BinaryStatus }>({});
+  const [cacheBytes, setCacheBytes] = useState<number | null>(null);
+  const [clearing, setClearing] = useState(false);
+
+  useEffect(() => {
+    api.proxyCacheSize().then(setCacheBytes).catch(console.error);
+  }, []);
+
+  const clearCache = async () => {
+    setClearing(true);
+    try {
+      await api.clearProxyCache();
+      setCacheBytes(await api.proxyCacheSize());
+    } catch (err) {
+      console.error("clear preview cache failed", err);
+    } finally {
+      setClearing(false);
+    }
+  };
 
   const runTest = async (which: "ffmpeg" | "ffprobe", path: string) => {
     setTests((t) => ({ ...t, [which]: { ok: true, message: "Testing…" } }));
@@ -480,6 +499,21 @@ export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPa
             </Field>
           </div>
         )}
+      </Section>
+
+      <Section title="Preview cache">
+        <p className="text-xs text-muted-foreground">
+          Previews of clips the player can't open directly (MKV, HEVC) are cached here and reused.
+          Exports always use the original file, so clearing this only frees disk space.
+        </p>
+        <div className="flex items-center gap-3">
+          <Button variant="outline" size="sm" onClick={clearCache} disabled={clearing}>
+            {clearing ? "Clearing…" : "Clear preview cache"}
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            {cacheBytes == null ? "…" : `${formatBytes(cacheBytes)} cached`}
+          </span>
+        </div>
       </Section>
 
       <div className="flex items-center gap-3">

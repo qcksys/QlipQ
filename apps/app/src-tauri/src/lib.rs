@@ -530,6 +530,40 @@ fn proxy_path(app: AppHandle, input: String) -> Result<String, String> {
         .to_string())
 }
 
+/// Total size in bytes of the preview-proxy cache (0 if it doesn't exist yet).
+#[tauri::command]
+fn proxy_cache_size(app: AppHandle) -> Result<u64, String> {
+    let dir = data_dir(&app)?.join("proxies");
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Delete every cached preview proxy; returns the number of bytes freed.
+#[tauri::command]
+fn clear_proxy_cache(app: AppHandle) -> Result<u64, String> {
+    let dir = data_dir(&app)?.join("proxies");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(0);
+    };
+    let mut freed = 0u64;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_file() && std::fs::remove_file(entry.path()).is_ok() {
+            freed += meta.len();
+        }
+    }
+    Ok(freed)
+}
+
 /// Run ffmpeg to completion (no progress streaming) — used to build preview proxies.
 #[tauri::command]
 async fn run_ffmpeg_blocking(ffmpeg_path: String, args: Vec<String>) -> Result<(), String> {
@@ -671,6 +705,8 @@ pub fn run() {
             file_info,
             file_exists,
             proxy_path,
+            proxy_cache_size,
+            clear_proxy_cache,
             run_ffmpeg_blocking,
             check_binary,
             scan_folders,

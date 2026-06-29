@@ -8,6 +8,7 @@ import {
   type EditSpec,
   effectiveDuration,
   formatBytes,
+  formatDateTime,
   formatDuration,
   type MediaInfo,
   type OutputSettings,
@@ -654,6 +655,16 @@ export function Editor({ item, config, onPatch, audioDefaults, onAudioDefaults }
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              variant="outline"
+              onClick={() => {
+                const target = overwriteTarget;
+                setOverwriteTarget(null);
+                if (target) void runExport(appendTimestamp(target));
+              }}
+            >
+              Append timestamp
+            </AlertDialogAction>
+            <AlertDialogAction
               onClick={() => {
                 const target = overwriteTarget;
                 setOverwriteTarget(null);
@@ -713,6 +724,13 @@ export function Editor({ item, config, onPatch, audioDefaults, onAudioDefaults }
       </AlertDialog>
     </div>
   );
+}
+
+// Insert a timestamp before the extension so an export can avoid clobbering an existing file.
+function appendTimestamp(path: string): string {
+  const { name, ext } = splitFileName(basename(path));
+  const stamped = `${name}_${formatDateTime(new Date())}${ext ? `.${ext}` : ""}`;
+  return joinPath(dirname(path), stamped);
 }
 
 // Reuse rename templating so exports are named consistently with renames.
