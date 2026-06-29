@@ -28,6 +28,25 @@ export interface OutputSettings {
   audioBitrateKbps: number;
 }
 
+/** What to do with the source recording after a successful export. */
+export type AfterExportAction = "nothing" | "delete" | "move" | "rename" | "prompt";
+
+export interface AfterExportSettings {
+  action: AfterExportAction;
+  /** Destination folder for the `move` action. */
+  moveFolder: string;
+  /** Prefix/suffix added to the source file name for the `rename` action. */
+  renamePrefix: string;
+  renameSuffix: string;
+}
+
+export const DEFAULT_AFTER_EXPORT: AfterExportSettings = {
+  action: "nothing",
+  moveFolder: "",
+  renamePrefix: "",
+  renameSuffix: "",
+};
+
 export const DEFAULT_OUTPUT_SETTINGS: OutputSettings = {
   // `original` preserves the current fast-trim default: stream-copy unless an edit
   // (crop/scale/fps/volume) forces a re-encode.
@@ -57,8 +76,8 @@ export interface AppConfig {
   ffmpegPath: string;
   /** Path or command name for ffprobe. */
   ffprobePath: string;
-  /** Remove the source file after a successful export. */
-  deleteSourceAfterExport: boolean;
+  /** What to do with the source recording after a successful export. */
+  afterExport: AfterExportSettings;
   /** Default encoding settings applied to every export. */
   output: OutputSettings;
 }
@@ -70,7 +89,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   namingTemplate: "{date}_{source}_{name}",
   ffmpegPath: "ffmpeg",
   ffprobePath: "ffprobe",
-  deleteSourceAfterExport: false,
+  afterExport: { ...DEFAULT_AFTER_EXPORT },
   output: { ...DEFAULT_OUTPUT_SETTINGS },
 };
 
@@ -79,7 +98,8 @@ export function withConfigDefaults(partial: Partial<AppConfig> | null | undefine
   return {
     ...DEFAULT_CONFIG,
     ...partial,
-    // Deep-merge so output sub-fields added in future versions gain their defaults.
+    // Deep-merge nested groups so sub-fields added in future versions gain defaults.
+    afterExport: { ...DEFAULT_AFTER_EXPORT, ...partial?.afterExport },
     output: { ...DEFAULT_OUTPUT_SETTINGS, ...partial?.output },
   };
 }

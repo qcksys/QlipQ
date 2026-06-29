@@ -60,6 +60,22 @@ config defaults, and rename templating; `@qcksys/qlipq-ffmpeg` depends on it.
 Assets, with two wrangler envs (`dev` → dev.qlipq.com, `production` → qlipq.com);
 `assets`/`routes` are redeclared per env (not inherited).
 
+**Keep the website in sync with functionality (required).** Any change to
+user-facing app behavior — features, settings, workflows — MUST also update the
+website docs in the **same** change. Guide content is authored as **Markdown** in
+`apps/website/src/content/guide/*.md` and converted at build time by Astro's
+Content Layer API: the `glob()` loader in
+[content.config.ts](apps/website/src/content.config.ts) feeds `render(entry)` in
+[guide/[...slug].astro](apps/website/src/pages/guide/[...slug].astro), wrapped in
+`Base.astro`. Edit the `.md` files, not hand-written HTML. A change that alters
+functionality without updating the relevant guide markdown is incomplete.
+
+**Config schema.** The app's `config.json` is described by a JSON Schema generated
+from `@qcksys/qlipq-core`'s `AppConfig` and hosted on the site at
+`/schema/config-<version>.json` (version = `@qcksys/qlipq-core`'s package version).
+When you add/rename a config field (in both `config.ts` and the Rust struct), also
+update the schema generator so the hosted schema stays accurate.
+
 ## Commands
 
 Use `vp` for everything except the Tauri app (which uses its own CLI via pnpm).

@@ -41,6 +41,11 @@ export function checkBinary(path: string): Promise<string> {
   return invoke<string>("check_binary", { path });
 }
 
+/** Whether a file already exists at the path (to warn before overwriting on export). */
+export function fileExists(path: string): Promise<boolean> {
+  return invoke<boolean>("file_exists", { path });
+}
+
 /** Read a named file from the app data dir (null if absent). */
 export function readAppFile(name: string): Promise<string | null> {
   return invoke<string | null>("read_app_file", { name });

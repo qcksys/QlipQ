@@ -1,4 +1,5 @@
 import type {
+  AfterExportAction,
   AppConfig,
   ContainerFormat,
   OutputSettings,
@@ -18,7 +19,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 
 const ENCODER_PRESETS = [
   "ultrafast",
@@ -103,9 +103,17 @@ export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPa
   const out = config.output;
   const setOut = (patch: Partial<OutputSettings>) => onChange({ output: { ...out, ...patch } });
 
+  const ae = config.afterExport;
+  const setAfter = (patch: Partial<typeof ae>) => onChange({ afterExport: { ...ae, ...patch } });
+
   const pickOutput = async () => {
     const folder = await api.pickFolder();
     if (folder) onChange({ outputFolder: folder });
+  };
+
+  const pickMoveFolder = async () => {
+    const folder = await api.pickFolder();
+    if (folder) setAfter({ moveFolder: folder });
   };
 
   const openConfigFile = async () => {
@@ -419,13 +427,59 @@ export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPa
             {tests.ffprobe.message}
           </p>
         )}
-        <label className="flex items-center gap-2 text-sm">
-          <Switch
-            checked={config.deleteSourceAfterExport}
-            onCheckedChange={(checked) => onChange({ deleteSourceAfterExport: checked })}
-          />
-          Delete source file after a successful export
-        </label>
+      </Section>
+
+      <Section title="After export">
+        <p className="text-xs text-muted-foreground">
+          What to do with the original recording after a clip exports successfully.
+        </p>
+        <Field label="Action">
+          <Select
+            value={ae.action}
+            onValueChange={(v) => v && setAfter({ action: v as AfterExportAction })}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="nothing">Do nothing</SelectItem>
+              <SelectItem value="delete">Delete</SelectItem>
+              <SelectItem value="move">Move to folder</SelectItem>
+              <SelectItem value="rename">Rename (prefix/suffix)</SelectItem>
+              <SelectItem value="prompt">Prompt each time</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+        {ae.action === "move" && (
+          <div className="flex gap-2">
+            <Input
+              value={ae.moveFolder}
+              placeholder="Destination folder"
+              onChange={(e) => setAfter({ moveFolder: e.target.value })}
+            />
+            <Button variant="outline" onClick={pickMoveFolder}>
+              Browse…
+            </Button>
+          </div>
+        )}
+        {ae.action === "rename" && (
+          <div className="flex flex-wrap gap-3">
+            <Field label="Prefix">
+              <Input
+                value={ae.renamePrefix}
+                placeholder="e.g. done-"
+                onChange={(e) => setAfter({ renamePrefix: e.target.value })}
+              />
+            </Field>
+            <Field label="Suffix">
+              <Input
+                value={ae.renameSuffix}
+                placeholder="e.g. -archived"
+                onChange={(e) => setAfter({ renameSuffix: e.target.value })}
+              />
+            </Field>
+          </div>
+        )}
       </Section>
 
       <div className="flex items-center gap-3">

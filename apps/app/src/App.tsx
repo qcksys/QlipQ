@@ -12,7 +12,7 @@ import { parseFfprobe } from "@qcksys/qlipq-ffmpeg";
 import { toast } from "sonner";
 import { ConfigPanel } from "./components/ConfigPanel.tsx";
 import { Editor } from "./components/Editor.tsx";
-import { QueueList } from "./components/QueueList.tsx";
+import { DISMISSED_TAG, QueueList } from "./components/QueueList.tsx";
 import { RenameModal } from "./components/RenameModal.tsx";
 import * as api from "./lib/api.ts";
 import { basename, dirname, joinPath, queueItemFromPath, toPosixPath } from "./lib/queue.ts";
@@ -299,6 +299,17 @@ export function App() {
     setDeleteTarget(null);
   };
 
+  // Dismiss = tag "dismissed" (persisted, hidden by the default filter) — reversible,
+  // unlike a plain remove. Toggling again restores the clip.
+  const toggleDismiss = (item: QueueItem) => {
+    const has = item.tags?.includes(DISMISSED_TAG) ?? false;
+    const tags = has
+      ? (item.tags ?? []).filter((t) => t !== DISMISSED_TAG)
+      : [...(item.tags ?? []), DISMISSED_TAG];
+    patchItem(item.id, { tags });
+    if (!has && selectedId === item.id) setSelectedId(null);
+  };
+
   const confirmRename = async (newFileName: string) => {
     const target = renameTarget;
     if (!target) return;
@@ -323,12 +334,15 @@ export function App() {
   };
 
   const selected = items.find((item) => item.id === selectedId) ?? null;
-  const pendingCount = items.filter((item) => item.status !== "done").length;
+  const pendingCount = items.filter(
+    (item) => item.status !== "done" && !item.tags?.includes(DISMISSED_TAG),
+  ).length;
   const allTags = Array.from(new Set(items.flatMap((item) => item.tags ?? []))).sort();
+  // Default view hides dismissed clips; selecting the "dismissed" filter reveals them.
   const visibleItems =
     tagFilter && allTags.includes(tagFilter)
       ? items.filter((item) => item.tags?.includes(tagFilter))
-      : items;
+      : items.filter((item) => !item.tags?.includes(DISMISSED_TAG));
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
@@ -428,7 +442,7 @@ export function App() {
               selectedId={selectedId}
               onSelect={setSelectedId}
               onRename={setRenameTarget}
-              onRemove={removeItem}
+              onDismiss={toggleDismiss}
               onDelete={requestDelete}
             />
             {ready && items.length === 0 && config.watchedFolders.length === 0 && (

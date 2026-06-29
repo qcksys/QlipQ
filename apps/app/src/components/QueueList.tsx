@@ -10,12 +10,15 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+/** Items carrying this tag are hidden from the queue by default. */
+export const DISMISSED_TAG = "dismissed";
+
 interface QueueListProps {
   items: QueueItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onRename: (item: QueueItem) => void;
-  onRemove: (id: string) => void;
+  onDismiss: (item: QueueItem) => void;
   onDelete: (item: QueueItem) => void;
 }
 
@@ -42,7 +45,7 @@ export function QueueList({
   selectedId,
   onSelect,
   onRename,
-  onRemove,
+  onDismiss,
   onDelete,
 }: QueueListProps) {
   if (items.length === 0) {
@@ -111,10 +114,10 @@ export function QueueList({
                 className="h-auto p-0"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onRemove(item.id);
+                  onDismiss(item);
                 }}
               >
-                Remove
+                {item.tags?.includes(DISMISSED_TAG) ? "Restore" : "Dismiss"}
               </Button>
               <Button
                 variant="link"

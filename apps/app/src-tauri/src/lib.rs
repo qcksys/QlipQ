@@ -16,6 +16,7 @@ const QUALITY_MODES: &[&str] = &["preset", "crf", "bitrate", "vbr"];
 const QUALITY_PRESETS: &[&str] = &["original", "high", "balanced", "small"];
 const VIDEO_CODECS: &[&str] = &["libx264", "libx265"];
 const CONTAINERS: &[&str] = &["mp4", "mkv"];
+const AFTER_EXPORT_ACTIONS: &[&str] = &["nothing", "delete", "move", "rename", "prompt"];
 
 /// garde custom validator: value must be one of `allowed`.
 fn one_of(allowed: &'static [&'static str]) -> impl Fn(&String, &()) -> garde::Result {
@@ -55,11 +56,41 @@ struct AppConfig {
     #[garde(skip)]
     ffprobe_path: String,
     #[serde_as(deserialize_as = "DefaultOnError")]
-    #[garde(skip)]
-    delete_source_after_export: bool,
+    #[garde(dive)]
+    after_export: AfterExportSettings,
     #[serde_as(deserialize_as = "DefaultOnError")]
     #[garde(dive)]
     output: OutputSettings,
+}
+
+/// Mirrors `@qcksys/qlipq-core`'s `AfterExportSettings` — what to do with the source
+/// recording after a successful export.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", default)]
+struct AfterExportSettings {
+    #[garde(custom(one_of(AFTER_EXPORT_ACTIONS)))]
+    action: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
+    move_folder: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
+    rename_prefix: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
+    rename_suffix: String,
+}
+
+impl Default for AfterExportSettings {
+    fn default() -> Self {
+        Self {
+            action: "nothing".to_string(),
+            move_folder: String::new(),
+            rename_prefix: String::new(),
+            rename_suffix: String::new(),
+        }
+    }
 }
 
 /// Mirrors `@qcksys/qlipq-core`'s `OutputSettings`. The frontend builds ffmpeg args
@@ -103,6 +134,9 @@ struct OutputSettings {
 /// Repair invalid values to defaults after a failed garde validation, keeping every
 /// other (valid) field. Mirrors the garde rules above.
 fn normalize_config(cfg: &mut AppConfig) {
+    if !AFTER_EXPORT_ACTIONS.contains(&cfg.after_export.action.as_str()) {
+        cfg.after_export.action = AfterExportSettings::default().action;
+    }
     let d = OutputSettings::default();
     let o = &mut cfg.output;
     o.crf = o.crf.min(51);
@@ -149,7 +183,7 @@ impl Default for AppConfig {
             naming_template: "{date}_{source}_{name}".to_string(),
             ffmpeg_path: "ffmpeg".to_string(),
             ffprobe_path: "ffprobe".to_string(),
-            delete_source_after_export: false,
+            after_export: AfterExportSettings::default(),
             output: OutputSettings::default(),
         }
     }
@@ -166,9 +200,33 @@ struct ExportProgress {
     line: String,
 }
 
+/// qlipq's data directory: a dotfolder in the user's home (`~/.com.qcksys.qlipq`).
+fn data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let home = app.path().home_dir().map_err(|e| e.to_string())?;
+    Ok(home.join(".com.qcksys.qlipq"))
+}
+
 fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join("config.json"))
+    Ok(data_dir(app)?.join("config.json"))
+}
+
+/// One-time move from the old Roaming AppData location to `~/.com.qcksys.qlipq`,
+/// so existing settings/edits survive the relocation.
+fn migrate_legacy_data(app: &AppHandle) {
+    let (Ok(new_dir), Ok(old_dir)) = (data_dir(app), app.path().app_config_dir()) else {
+        return;
+    };
+    if old_dir == new_dir {
+        return;
+    }
+    for name in ["config.json", "edits.json"] {
+        let new_path = new_dir.join(name);
+        let old_path = old_dir.join(name);
+        if !new_path.exists() && old_path.exists() {
+            let _ = std::fs::create_dir_all(&new_dir);
+            let _ = std::fs::copy(&old_path, &new_path);
+        }
+    }
 }
 
 #[tauri::command]
@@ -195,7 +253,15 @@ fn set_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    // Add a $schema reference so editors validate/autocomplete config.json.
+    let mut value = serde_json::to_value(&config).map_err(|e| e.to_string())?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "$schema".to_string(),
+            serde_json::Value::String("https://qlipq.com/schema/config.json".to_string()),
+        );
+    }
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     std::fs::write(&path, text).map_err(|e| e.to_string())
 }
 
@@ -212,7 +278,7 @@ fn read_app_file(app: AppHandle, name: String) -> Result<Option<String>, String>
     if name.contains(['/', '\\']) || name.contains("..") {
         return Err("invalid file name".into());
     }
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = data_dir(&app)?;
     match std::fs::read_to_string(dir.join(&name)) {
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -226,7 +292,7 @@ fn write_app_file(app: AppHandle, name: String, contents: String) -> Result<(), 
     if name.contains(['/', '\\']) || name.contains("..") {
         return Err("invalid file name".into());
     }
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = data_dir(&app)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(&name), contents).map_err(|e| e.to_string())
 }
@@ -429,8 +495,24 @@ fn rename_file(from: String, to: String) -> Result<String, String> {
     if from != to && Path::new(&to).exists() {
         return Err(format!("A file already exists at {to}"));
     }
-    std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
-    Ok(to)
+    if let Some(parent) = Path::new(&to).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    match std::fs::rename(&from, &to) {
+        Ok(()) => Ok(to),
+        // Cross-device move (e.g. to another drive): copy then remove the source.
+        Err(_) => {
+            std::fs::copy(&from, &to).map_err(|e| e.to_string())?;
+            std::fs::remove_file(&from).map_err(|e| e.to_string())?;
+            Ok(to)
+        }
+    }
+}
+
+/// Whether a file already exists at `path` (used to warn before overwriting on export).
+#[tauri::command]
+fn file_exists(path: String) -> bool {
+    Path::new(&path).is_file()
 }
 
 #[tauri::command]
@@ -542,6 +624,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(WatcherState::default())
+        .setup(|app| {
+            migrate_legacy_data(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_config,
             set_config,
@@ -549,6 +635,7 @@ pub fn run() {
             read_app_file,
             write_app_file,
             file_info,
+            file_exists,
             check_binary,
             scan_folders,
             read_obs_config,

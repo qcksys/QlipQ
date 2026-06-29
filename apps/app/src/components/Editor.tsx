@@ -25,10 +25,21 @@ import {
   parseProgress,
   progressFraction,
 } from "@qcksys/qlipq-ffmpeg";
+import { toast } from "sonner";
 import * as api from "../lib/api.ts";
-import { joinPath } from "../lib/queue.ts";
+import { basename, dirname, joinPath } from "../lib/queue.ts";
 import { AudioPanel } from "./AudioPanel.tsx";
 import { Timeline } from "./Timeline.tsx";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -41,6 +52,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+// Player position is remembered per file so reopening a clip resumes where you left off.
+const PLAYBACK_PREFIX = "qlipq.playback:";
 
 interface EditorProps {
   item: QueueItem;
@@ -65,6 +79,8 @@ export function Editor({ item, config, onPatch, audioDefaults, onAudioDefaults }
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState(0);
   const [newTag, setNewTag] = useState("");
+  const [overwriteTarget, setOverwriteTarget] = useState<string | null>(null);
+  const [afterPromptOpen, setAfterPromptOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   // Read via refs inside the probe effect so updating them doesn't re-probe.
@@ -183,12 +199,26 @@ export function Editor({ item, config, onPatch, audioDefaults, onAudioDefaults }
     if (videoRef.current) videoRef.current.currentTime = sec;
   };
 
+  const skip = (delta: number) => {
+    if (!media) return;
+    seek(Math.min(media.durationSec, Math.max(0, currentTime + delta)));
+  };
+
   const onExport = async () => {
     if (!media || validationError) return;
     const { name } = splitFileName(item.fileName);
     // Output container is chosen in settings, so override the source extension.
     const outName = buildExportName(config, item, name, output.container);
     const outputPath = joinPath(config.outputFolder, outName);
+    if (await api.fileExists(outputPath)) {
+      setOverwriteTarget(outputPath); // #6: confirm before clobbering
+      return;
+    }
+    void runExport(outputPath);
+  };
+
+  const runExport = async (outputPath: string) => {
+    if (!media) return;
     const { video, audio, reencode } = outputSettingsToEncode(output, media);
     const args = buildExportArgs({
       inputPath: item.path,
@@ -217,12 +247,40 @@ export function Editor({ item, config, onPatch, audioDefaults, onAudioDefaults }
       await api.runExport(item.id, config.ffmpegPath, args);
       setProgress(1);
       onPatch(item.id, { status: "done", exportPath: outputPath });
-      if (config.deleteSourceAfterExport) await api.deleteFile(item.path);
+      await applyAfterExport();
     } catch (err) {
       onPatch(item.id, { status: "error", error: String(err) });
     } finally {
       unlisten();
       setExporting(false);
+    }
+  };
+
+  // After a successful export, act on the ORIGINAL recording per settings.
+  const applyAfterExport = async () => {
+    if (config.afterExport.action === "prompt") {
+      setAfterPromptOpen(true);
+      return;
+    }
+    await runAfterAction(config.afterExport.action);
+  };
+
+  const runAfterAction = async (action: string) => {
+    try {
+      if (action === "delete") {
+        await api.deleteFile(item.path);
+      } else if (action === "move") {
+        let folder = config.afterExport.moveFolder;
+        if (!folder) folder = (await api.pickFolder()) ?? "";
+        if (folder) await api.renameFile(item.path, joinPath(folder, basename(item.path)));
+      } else if (action === "rename") {
+        const { name, ext } = splitFileName(item.fileName);
+        const renamed = `${config.afterExport.renamePrefix}${name}${config.afterExport.renameSuffix}${ext ? `.${ext}` : ""}`;
+        await api.renameFile(item.path, joinPath(dirname(item.path), renamed));
+      }
+    } catch (err) {
+      toast.error(`After-export ${action} failed`);
+      console.error("after-export failed", err);
     }
   };
 
@@ -254,8 +312,40 @@ export function Editor({ item, config, onPatch, audioDefaults, onAudioDefaults }
           className="max-h-[48vh] w-full"
           src={api.fileUrl(item.path)}
           controls
-          onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+          onLoadedMetadata={(e) => {
+            const saved = Number(localStorage.getItem(PLAYBACK_PREFIX + item.path) ?? 0);
+            if (saved > 0 && saved < e.currentTarget.duration) {
+              e.currentTarget.currentTime = saved;
+              setCurrentTime(saved);
+            }
+          }}
+          onTimeUpdate={(e) => {
+            const t = e.currentTarget.currentTime;
+            setCurrentTime(t);
+            localStorage.setItem(PLAYBACK_PREFIX + item.path, String(t));
+          }}
         />
+      </div>
+
+      <div className="flex items-center justify-center gap-1">
+        <Button variant="outline" size="xs" onClick={() => skip(-60)}>
+          −60s
+        </Button>
+        <Button variant="outline" size="xs" onClick={() => skip(-5)}>
+          −5s
+        </Button>
+        <Button variant="outline" size="xs" onClick={() => skip(-1)}>
+          −1s
+        </Button>
+        <Button variant="outline" size="xs" onClick={() => skip(1)}>
+          +1s
+        </Button>
+        <Button variant="outline" size="xs" onClick={() => skip(5)}>
+          +5s
+        </Button>
+        <Button variant="outline" size="xs" onClick={() => skip(60)}>
+          +60s
+        </Button>
       </div>
 
       <Timeline
@@ -438,8 +528,21 @@ export function Editor({ item, config, onPatch, audioDefaults, onAudioDefaults }
         </div>
         {validationError && <span className="text-sm text-destructive">{validationError}</span>}
         {exporting && <Progress className="min-w-40 flex-1" value={Math.round(progress * 100)} />}
+        {item.exportPath && !exporting && (
+          <Button
+            variant="outline"
+            className="ml-auto"
+            onClick={() => {
+              if (item.exportPath) {
+                api.revealInExplorer(item.exportPath).catch((err: unknown) => console.error(err));
+              }
+            }}
+          >
+            Show file
+          </Button>
+        )}
         <Button
-          className="ml-auto"
+          className={item.exportPath && !exporting ? "" : "ml-auto"}
           disabled={exporting || !!validationError || !config.outputFolder}
           onClick={onExport}
           title={!config.outputFolder ? "Set an output folder in Settings first" : undefined}
@@ -447,6 +550,80 @@ export function Editor({ item, config, onPatch, audioDefaults, onAudioDefaults }
           {exporting ? `Exporting ${Math.round(progress * 100)}%` : "Export clip"}
         </Button>
       </div>
+
+      <AlertDialog
+        open={overwriteTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setOverwriteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Overwrite existing file?</AlertDialogTitle>
+            <AlertDialogDescription>
+              A file already exists at {overwriteTarget}. Exporting will replace it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const target = overwriteTarget;
+                setOverwriteTarget(null);
+                if (target) void runExport(target);
+              }}
+            >
+              Overwrite
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={afterPromptOpen}
+        onOpenChange={(open) => {
+          if (!open) setAfterPromptOpen(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Export complete</AlertDialogTitle>
+            <AlertDialogDescription>
+              What should happen to the original recording?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep</AlertDialogCancel>
+            <AlertDialogAction
+              variant="outline"
+              onClick={() => {
+                setAfterPromptOpen(false);
+                void runAfterAction("rename");
+              }}
+            >
+              Rename
+            </AlertDialogAction>
+            <AlertDialogAction
+              variant="outline"
+              onClick={() => {
+                setAfterPromptOpen(false);
+                void runAfterAction("move");
+              }}
+            >
+              Move…
+            </AlertDialogAction>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                setAfterPromptOpen(false);
+                void runAfterAction("delete");
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
