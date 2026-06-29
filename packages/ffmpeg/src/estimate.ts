@@ -59,6 +59,9 @@ export function estimateExportSize(
 
   const base = BPP_AT_CRF23[video.codec ?? "libx264"] ?? BPP_AT_CRF23.libx264;
   const bpp = base * 2 ** ((23 - (video.crf ?? 20)) / 6);
-  const videoBytes = (outW * outH * outFps * bpp * duration) / 8;
+  let videoBps = outW * outH * outFps * bpp;
+  // Constrained VBR caps the bitrate, so the estimate can't exceed the cap.
+  if (video.maxrateKbps) videoBps = Math.min(videoBps, video.maxrateKbps * 1000);
+  const videoBytes = (videoBps * duration) / 8;
   return { bytes: videoBytes + audioBytes, approximate: true };
 }

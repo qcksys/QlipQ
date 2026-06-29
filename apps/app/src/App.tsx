@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type AppConfig,
+  type AudioTrackSpec,
   DEFAULT_CONFIG,
+  type EditSpec,
+  type OutputSettings,
   parseObsFilename,
   type QueueItem,
 } from "@qcksys/qlipq-core";
@@ -13,11 +16,33 @@ import { QueueList } from "./components/QueueList.tsx";
 import { RenameModal } from "./components/RenameModal.tsx";
 import * as api from "./lib/api.ts";
 import { basename, dirname, joinPath, queueItemFromPath, toPosixPath } from "./lib/queue.ts";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Toaster } from "@/components/ui/sonner";
 
 type View = "queue" | "settings";
+
+// Remembered after the first confirmed delete-from-disk so we don't keep asking.
+const DELETE_CONFIRMED_KEY = "qlipq.deleteConfirmed";
+
+// Per-file edit state persisted to disk (keyed by path) so trims, per-clip quality
+// overrides, and tags survive restarts.
+const EDITS_FILE = "edits.json";
+interface StoredEdit {
+  edit?: EditSpec;
+  outputOverride?: Partial<OutputSettings>;
+  tags?: string[];
+}
 
 /** Human-readable summary of a (re)scan: how many clips were newly queued. */
 function describeScan(added: number, scanned: number, folder?: string): string {
@@ -33,8 +58,11 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>("queue");
   const [renameTarget, setRenameTarget] = useState<QueueItem | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<QueueItem | null>(null);
   const [ready, setReady] = useState(false);
   const [presets, setPresets] = useState<api.CapturePresets>({});
+  const [audioDefaults, setAudioDefaults] = useState<AudioTrackSpec[]>([]);
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
 
   // Avoid duplicate queue entries for the same path (scan + watcher overlap).
   const knownPaths = useRef(new Set<string>());
@@ -43,6 +71,30 @@ export function App() {
   itemsRef.current = items;
   const configRef = useRef(config);
   configRef.current = config;
+  // Disk-backed per-file edit store (path -> edit/override/tags).
+  const editStore = useRef<Record<string, StoredEdit>>({});
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleSaveStore = useCallback(() => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      api
+        .writeAppFile(EDITS_FILE, JSON.stringify(editStore.current))
+        .catch((err: unknown) => console.error("save edits failed", err));
+    }, 500);
+  }, []);
+
+  const persistEntry = useCallback(
+    (path: string, patch: Partial<QueueItem>) => {
+      const next: StoredEdit = { ...editStore.current[path] };
+      if ("edit" in patch) next.edit = patch.edit;
+      if ("outputOverride" in patch) next.outputOverride = patch.outputOverride;
+      if ("tags" in patch) next.tags = patch.tags;
+      editStore.current[path] = next;
+      scheduleSaveStore();
+    },
+    [scheduleSaveStore],
+  );
 
   const patchByPath = useCallback((path: string, patch: Partial<QueueItem>) => {
     setItems((current) =>
@@ -118,9 +170,11 @@ export function App() {
       }
       if (fresh.length === 0) return 0;
       const roots = configRef.current.watchedFolders;
-      const additions = fresh.map((path) =>
-        queueItemFromPath(path, new Date().toISOString(), roots),
-      );
+      const additions = fresh.map((path) => {
+        const base = queueItemFromPath(path, new Date().toISOString(), roots);
+        const stored = editStore.current[path];
+        return stored ? { ...base, ...stored } : base;
+      });
       setItems((current) => [...additions, ...current]);
       void hydrateFileInfo(fresh);
       enqueueProbe(fresh);
@@ -144,6 +198,15 @@ export function App() {
     let unlisten: (() => void) | undefined;
     (async () => {
       setConfig(await api.getConfig());
+      // Load persisted per-file edits before the first scan so items hydrate from them.
+      const storeText = await api.readAppFile(EDITS_FILE).catch(() => null);
+      if (storeText) {
+        try {
+          editStore.current = JSON.parse(storeText);
+        } catch (err) {
+          console.error("edits.json parse failed", err);
+        }
+      }
       unlisten = await api.onFileAdded((path) => addPaths([path]));
       setReady(true);
       // Best-effort; detectCapturePresets resolves to {} if a source is unavailable.
@@ -190,9 +253,16 @@ export function App() {
     toast(describeScan(addPaths(found), found.length));
   }, [addPaths, config.watchedFolders, config.videoExtensions]);
 
-  const patchItem = useCallback((id: string, patch: Partial<QueueItem>) => {
-    setItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
-  }, []);
+  const patchItem = useCallback(
+    (id: string, patch: Partial<QueueItem>) => {
+      if ("edit" in patch || "outputOverride" in patch || "tags" in patch) {
+        const target = itemsRef.current.find((i) => i.id === id);
+        if (target) persistEntry(target.path, patch);
+      }
+      setItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    },
+    [persistEntry],
+  );
 
   const removeItem = (id: string) => {
     setItems((current) => {
@@ -201,6 +271,32 @@ export function App() {
       return current.filter((item) => item.id !== id);
     });
     if (selectedId === id) setSelectedId(null);
+  };
+
+  // Delete a clip from disk, then drop it from the queue. Confirmed once, then remembered.
+  const performDelete = async (item: QueueItem) => {
+    try {
+      await api.deleteFile(item.path);
+      removeItem(item.id);
+    } catch (err) {
+      toast.error(`Couldn't delete ${item.fileName}`);
+      console.error("delete failed", err);
+    }
+  };
+
+  const requestDelete = (item: QueueItem) => {
+    if (localStorage.getItem(DELETE_CONFIRMED_KEY) === "1") {
+      void performDelete(item);
+    } else {
+      setDeleteTarget(item);
+    }
+  };
+
+  const confirmDelete = () => {
+    if (!deleteTarget) return;
+    localStorage.setItem(DELETE_CONFIRMED_KEY, "1");
+    void performDelete(deleteTarget);
+    setDeleteTarget(null);
   };
 
   const confirmRename = async (newFileName: string) => {
@@ -228,6 +324,11 @@ export function App() {
 
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const pendingCount = items.filter((item) => item.status !== "done").length;
+  const allTags = Array.from(new Set(items.flatMap((item) => item.tags ?? []))).sort();
+  const visibleItems =
+    tagFilter && allTags.includes(tagFilter)
+      ? items.filter((item) => item.tags?.includes(tagFilter))
+      : items;
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
@@ -301,12 +402,34 @@ export function App() {
                 </Button>
               </div>
             )}
+            {allTags.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                <Button
+                  variant={tagFilter === null ? "secondary" : "ghost"}
+                  size="xs"
+                  onClick={() => setTagFilter(null)}
+                >
+                  All
+                </Button>
+                {allTags.map((tag) => (
+                  <Button
+                    key={tag}
+                    variant={tagFilter === tag ? "secondary" : "ghost"}
+                    size="xs"
+                    onClick={() => setTagFilter(tag)}
+                  >
+                    {tag}
+                  </Button>
+                ))}
+              </div>
+            )}
             <QueueList
-              items={items}
+              items={visibleItems}
               selectedId={selectedId}
               onSelect={setSelectedId}
               onRename={setRenameTarget}
               onRemove={removeItem}
+              onDelete={requestDelete}
             />
             {ready && items.length === 0 && config.watchedFolders.length === 0 && (
               <Button variant="link" className="mt-2" onClick={() => setView("settings")}>
@@ -316,7 +439,14 @@ export function App() {
           </aside>
           <section className="min-w-0 overflow-y-auto">
             {selected ? (
-              <Editor key={selected.id} item={selected} config={config} onPatch={patchItem} />
+              <Editor
+                key={selected.id}
+                item={selected}
+                config={config}
+                onPatch={patchItem}
+                audioDefaults={audioDefaults}
+                onAudioDefaults={setAudioDefaults}
+              />
             ) : (
               <div className="flex h-full items-center justify-center p-6">
                 <p className="text-sm text-muted-foreground">
@@ -336,6 +466,28 @@ export function App() {
           onConfirm={confirmRename}
         />
       )}
+      <AlertDialog
+        open={deleteTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this file from disk?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget?.fileName} will be permanently deleted from your drive. This can't be
+              undone. (You won't be asked again.)
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={confirmDelete}>
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <Toaster />
     </div>
   );

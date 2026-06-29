@@ -1,8 +1,8 @@
 /** Container extensions qlipq treats as editable video by default. */
 export const DEFAULT_VIDEO_EXTENSIONS = ["mp4", "mkv", "mov", "flv", "webm", "ts"] as const;
 
-/** How output video quality/bitrate is controlled. */
-export type QualityMode = "preset" | "crf" | "bitrate";
+/** How output video quality/bitrate is controlled. `vbr` = CRF capped by a max bitrate. */
+export type QualityMode = "preset" | "crf" | "bitrate" | "vbr";
 /** Named quality presets; `original` stream-copies when possible. */
 export type QualityPreset = "original" | "high" | "balanced" | "small";
 export type VideoCodecChoice = "libx264" | "libx265";

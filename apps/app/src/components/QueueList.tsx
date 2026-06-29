@@ -16,6 +16,7 @@ interface QueueListProps {
   onSelect: (id: string) => void;
   onRename: (item: QueueItem) => void;
   onRemove: (id: string) => void;
+  onDelete: (item: QueueItem) => void;
 }
 
 const STATUS_LABEL: Record<QueueStatus, string> = {
@@ -36,7 +37,14 @@ const STATUS_VARIANT: Record<QueueStatus, "default" | "secondary" | "destructive
   error: "destructive",
 };
 
-export function QueueList({ items, selectedId, onSelect, onRename, onRemove }: QueueListProps) {
+export function QueueList({
+  items,
+  selectedId,
+  onSelect,
+  onRename,
+  onRemove,
+  onDelete,
+}: QueueListProps) {
   if (items.length === 0) {
     return (
       <p className="p-4 text-sm text-muted-foreground">
@@ -76,6 +84,15 @@ export function QueueList({ items, selectedId, onSelect, onRename, onRemove }: Q
               </div>
               <Badge variant={STATUS_VARIANT[item.status]}>{STATUS_LABEL[item.status]}</Badge>
             </div>
+            {item.tags && item.tags.length > 0 && (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {item.tags.map((tag) => (
+                  <Badge key={tag} variant="outline">
+                    {tag}
+                  </Badge>
+                ))}
+              </div>
+            )}
             <div className="mt-2 flex gap-3">
               <Button
                 variant="link"
@@ -98,6 +115,17 @@ export function QueueList({ items, selectedId, onSelect, onRename, onRemove }: Q
                 }}
               >
                 Remove
+              </Button>
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0 text-destructive"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(item);
+                }}
+              >
+                Delete file
               </Button>
             </div>
           </li>

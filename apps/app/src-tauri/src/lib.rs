@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 // Allowed values for the enum-like config strings; shared by garde validation and
 // the repair pass so the "schema" lives in one place.
-const QUALITY_MODES: &[&str] = &["preset", "crf", "bitrate"];
+const QUALITY_MODES: &[&str] = &["preset", "crf", "bitrate", "vbr"];
 const QUALITY_PRESETS: &[&str] = &["original", "high", "balanced", "small"];
 const VIDEO_CODECS: &[&str] = &["libx264", "libx265"];
 const CONTAINERS: &[&str] = &["mp4", "mkv"];
@@ -205,6 +205,32 @@ fn config_file_path(app: AppHandle) -> Result<String, String> {
     Ok(config_path(&app)?.to_string_lossy().to_string())
 }
 
+/// Read a named file from the app config dir (e.g. `edits.json`). Returns `None` if
+/// it doesn't exist yet. `name` must be a bare filename (no path separators).
+#[tauri::command]
+fn read_app_file(app: AppHandle, name: String) -> Result<Option<String>, String> {
+    if name.contains(['/', '\\']) || name.contains("..") {
+        return Err("invalid file name".into());
+    }
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    match std::fs::read_to_string(dir.join(&name)) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Write a named file into the app config dir. `name` must be a bare filename.
+#[tauri::command]
+fn write_app_file(app: AppHandle, name: String, contents: String) -> Result<(), String> {
+    if name.contains(['/', '\\']) || name.contains("..") {
+        return Err("invalid file name".into());
+    }
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(&name), contents).map_err(|e| e.to_string())
+}
+
 /// Filesystem size + modified time for queue display. The `path` is echoed back
 /// verbatim so the frontend can match results to its (forward-slash) queue paths.
 #[derive(Serialize)]
@@ -348,6 +374,21 @@ fn read_nvidia_default_path() -> Option<String> {
     let trimmed = decoded.trim_end_matches('\0').trim();
 
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Run `<path> -version` to confirm ffmpeg/ffprobe is reachable. Returns the first
+/// line of output (the version banner) on success, or an error message.
+#[tauri::command]
+fn check_binary(path: String) -> Result<String, String> {
+    let output = hidden_command(&path)
+        .arg("-version")
+        .output()
+        .map_err(|e| format!("Not found ({path}): {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.lines().next().unwrap_or("").trim().to_string())
 }
 
 /// Build a Command, hiding the console window on Windows.
@@ -505,7 +546,10 @@ pub fn run() {
             get_config,
             set_config,
             config_file_path,
+            read_app_file,
+            write_app_file,
             file_info,
+            check_binary,
             scan_folders,
             read_obs_config,
             detect_nvidia_recording_dir,

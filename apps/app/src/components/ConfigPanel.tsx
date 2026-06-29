@@ -6,7 +6,7 @@ import type {
   QualityPreset,
   VideoCodecChoice,
 } from "@qcksys/qlipq-core";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import type { CapturePresets } from "../lib/api.ts";
 import * as api from "../lib/api.ts";
 import { Button } from "@/components/ui/button";
@@ -63,7 +63,23 @@ interface ConfigPanelProps {
   onReprocess: (folder: string) => void;
 }
 
+interface BinaryStatus {
+  ok: boolean;
+  message: string;
+}
+
 export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPanelProps) {
+  const [tests, setTests] = useState<{ ffmpeg?: BinaryStatus; ffprobe?: BinaryStatus }>({});
+
+  const runTest = async (which: "ffmpeg" | "ffprobe", path: string) => {
+    setTests((t) => ({ ...t, [which]: { ok: true, message: "Testing…" } }));
+    try {
+      const version = await api.checkBinary(path);
+      setTests((t) => ({ ...t, [which]: { ok: true, message: version || "OK" } }));
+    } catch (err) {
+      setTests((t) => ({ ...t, [which]: { ok: false, message: String(err) } }));
+    }
+  };
   const addWatchedFolder = (folder: string) => {
     if (!config.watchedFolders.includes(folder)) {
       onChange({ watchedFolders: [...config.watchedFolders, folder] });
@@ -189,6 +205,7 @@ export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPa
               <SelectContent>
                 <SelectItem value="preset">Preset</SelectItem>
                 <SelectItem value="crf">Custom quality (CRF)</SelectItem>
+                <SelectItem value="vbr">VBR (quality + max bitrate)</SelectItem>
                 <SelectItem value="bitrate">Target bitrate</SelectItem>
               </SelectContent>
             </Select>
@@ -213,7 +230,7 @@ export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPa
             </Field>
           )}
 
-          {out.qualityMode === "crf" && (
+          {(out.qualityMode === "crf" || out.qualityMode === "vbr") && (
             <Field label="CRF (0–51, lower is better)">
               <Input
                 type="number"
@@ -225,8 +242,10 @@ export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPa
             </Field>
           )}
 
-          {out.qualityMode === "bitrate" && (
-            <Field label="Video bitrate (kbps)">
+          {(out.qualityMode === "bitrate" || out.qualityMode === "vbr") && (
+            <Field
+              label={out.qualityMode === "vbr" ? "Max bitrate (kbps)" : "Video bitrate (kbps)"}
+            >
               <Input
                 type="number"
                 min={100}
@@ -353,19 +372,53 @@ export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPa
         </p>
       </Section>
 
-      <Section title="ffmpeg">
-        <Field label="ffmpeg path">
-          <Input
-            value={config.ffmpegPath}
-            onChange={(e) => onChange({ ffmpegPath: e.target.value })}
-          />
-        </Field>
-        <Field label="ffprobe path">
-          <Input
-            value={config.ffprobePath}
-            onChange={(e) => onChange({ ffprobePath: e.target.value })}
-          />
-        </Field>
+      <Section title="FFmpeg">
+        <p className="text-xs text-muted-foreground">
+          QlipQ needs <code>ffmpeg</code> and <code>ffprobe</code> on your PATH (or set full paths
+          below). On Windows: <code>winget install Gyan.FFmpeg</code>, then restart QlipQ.
+        </p>
+        <div className="flex items-end gap-2">
+          <Field label="ffmpeg path">
+            <Input
+              value={config.ffmpegPath}
+              onChange={(e) => onChange({ ffmpegPath: e.target.value })}
+            />
+          </Field>
+          <Button variant="outline" size="sm" onClick={() => runTest("ffmpeg", config.ffmpegPath)}>
+            Test
+          </Button>
+        </div>
+        {tests.ffmpeg && (
+          <p
+            className={`text-xs ${tests.ffmpeg.ok ? "text-muted-foreground" : "text-destructive"}`}
+          >
+            {tests.ffmpeg.ok ? "✓ " : "✗ "}
+            {tests.ffmpeg.message}
+          </p>
+        )}
+        <div className="flex items-end gap-2">
+          <Field label="ffprobe path">
+            <Input
+              value={config.ffprobePath}
+              onChange={(e) => onChange({ ffprobePath: e.target.value })}
+            />
+          </Field>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => runTest("ffprobe", config.ffprobePath)}
+          >
+            Test
+          </Button>
+        </div>
+        {tests.ffprobe && (
+          <p
+            className={`text-xs ${tests.ffprobe.ok ? "text-muted-foreground" : "text-destructive"}`}
+          >
+            {tests.ffprobe.ok ? "✓ " : "✗ "}
+            {tests.ffprobe.message}
+          </p>
+        )}
         <label className="flex items-center gap-2 text-sm">
           <Switch
             checked={config.deleteSourceAfterExport}

@@ -5,6 +5,8 @@ export interface VideoEncodeOptions {
   crf?: number;
   /** Target video bitrate in kbps. When set, takes precedence over {@link crf}. */
   bitrateKbps?: number;
+  /** Max bitrate cap (kbps) for constrained-VBR: pairs with {@link crf} via -maxrate/-bufsize. */
+  maxrateKbps?: number;
   preset?: string;
   /** Output frame rate; when set, forces a re-encode. */
   fps?: number;
@@ -75,6 +77,10 @@ export function outputSettingsToEncode(output: OutputSettings, media: MediaInfo)
   if (output.qualityMode === "bitrate") {
     video.bitrateKbps = output.videoBitrateKbps;
     reencode = true;
+  } else if (output.qualityMode === "vbr") {
+    video.crf = output.crf;
+    video.maxrateKbps = output.videoBitrateKbps;
+    reencode = true;
   } else if (output.qualityMode === "crf") {
     video.crf = output.crf;
     reencode = true;
@@ -109,6 +115,7 @@ export function buildExportArgs(opts: BuildExportOptions): string[] {
     crf: opts.video?.crf ?? 20,
     preset: opts.video?.preset ?? "veryfast",
     bitrateKbps: opts.video?.bitrateKbps,
+    maxrateKbps: opts.video?.maxrateKbps,
     fps: opts.video?.fps,
     scaleHeight: opts.video?.scaleHeight,
   };
@@ -172,8 +179,15 @@ export function buildExportArgs(opts: BuildExportOptions): string[] {
 
   if (videoReencode) {
     args.push("-c:v", video.codec, "-preset", video.preset);
-    if (video.bitrateKbps) args.push("-b:v", `${video.bitrateKbps}k`);
-    else args.push("-crf", String(video.crf));
+    if (video.bitrateKbps) {
+      args.push("-b:v", `${video.bitrateKbps}k`);
+    } else {
+      args.push("-crf", String(video.crf));
+      // Constrained VBR: cap the bitrate while keeping CRF quality.
+      if (video.maxrateKbps) {
+        args.push("-maxrate", `${video.maxrateKbps}k`, "-bufsize", `${video.maxrateKbps * 2}k`);
+      }
+    }
     if (video.fps) args.push("-r", String(video.fps));
   } else {
     args.push("-c:v", "copy");

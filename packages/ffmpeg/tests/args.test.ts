@@ -117,6 +117,16 @@ test("custom encoder options are honoured", () => {
   expect(joined).toContain("-c:a libopus -b:a 96k");
 });
 
+test("metadata stamps -metadata entries before the output", () => {
+  const out = args(
+    { audioTracks: [{ index: 0, enabled: true, volume: 1 }] },
+    { metadata: { game: "Deadlock" } },
+  );
+  const joined = out.join(" ");
+  expect(joined).toContain("-metadata game=Deadlock");
+  expect(out.indexOf("-metadata")).toBeLessThan(out.indexOf("out.mp4"));
+});
+
 test("frame rate change re-encodes and emits -r without a filter", () => {
   const out = args(
     { audioTracks: [{ index: 0, enabled: true, volume: 1 }] },
@@ -191,6 +201,24 @@ test("outputSettingsToEncode: bitrate mode sets bitrateKbps", () => {
   );
   expect(r.video.bitrateKbps).toBe(5000);
   expect(r.reencode).toBe(true);
+});
+
+test("outputSettingsToEncode: vbr maps to crf + maxrate cap", () => {
+  const r = outputSettingsToEncode(
+    settings({ qualityMode: "vbr", crf: 22, videoBitrateKbps: 9000 }),
+    MEDIA,
+  );
+  expect(r.video.crf).toBe(22);
+  expect(r.video.maxrateKbps).toBe(9000);
+  expect(r.reencode).toBe(true);
+  const out = args(
+    { audioTracks: [{ index: 0, enabled: true, volume: 1 }] },
+    { reencode: true, video: r.video },
+  );
+  const joined = out.join(" ");
+  expect(joined).toContain("-crf 22");
+  expect(joined).toContain("-maxrate 9000k");
+  expect(joined).toContain("-bufsize 18000k");
 });
 
 test("outputSettingsToEncode: fps/maxHeight clamp against the source (no up-rate/up-scale)", () => {

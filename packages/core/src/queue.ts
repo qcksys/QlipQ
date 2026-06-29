@@ -1,3 +1,4 @@
+import type { OutputSettings } from "./config.ts";
 import type { EditSpec } from "./edit-spec.ts";
 import type { MediaInfo } from "./media.ts";
 
@@ -27,6 +28,10 @@ export interface QueueItem {
   durationSec?: number;
   /** Working edit spec, persisted so re-opening a clip restores progress. */
   edit?: EditSpec;
+  /** Per-clip output overrides (quality), merged over the global defaults on export. */
+  outputOverride?: Partial<OutputSettings>;
+  /** Free-form labels for filtering the queue. */
+  tags?: string[];
   /** Where the last successful export was written. */
   exportPath?: string;
   error?: string;

@@ -36,6 +36,20 @@ export function fileInfo(paths: string[]): Promise<FileInfo[]> {
   return invoke<FileInfo[]>("file_info", { paths });
 }
 
+/** Run `<path> -version`; resolves to the version banner, rejects if not runnable. */
+export function checkBinary(path: string): Promise<string> {
+  return invoke<string>("check_binary", { path });
+}
+
+/** Read a named file from the app data dir (null if absent). */
+export function readAppFile(name: string): Promise<string | null> {
+  return invoke<string | null>("read_app_file", { name });
+}
+
+export function writeAppFile(name: string, contents: string): Promise<void> {
+  return invoke("write_app_file", { name, contents });
+}
+
 /** List existing video files in the given folders and all their subfolders. */
 export function scanFolders(folders: string[], extensions: string[]): Promise<string[]> {
   return invoke<string[]>("scan_folders", { folders, extensions });
