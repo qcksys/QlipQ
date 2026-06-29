@@ -1,6 +1,7 @@
 import { expect, test } from "vite-plus/test";
-import type { EditSpec } from "@qcksys/qlipq-core";
-import { buildExportArgs } from "../src/args.ts";
+import type { EditSpec, MediaInfo, OutputSettings } from "@qcksys/qlipq-core";
+import { DEFAULT_OUTPUT_SETTINGS } from "@qcksys/qlipq-core";
+import { buildExportArgs, outputSettingsToEncode } from "../src/args.ts";
 
 const io = { inputPath: "in.mkv", outputPath: "out.mp4" };
 
@@ -114,4 +115,89 @@ test("custom encoder options are honoured", () => {
   const joined = out.join(" ");
   expect(joined).toContain("-c:v libx265 -preset fast -crf 28");
   expect(joined).toContain("-c:a libopus -b:a 96k");
+});
+
+test("frame rate change re-encodes and emits -r without a filter", () => {
+  const out = args(
+    { audioTracks: [{ index: 0, enabled: true, volume: 1 }] },
+    { video: { fps: 30 } },
+  );
+  const joined = out.join(" ");
+  expect(joined).toContain("-c:v libx264");
+  expect(joined).toContain("-r 30");
+  expect(out).not.toContain("-filter_complex");
+  expect(joined).toContain("-c:a copy");
+});
+
+test("downscale builds a scale filter and re-encodes", () => {
+  const out = args(
+    { audioTracks: [{ index: 0, enabled: true, volume: 1 }] },
+    { video: { scaleHeight: 720 } },
+  );
+  const joined = out.join(" ");
+  expect(joined).toContain("-filter_complex [0:v:0]scale=-2:720[vout]");
+  expect(joined).toContain("-map [vout]");
+  expect(joined).toContain("-c:v libx264");
+});
+
+test("crop and downscale compose into one filter chain", () => {
+  const out = args(
+    { crop: { x: 0, y: 0, width: 1920, height: 1080 }, audioTracks: [] },
+    { video: { scaleHeight: 720 } },
+  );
+  expect(out.join(" ")).toContain("[0:v:0]crop=1920:1080:0:0,scale=-2:720[vout]");
+});
+
+test("bitrate rate-control uses -b:v instead of -crf", () => {
+  const out = args(
+    { audioTracks: [{ index: 0, enabled: true, volume: 1 }] },
+    { reencode: true, video: { bitrateKbps: 6000 } },
+  );
+  const joined = out.join(" ");
+  expect(joined).toContain("-b:v 6000k");
+  expect(joined).not.toContain("-crf");
+});
+
+const MEDIA: MediaInfo = {
+  durationSec: 60,
+  width: 2560,
+  height: 1440,
+  videoCodec: "h264",
+  fps: 60,
+  audioStreams: [],
+};
+
+function settings(over: Partial<OutputSettings>): OutputSettings {
+  return { ...DEFAULT_OUTPUT_SETTINGS, ...over };
+}
+
+test("outputSettingsToEncode: original preset is a stream copy", () => {
+  const r = outputSettingsToEncode(settings({ qualityPreset: "original" }), MEDIA);
+  expect(r.reencode).toBe(false);
+});
+
+test("outputSettingsToEncode: named presets map to CRF and force re-encode", () => {
+  expect(outputSettingsToEncode(settings({ qualityPreset: "high" }), MEDIA).video.crf).toBe(18);
+  expect(outputSettingsToEncode(settings({ qualityPreset: "balanced" }), MEDIA).video.crf).toBe(23);
+  const small = outputSettingsToEncode(settings({ qualityPreset: "small" }), MEDIA);
+  expect(small.video.crf).toBe(28);
+  expect(small.reencode).toBe(true);
+});
+
+test("outputSettingsToEncode: bitrate mode sets bitrateKbps", () => {
+  const r = outputSettingsToEncode(
+    settings({ qualityMode: "bitrate", videoBitrateKbps: 5000 }),
+    MEDIA,
+  );
+  expect(r.video.bitrateKbps).toBe(5000);
+  expect(r.reencode).toBe(true);
+});
+
+test("outputSettingsToEncode: fps/maxHeight clamp against the source (no up-rate/up-scale)", () => {
+  const up = outputSettingsToEncode(settings({ fps: 120, maxHeight: 2160 }), MEDIA);
+  expect(up.video.fps).toBeUndefined();
+  expect(up.video.scaleHeight).toBeUndefined();
+  const down = outputSettingsToEncode(settings({ fps: 30, maxHeight: 1080 }), MEDIA);
+  expect(down.video.fps).toBe(30);
+  expect(down.video.scaleHeight).toBe(1080);
 });

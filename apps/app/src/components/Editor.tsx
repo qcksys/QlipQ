@@ -6,6 +6,7 @@ import {
   defaultEditSpec,
   type EditSpec,
   effectiveDuration,
+  formatBytes,
   formatDuration,
   type MediaInfo,
   type QueueItem,
@@ -14,6 +15,8 @@ import {
 } from "@qcksys/qlipq-core";
 import {
   buildExportArgs,
+  estimateExportSize,
+  outputSettingsToEncode,
   parseFfprobe,
   parseProgress,
   progressFraction,
@@ -22,6 +25,10 @@ import * as api from "../lib/api.ts";
 import { joinPath } from "../lib/queue.ts";
 import { AudioPanel } from "./AudioPanel.tsx";
 import { Timeline } from "./Timeline.tsx";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Progress } from "@/components/ui/progress";
 
 interface EditorProps {
   item: QueueItem;
@@ -72,6 +79,12 @@ export function Editor({ item, config, onPatch }: EditorProps) {
     [spec, media],
   );
 
+  const estimate = useMemo(
+    () =>
+      media ? estimateExportSize(media, spec, outputSettingsToEncode(config.output, media)) : null,
+    [media, spec, config.output],
+  );
+
   const setCrop = (crop: CropSpec | undefined) => setSpec((s) => ({ ...s, crop }));
 
   const toggleCrop = (enabled: boolean) => {
@@ -91,10 +104,20 @@ export function Editor({ item, config, onPatch }: EditorProps) {
 
   const onExport = async () => {
     if (!media || validationError) return;
-    const { name, ext } = splitFileName(item.fileName);
-    const outName = buildExportName(config, item, name, ext);
+    const { name } = splitFileName(item.fileName);
+    // Output container is chosen in settings, so override the source extension.
+    const outName = buildExportName(config, item, name, config.output.container);
     const outputPath = joinPath(config.outputFolder, outName);
-    const args = buildExportArgs({ inputPath: item.path, outputPath, spec, progress: true });
+    const { video, audio, reencode } = outputSettingsToEncode(config.output, media);
+    const args = buildExportArgs({
+      inputPath: item.path,
+      outputPath,
+      spec,
+      progress: true,
+      video,
+      audio,
+      reencode,
+    });
 
     setExporting(true);
     setProgress(0);
@@ -122,27 +145,30 @@ export function Editor({ item, config, onPatch }: EditorProps) {
 
   if (loadError) {
     return (
-      <div className="editor empty">
-        <p className="error">Could not read this clip.</p>
-        <pre className="error-detail">{loadError}</pre>
+      <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+        <p className="text-sm font-medium text-destructive">Could not read this clip.</p>
+        <pre className="max-w-full overflow-auto rounded-lg bg-muted p-3 text-left text-xs text-muted-foreground">
+          {loadError}
+        </pre>
       </div>
     );
   }
 
   if (!media) {
     return (
-      <div className="editor empty">
-        <p className="muted">Reading clip…</p>
+      <div className="flex h-full items-center justify-center p-6">
+        <p className="text-sm text-muted-foreground">Reading clip…</p>
       </div>
     );
   }
 
   return (
-    <div className="editor">
-      <div className="preview">
+    <div className="flex flex-col gap-4 p-4">
+      <div className="overflow-hidden rounded-xl border border-border bg-black">
         {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
         <video
           ref={videoRef}
+          className="max-h-[48vh] w-full"
           src={api.fileUrl(item.path)}
           controls
           onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
@@ -157,19 +183,18 @@ export function Editor({ item, config, onPatch }: EditorProps) {
         onSeek={seek}
       />
 
-      <div className="edit-grid">
-        <section className="panel">
-          <h3>Crop</h3>
-          <label className="inline">
-            <input
-              type="checkbox"
+      <div className="grid gap-4 md:grid-cols-2">
+        <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4">
+          <h3 className="text-sm font-semibold">Crop</h3>
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
               checked={!!spec.crop}
-              onChange={(e) => toggleCrop(e.target.checked)}
+              onCheckedChange={(checked) => toggleCrop(checked === true)}
             />
             Enable crop ({media.width}×{media.height} source)
           </label>
           {spec.crop && (
-            <div className="crop-grid">
+            <div className="grid grid-cols-2 gap-3">
               <NumberField
                 label="X"
                 value={spec.crop.x}
@@ -198,8 +223,8 @@ export function Editor({ item, config, onPatch }: EditorProps) {
           )}
         </section>
 
-        <section className="panel">
-          <h3>Audio tracks</h3>
+        <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4">
+          <h3 className="text-sm font-semibold">Audio tracks</h3>
           <AudioPanel
             streams={media.audioStreams}
             tracks={spec.audioTracks}
@@ -208,26 +233,31 @@ export function Editor({ item, config, onPatch }: EditorProps) {
         </section>
       </div>
 
-      <div className="export-bar">
-        <div className="export-summary">
-          <strong>{formatDuration(effectiveDuration(spec, media))}</strong> output ·{" "}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4">
+        <div className="text-sm text-muted-foreground">
+          <strong className="text-foreground">
+            {formatDuration(effectiveDuration(spec, media))}
+          </strong>{" "}
+          output ·{" "}
           {spec.crop ? `${spec.crop.width}×${spec.crop.height}` : `${media.width}×${media.height}`}
+          {estimate && (
+            <>
+              {" · "}
+              {estimate.approximate ? "≈" : ""}
+              {formatBytes(estimate.bytes)}
+            </>
+          )}
         </div>
-        {validationError && <span className="error">{validationError}</span>}
-        {exporting && (
-          <div className="progress">
-            <div className="progress-fill" style={{ width: `${Math.round(progress * 100)}%` }} />
-          </div>
-        )}
-        <button
-          type="button"
-          className="primary"
+        {validationError && <span className="text-sm text-destructive">{validationError}</span>}
+        {exporting && <Progress className="min-w-40 flex-1" value={Math.round(progress * 100)} />}
+        <Button
+          className="ml-auto"
           disabled={exporting || !!validationError || !config.outputFolder}
           onClick={onExport}
           title={!config.outputFolder ? "Set an output folder in Settings first" : undefined}
         >
           {exporting ? `Exporting ${Math.round(progress * 100)}%` : "Export clip"}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -253,9 +283,9 @@ interface NumberFieldProps {
 
 function NumberField({ label, value, max, onChange }: NumberFieldProps) {
   return (
-    <label className="number-field">
+    <label className="flex flex-col gap-1 text-xs text-muted-foreground">
       {label}
-      <input
+      <Input
         type="number"
         min={0}
         max={max}

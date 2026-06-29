@@ -1,4 +1,6 @@
 import { formatDuration, type TrimSpec } from "@qcksys/qlipq-core";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 interface TimelineProps {
   duration: number;
@@ -26,15 +28,19 @@ export function Timeline({ duration, trim, currentTime, onChange, onSeek }: Time
   const playPct = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
-    <div className="timeline">
-      <div className="timeline-track">
+    <div className="flex flex-col gap-3">
+      <div className="relative h-6">
+        <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-muted" />
         <div
-          className="timeline-selection"
+          className="absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-primary/50"
           style={{ left: `${startPct}%`, right: `${100 - endPct}%` }}
         />
-        <div className="timeline-playhead" style={{ left: `${playPct}%` }} />
+        <div
+          className="absolute top-0 h-full w-0.5 bg-foreground"
+          style={{ left: `${playPct}%` }}
+        />
         <input
-          className="timeline-scrub"
+          className="absolute inset-0 w-full cursor-pointer appearance-none bg-transparent"
           type="range"
           min={0}
           max={duration || 0}
@@ -45,11 +51,12 @@ export function Timeline({ duration, trim, currentTime, onChange, onSeek }: Time
         />
       </div>
 
-      <div className="trim-row">
-        <label>
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
           In
-          <input
+          <Input
             type="number"
+            className="w-24"
             min={0}
             max={duration}
             step={0.1}
@@ -57,17 +64,20 @@ export function Timeline({ duration, trim, currentTime, onChange, onSeek }: Time
             onChange={(e) => setStart(Number(e.target.value))}
           />
         </label>
-        <button type="button" onClick={() => setStart(currentTime)}>
+        <Button variant="outline" size="sm" onClick={() => setStart(currentTime)}>
           Set in at playhead
-        </button>
-        <span className="trim-length">{formatDuration(trim.endSec - trim.startSec)}</span>
-        <button type="button" onClick={() => setEnd(currentTime)}>
+        </Button>
+        <span className="text-sm font-medium tabular-nums">
+          {formatDuration(trim.endSec - trim.startSec)}
+        </span>
+        <Button variant="outline" size="sm" onClick={() => setEnd(currentTime)}>
           Set out at playhead
-        </button>
-        <label>
+        </Button>
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
           Out
-          <input
+          <Input
             type="number"
+            className="w-24"
             min={0}
             max={duration}
             step={0.1}

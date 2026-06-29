@@ -20,6 +20,41 @@ struct AppConfig {
     ffmpeg_path: String,
     ffprobe_path: String,
     delete_source_after_export: bool,
+    output: OutputSettings,
+}
+
+/// Mirrors `@qcksys/qlipq-core`'s `OutputSettings`. The frontend builds ffmpeg args
+/// from these; Rust only round-trips them so they survive a config save.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct OutputSettings {
+    quality_mode: String,
+    quality_preset: String,
+    crf: u32,
+    video_bitrate_kbps: u32,
+    encoder_preset: String,
+    video_codec: String,
+    container: String,
+    fps: u32,
+    max_height: u32,
+    audio_bitrate_kbps: u32,
+}
+
+impl Default for OutputSettings {
+    fn default() -> Self {
+        Self {
+            quality_mode: "preset".to_string(),
+            quality_preset: "original".to_string(),
+            crf: 20,
+            video_bitrate_kbps: 8000,
+            encoder_preset: "veryfast".to_string(),
+            video_codec: "libx264".to_string(),
+            container: "mp4".to_string(),
+            fps: 0,
+            max_height: 0,
+            audio_bitrate_kbps: 192,
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -35,6 +70,7 @@ impl Default for AppConfig {
             ffmpeg_path: "ffmpeg".to_string(),
             ffprobe_path: "ffprobe".to_string(),
             delete_source_after_export: false,
+            output: OutputSettings::default(),
         }
     }
 }

@@ -2,8 +2,11 @@ import { type AppConfig, detectObsRecordingFolder, type ObsConfigFiles } from "@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { toPosixPath } from "./queue.ts";
+
+/** Public repository URL, used by the in-app GitHub link. */
+export const REPO_URL = "https://github.com/qcksys/qlipq";
 
 /** Load persisted configuration (merged with defaults on the Rust side). */
 export function getConfig(): Promise<AppConfig> {
@@ -103,6 +106,11 @@ export function revealInExplorer(path: string): Promise<void> {
 
 export function openInDefaultApp(path: string): Promise<void> {
   return openPath(path);
+}
+
+/** Open a URL in the user's default browser. */
+export function openExternal(url: string): Promise<void> {
+  return openUrl(url);
 }
 
 export interface ExportProgressEvent {

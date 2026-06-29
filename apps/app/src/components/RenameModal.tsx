@@ -1,5 +1,15 @@
 import { useState } from "react";
 import { buildRenamedFileName, type QueueItem, splitFileName } from "@qcksys/qlipq-core";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 
 interface RenameModalProps {
   item: QueueItem;
@@ -31,36 +41,39 @@ export function RenameModal({ item, namingTemplate, onCancel, onConfirm }: Renam
   };
 
   return (
-    <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>Rename recording</h3>
-        <p className="muted small">{item.fileName}</p>
-        <div className="row">
-          <input
-            type="text"
-            value={value}
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Rename recording</DialogTitle>
+          <DialogDescription className="truncate">{item.fileName}</DialogDescription>
+        </DialogHeader>
+        <div className="flex items-center gap-2">
+          <Input
             autoFocus
+            value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") submit();
               if (e.key === "Escape") onCancel();
             }}
           />
-          <span className="ext-suffix">.{ext}</span>
+          {ext && <span className="text-sm whitespace-nowrap text-muted-foreground">.{ext}</span>}
         </div>
-        <div className="modal-actions">
-          <button type="button" className="link" onClick={suggest}>
+        <DialogFooter>
+          <Button variant="ghost" onClick={suggest} className="sm:mr-auto">
             Use template
-          </button>
-          <span className="spacer" />
-          <button type="button" onClick={onCancel}>
+          </Button>
+          <Button variant="outline" onClick={onCancel}>
             Cancel
-          </button>
-          <button type="button" className="primary" onClick={submit}>
-            Rename
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+          <Button onClick={submit}>Rename</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,14 +1,14 @@
 ---
 import Base from "../layouts/Base.astro";
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
-const repo = "https://github.com/tomalle/qlipq";
+const repo = "https://github.com/qcksys/qlipq";
 ---
 
-<Base title="Download QlipQ" description="Download QlipQ for Windows, macOS, and Linux.">
+<Base title="Download QlipQ" description="Download QlipQ for Windows.">
   <h1>Download QlipQ</h1>
   <p class="lead" style="color:var(--muted)">
-    QlipQ is a small desktop app built with Tauri. Grab the latest build for your platform from the
-    releases page.
+    QlipQ is a small desktop app built with Tauri. <strong>Windows only</strong> for now — grab the
+    latest build from the releases page.
   </p>
 
   <div class="platforms">
@@ -17,21 +17,12 @@ const repo = "https://github.com/tomalle/qlipq";
       <p>Windows 10/11 (x64). <code>.msi</code> / <code>.exe</code> installer.</p>
       <p style="margin-top:14px"><a class="btn" href={`${repo}/releases/latest`}>Latest release</a></p>
     </div>
-    <div class="card">
-      <h3>macOS</h3>
-      <p>Apple Silicon &amp; Intel. <code>.dmg</code> bundle.</p>
-      <p style="margin-top:14px"><a class="btn" href={`${repo}/releases/latest`}>Latest release</a></p>
-    </div>
-    <div class="card">
-      <h3>Linux</h3>
-      <p><code>.AppImage</code> and <code>.deb</code> packages.</p>
-      <p style="margin-top:14px"><a class="btn" href={`${repo}/releases/latest`}>Latest release</a></p>
-    </div>
   </div>
 
   <div class="callout">
-    <strong>Heads up:</strong> QlipQ calls <code>ffmpeg</code> and <code>ffprobe</code>. Install
-    FFmpeg and make sure it is on your <code>PATH</code>, or set the paths in QlipQ's settings.
+    <strong>Heads up:</strong> QlipQ is powered by <a href="https://ffmpeg.org">FFmpeg</a> — it calls
+    <code>ffmpeg</code> and <code>ffprobe</code>. Install FFmpeg and make sure it is on your
+    <code>PATH</code>, or set the paths in QlipQ's settings.
   </div>
 
   <p>

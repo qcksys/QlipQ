@@ -1,4 +1,6 @@
 import { type AudioStreamInfo, audioStreamLabel, type AudioTrackSpec } from "@qcksys/qlipq-core";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Slider } from "@/components/ui/slider";
 
 interface AudioPanelProps {
   streams: AudioStreamInfo[];
@@ -9,7 +11,7 @@ interface AudioPanelProps {
 /** Per-track enable toggle and volume slider (linear gain, shown as a percentage). */
 export function AudioPanel({ streams, tracks, onChange }: AudioPanelProps) {
   if (streams.length === 0) {
-    return <p className="muted">No audio tracks in this clip.</p>;
+    return <p className="text-sm text-muted-foreground">No audio tracks in this clip.</p>;
   }
 
   const update = (index: number, patch: Partial<AudioTrackSpec>) => {
@@ -17,35 +19,39 @@ export function AudioPanel({ streams, tracks, onChange }: AudioPanelProps) {
   };
 
   return (
-    <ul className="audio-list">
+    <ul className="flex flex-col gap-3">
       {streams.map((stream) => {
         const track = tracks.find((t) => t.index === stream.index);
         if (!track) return null;
+        const label = audioStreamLabel(stream);
         return (
-          <li key={stream.index} className="audio-track">
-            <label className="audio-enable">
-              <input
-                type="checkbox"
+          <li key={stream.index} className="flex flex-col gap-2">
+            <label className="flex items-center gap-2">
+              <Checkbox
                 checked={track.enabled}
-                onChange={(e) => update(stream.index, { enabled: e.target.checked })}
+                onCheckedChange={(checked) => update(stream.index, { enabled: checked === true })}
               />
-              <span>{audioStreamLabel(stream)}</span>
-              <span className="muted small">
+              <span className="text-sm font-medium">{label}</span>
+              <span className="text-xs text-muted-foreground">
                 {stream.codec} · {stream.channels}ch
               </span>
             </label>
-            <div className="audio-volume">
-              <input
-                type="range"
+            <div className="flex items-center gap-3 pl-6">
+              <Slider
+                className="flex-1"
                 min={0}
                 max={2}
                 step={0.05}
-                value={track.volume}
+                value={[track.volume]}
                 disabled={!track.enabled}
-                onChange={(e) => update(stream.index, { volume: Number(e.target.value) })}
-                aria-label={`${audioStreamLabel(stream)} volume`}
+                onValueChange={(value) =>
+                  update(stream.index, { volume: Array.isArray(value) ? value[0] : value })
+                }
+                aria-label={`${label} volume`}
               />
-              <span className="volume-value">{Math.round(track.volume * 100)}%</span>
+              <span className="w-10 text-right text-xs text-muted-foreground tabular-nums">
+                {Math.round(track.volume * 100)}%
+              </span>
             </div>
           </li>
         );
