@@ -4,40 +4,120 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
+use garde::Validate;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DefaultOnError};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+// Allowed values for the enum-like config strings; shared by garde validation and
+// the repair pass so the "schema" lives in one place.
+const QUALITY_MODES: &[&str] = &["preset", "crf", "bitrate"];
+const QUALITY_PRESETS: &[&str] = &["original", "high", "balanced", "small"];
+const VIDEO_CODECS: &[&str] = &["libx264", "libx265"];
+const CONTAINERS: &[&str] = &["mp4", "mkv"];
+
+/// garde custom validator: value must be one of `allowed`.
+fn one_of(allowed: &'static [&'static str]) -> impl Fn(&String, &()) -> garde::Result {
+    move |value, _| {
+        if allowed.contains(&value.as_str()) {
+            Ok(())
+        } else {
+            Err(garde::Error::new(format!("must be one of {allowed:?}")))
+        }
+    }
+}
+
 /// Persisted configuration. Field names mirror `@qcksys/qlipq-core`'s `AppConfig`
-/// (camelCase over the IPC boundary).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// (camelCase over the IPC boundary). Parsing is resilient: `DefaultOnError` reverts a
+/// single bad field to its default instead of failing the whole parse, and `garde`
+/// validates ranges/enums (see `get_config`).
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", default)]
 struct AppConfig {
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     watched_folders: Vec<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     output_folder: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     video_extensions: Vec<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     naming_template: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     ffmpeg_path: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     ffprobe_path: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     delete_source_after_export: bool,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(dive)]
     output: OutputSettings,
 }
 
 /// Mirrors `@qcksys/qlipq-core`'s `OutputSettings`. The frontend builds ffmpeg args
-/// from these; Rust only round-trips them so they survive a config save.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// from these; Rust round-trips and validates them.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", default)]
 struct OutputSettings {
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(custom(one_of(QUALITY_MODES)))]
     quality_mode: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(custom(one_of(QUALITY_PRESETS)))]
     quality_preset: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(range(min = 0, max = 51))]
     crf: u32,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     video_bitrate_kbps: u32,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     encoder_preset: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(custom(one_of(VIDEO_CODECS)))]
     video_codec: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(custom(one_of(CONTAINERS)))]
     container: String,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     fps: u32,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     max_height: u32,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[garde(skip)]
     audio_bitrate_kbps: u32,
+}
+
+/// Repair invalid values to defaults after a failed garde validation, keeping every
+/// other (valid) field. Mirrors the garde rules above.
+fn normalize_config(cfg: &mut AppConfig) {
+    let d = OutputSettings::default();
+    let o = &mut cfg.output;
+    o.crf = o.crf.min(51);
+    if !QUALITY_MODES.contains(&o.quality_mode.as_str()) {
+        o.quality_mode = d.quality_mode.clone();
+    }
+    if !QUALITY_PRESETS.contains(&o.quality_preset.as_str()) {
+        o.quality_preset = d.quality_preset.clone();
+    }
+    if !VIDEO_CODECS.contains(&o.video_codec.as_str()) {
+        o.video_codec = d.video_codec.clone();
+    }
+    if !CONTAINERS.contains(&o.container.as_str()) {
+        o.container = d.container.clone();
+    }
 }
 
 impl Default for OutputSettings {
@@ -94,10 +174,19 @@ fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 #[tauri::command]
 fn get_config(app: AppHandle) -> Result<AppConfig, String> {
     let path = config_path(&app)?;
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(serde_json::from_str(&text).unwrap_or_default()),
-        Err(_) => Ok(AppConfig::default()),
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(AppConfig::default()); // no file yet
+    };
+    // Lenient parse: missing fields use serde defaults; a present-but-wrong-typed field
+    // reverts to its default (serde_with DefaultOnError) instead of failing the whole
+    // parse. unwrap_or_default() now only triggers on truly unparseable JSON.
+    let mut cfg: AppConfig = serde_json::from_str(&text).unwrap_or_default();
+    // Validate ranges/enums (garde); on failure keep the good fields by repairing offenders.
+    if let Err(report) = cfg.validate() {
+        eprintln!("config.json has invalid values, repairing:\n{report}");
+        normalize_config(&mut cfg);
     }
+    Ok(cfg)
 }
 
 #[tauri::command]
@@ -108,6 +197,44 @@ fn set_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&path, text).map_err(|e| e.to_string())
+}
+
+/// Absolute path to the persisted config.json (for "open config file" in the UI).
+#[tauri::command]
+fn config_file_path(app: AppHandle) -> Result<String, String> {
+    Ok(config_path(&app)?.to_string_lossy().to_string())
+}
+
+/// Filesystem size + modified time for queue display. The `path` is echoed back
+/// verbatim so the frontend can match results to its (forward-slash) queue paths.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileInfo {
+    path: String,
+    size: u64,
+    modified_ms: i64,
+}
+
+#[tauri::command]
+fn file_info(paths: Vec<String>) -> Vec<FileInfo> {
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let modified_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        out.push(FileInfo {
+            path,
+            size: meta.len(),
+            modified_ms,
+        });
+    }
+    out
 }
 
 fn has_video_ext(path: &Path, extensions: &[String]) -> bool {
@@ -377,6 +504,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             set_config,
+            config_file_path,
+            file_info,
             scan_folders,
             read_obs_config,
             detect_nvidia_recording_dir,

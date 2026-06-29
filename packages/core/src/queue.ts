@@ -19,6 +19,12 @@ export interface QueueItem {
   source?: string;
   /** Probed media info, populated lazily when the clip is opened. */
   media?: MediaInfo;
+  /** File size in bytes, read from the filesystem. */
+  fileSizeBytes?: number;
+  /** ISO timestamp of the file's last modification, from the filesystem. */
+  fileModifiedAt?: string;
+  /** Clip duration in seconds, probed lazily in the background for the queue. */
+  durationSec?: number;
   /** Working edit spec, persisted so re-opening a clip restores progress. */
   edit?: EditSpec;
   /** Where the last successful export was written. */

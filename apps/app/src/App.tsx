@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type AppConfig,
   DEFAULT_CONFIG,
   parseObsFilename,
   type QueueItem,
 } from "@qcksys/qlipq-core";
+import { parseFfprobe } from "@qcksys/qlipq-ffmpeg";
 import { toast } from "sonner";
 import { ConfigPanel } from "./components/ConfigPanel.tsx";
 import { Editor } from "./components/Editor.tsx";
@@ -27,7 +28,6 @@ function describeScan(added: number, scanned: number, folder?: string): string {
 }
 
 export function App() {
-  const [savedConfig, setSavedConfig] = useState<AppConfig>(DEFAULT_CONFIG);
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
   const [items, setItems] = useState<QueueItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -38,42 +38,113 @@ export function App() {
 
   // Avoid duplicate queue entries for the same path (scan + watcher overlap).
   const knownPaths = useRef(new Set<string>());
+  // Mirrors of state for use inside stable callbacks without stale closures.
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const configRef = useRef(config);
+  configRef.current = config;
+
+  const patchByPath = useCallback((path: string, patch: Partial<QueueItem>) => {
+    setItems((current) =>
+      current.map((item) => (item.path === path ? { ...item, ...patch } : item)),
+    );
+  }, []);
+
+  // Fetch filesystem size + modified time for newly-added files (cheap, batched).
+  const hydrateFileInfo = useCallback(async (paths: string[]) => {
+    if (paths.length === 0) return;
+    try {
+      const infos = await api.fileInfo(paths);
+      const byPath = new Map(infos.map((info) => [info.path, info]));
+      setItems((current) =>
+        current.map((item) => {
+          const info = byPath.get(item.path);
+          if (!info) return item;
+          return {
+            ...item,
+            fileSizeBytes: info.size,
+            fileModifiedAt: new Date(info.modifiedMs).toISOString(),
+          };
+        }),
+      );
+    } catch (err) {
+      console.error("file info failed", err);
+    }
+  }, []);
+
+  // Background duration probing, throttled so a large queue doesn't spawn hundreds of
+  // ffprobe processes at once. Skips items already probed (incl. by the editor) or removed.
+  const probeQueue = useRef<string[]>([]);
+  const probeActive = useRef(0);
+  const PROBE_CONCURRENCY = 3;
+  const pumpProbe = useCallback(() => {
+    while (probeActive.current < PROBE_CONCURRENCY && probeQueue.current.length > 0) {
+      const path = probeQueue.current.shift();
+      if (!path) break;
+      const existing = itemsRef.current.find((item) => item.path === path);
+      if (!existing || existing.durationSec != null) continue;
+      probeActive.current += 1;
+      api
+        .probeRaw(path, configRef.current.ffprobePath)
+        .then((raw) => patchByPath(path, { durationSec: parseFfprobe(raw).durationSec }))
+        .catch(() => {
+          /* leave duration unknown */
+        })
+        .finally(() => {
+          probeActive.current -= 1;
+          pumpProbe();
+        });
+    }
+  }, [patchByPath]);
+  const enqueueProbe = useCallback(
+    (paths: string[]) => {
+      probeQueue.current.push(...paths);
+      pumpProbe();
+    },
+    [pumpProbe],
+  );
 
   // Dedup and ref-mutation happen here (outside setItems) so the result is correct
   // under StrictMode, which invokes state updaters twice. Returns how many were added.
-  const addPaths = useCallback((paths: string[]): number => {
-    const fresh: string[] = [];
-    for (const raw of paths) {
-      const path = toPosixPath(raw);
-      if (!knownPaths.current.has(path)) {
-        knownPaths.current.add(path);
-        fresh.push(path);
+  const addPaths = useCallback(
+    (paths: string[]): number => {
+      const fresh: string[] = [];
+      for (const raw of paths) {
+        const path = toPosixPath(raw);
+        if (!knownPaths.current.has(path)) {
+          knownPaths.current.add(path);
+          fresh.push(path);
+        }
       }
-    }
-    if (fresh.length === 0) return 0;
-    const additions = fresh.map((path) => queueItemFromPath(path, new Date().toISOString()));
-    setItems((current) => [...additions, ...current]);
-    return fresh.length;
-  }, []);
+      if (fresh.length === 0) return 0;
+      const roots = configRef.current.watchedFolders;
+      const additions = fresh.map((path) =>
+        queueItemFromPath(path, new Date().toISOString(), roots),
+      );
+      setItems((current) => [...additions, ...current]);
+      void hydrateFileInfo(fresh);
+      enqueueProbe(fresh);
+      return fresh.length;
+    },
+    [hydrateFileInfo, enqueueProbe],
+  );
 
   const loadFromFolders = useCallback(
-    async (cfg: AppConfig) => {
-      const found = await api.scanFolders(cfg.watchedFolders, cfg.videoExtensions);
+    async (folders: string[], extensions: string[]) => {
+      const found = await api.scanFolders(folders, extensions);
       addPaths(found);
-      await api.startWatching(cfg.watchedFolders, cfg.videoExtensions);
+      await api.startWatching(folders, extensions);
     },
     [addPaths],
   );
 
-  // Initial load: config, queue population, watcher subscription.
+  // Initial load: config + watcher subscription. Scanning and persistence are handled
+  // by the effects below so they also react to later config changes (auto-save).
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     (async () => {
-      const loaded = await api.getConfig();
-      setSavedConfig(loaded);
-      setConfig(loaded);
+      setConfig(await api.getConfig());
       unlisten = await api.onFileAdded((path) => addPaths([path]));
-      await loadFromFolders(loaded);
       setReady(true);
       // Best-effort; detectCapturePresets resolves to {} if a source is unavailable.
       api
@@ -81,15 +152,26 @@ export function App() {
         .then(setPresets, (err: unknown) => console.error("preset detection failed", err));
     })().catch((err: unknown) => console.error("startup failed", err));
     return () => unlisten?.();
-  }, [addPaths, loadFromFolders]);
+  }, [addPaths]);
+
+  // Auto-save: persist config (debounced) whenever it changes, once loaded.
+  useEffect(() => {
+    if (!ready) return;
+    const id = setTimeout(() => {
+      api.setConfig(config).catch((err: unknown) => console.error("save config failed", err));
+    }, 400);
+    return () => clearTimeout(id);
+  }, [config, ready]);
+
+  // (Re)scan and watch whenever the watched folders or video extensions change.
+  useEffect(() => {
+    if (!ready) return;
+    loadFromFolders(config.watchedFolders, config.videoExtensions).catch((err: unknown) =>
+      console.error("scan failed", err),
+    );
+  }, [ready, config.watchedFolders, config.videoExtensions, loadFromFolders]);
 
   const patchConfig = (patch: Partial<AppConfig>) => setConfig((c) => ({ ...c, ...patch }));
-
-  const saveConfig = async () => {
-    await api.setConfig(config);
-    setSavedConfig(config);
-    await loadFromFolders(config);
-  };
 
   // Re-scan one or all watched folders and add any files not already queued.
   // Non-destructive: existing items keep their edits/status; files removed earlier
@@ -144,11 +226,6 @@ export function App() {
     }
   };
 
-  const dirty = useMemo(
-    () => JSON.stringify(config) !== JSON.stringify(savedConfig),
-    [config, savedConfig],
-  );
-
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const pendingCount = items.filter((item) => item.status !== "done").length;
 
@@ -158,9 +235,15 @@ export function App() {
         <div className="flex items-center gap-2">
           <img src="/qlipq.svg" alt="" width={22} height={22} />
           <span className="font-bold tracking-tight">QlipQ</span>
-          <span className="border-l border-border pl-2 text-[11px] text-muted-foreground">
+          <button
+            type="button"
+            className="border-l border-border pl-2 text-[11px] text-muted-foreground hover:text-foreground"
+            onClick={() => {
+              api.openExternal(api.FFMPEG_URL).catch((err: unknown) => console.error(err));
+            }}
+          >
             Powered by FFmpeg
-          </span>
+          </button>
         </div>
         <nav className="flex items-center gap-1">
           <Button
@@ -179,9 +262,6 @@ export function App() {
             onClick={() => setView("settings")}
           >
             Settings
-            {dirty && (
-              <span className="ml-1 size-1.5 rounded-full bg-primary" aria-label="unsaved" />
-            )}
           </Button>
           <Button
             variant="ghost"
@@ -206,10 +286,8 @@ export function App() {
         <main className="flex-1 overflow-y-auto p-6">
           <ConfigPanel
             config={config}
-            dirty={dirty}
             presets={presets}
             onChange={patchConfig}
-            onSave={saveConfig}
             onReprocess={reprocessFolder}
           />
         </main>

@@ -1,4 +1,4 @@
-import { createId, parseObsFilename, type QueueItem } from "@qcksys/qlipq-core";
+import { createId, inferGameFromPath, parseObsFilename, type QueueItem } from "@qcksys/qlipq-core";
 
 /** Normalize a path to forward slashes — the separator qlipq uses everywhere. */
 export function toPosixPath(path: string): string {
@@ -24,10 +24,19 @@ export function joinPath(dir: string, name: string): string {
   return `${dir.replace(/[/\\]+$/, "")}/${name}`;
 }
 
-/** Build a fresh queue item from a file path, parsing OBS metadata from the name. */
-export function queueItemFromPath(path: string, addedAt: string): QueueItem {
+/**
+ * Build a fresh queue item from a file path, parsing OBS metadata from the name.
+ * `watchedRoots` lets the source fall back to the game inferred from a per-game
+ * subfolder (NVIDIA Share) when the filename carries no scene/game label.
+ */
+export function queueItemFromPath(
+  path: string,
+  addedAt: string,
+  watchedRoots: string[] = [],
+): QueueItem {
   const fileName = basename(path);
   const parsed = parseObsFilename(fileName);
+  const game = watchedRoots.map((root) => inferGameFromPath(root, path)).find(Boolean);
   return {
     id: createId(),
     path,
@@ -35,6 +44,6 @@ export function queueItemFromPath(path: string, addedAt: string): QueueItem {
     addedAt,
     status: "pending",
     recordedAt: parsed.recordedAt?.toISOString(),
-    source: parsed.source,
+    source: parsed.source ?? game,
   };
 }

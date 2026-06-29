@@ -35,6 +35,8 @@ export interface BuildExportOptions {
   progress?: boolean;
   video?: VideoEncodeOptions;
   audio?: AudioEncodeOptions;
+  /** Container metadata to stamp into the output, e.g. `{ game: "Deadlock" }`. */
+  metadata?: Record<string, string>;
 }
 
 /** CRF values backing each named quality preset (`original` stream-copies instead). */
@@ -179,6 +181,12 @@ export function buildExportArgs(opts: BuildExportOptions): string[] {
 
   if (enabledAudio.length > 0) {
     args.push(...(audioReencode ? ["-c:a", audio.codec, "-b:a", audio.bitrate] : ["-c:a", "copy"]));
+  }
+
+  if (opts.metadata) {
+    for (const [key, value] of Object.entries(opts.metadata)) {
+      if (value) args.push("-metadata", `${key}=${value}`);
+    }
   }
 
   if (opts.progress) args.push("-progress", "pipe:1", "-nostats");

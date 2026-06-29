@@ -59,3 +59,22 @@ function stripExtension(fileName: string): string {
   const dot = fileName.lastIndexOf(".");
   return dot > 0 ? fileName.slice(0, dot) : fileName;
 }
+
+/**
+ * Infer a game name from a recording's path relative to a watched root. NVIDIA Share
+ * nests clips in per-game folders (e.g. `E:/Shadowplay/Counter-strike 2/clip.mp4`), so
+ * the first path segment under the root is the game. Returns `undefined` when the file
+ * sits directly in the root (e.g. OBS's flat output) or isn't under the root.
+ */
+export function inferGameFromPath(root: string, filePath: string): string | undefined {
+  const normRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normFile = filePath.replace(/\\/g, "/");
+  if (!normRoot || !normFile.toLowerCase().startsWith(`${normRoot.toLowerCase()}/`)) {
+    return undefined;
+  }
+  const segments = normFile
+    .slice(normRoot.length + 1)
+    .split("/")
+    .filter(Boolean);
+  return segments.length >= 2 ? segments[0] : undefined;
+}

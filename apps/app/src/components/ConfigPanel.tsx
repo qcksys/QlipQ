@@ -58,21 +58,12 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 interface ConfigPanelProps {
   config: AppConfig;
-  dirty: boolean;
   presets: CapturePresets;
   onChange: (patch: Partial<AppConfig>) => void;
-  onSave: () => void;
   onReprocess: (folder: string) => void;
 }
 
-export function ConfigPanel({
-  config,
-  dirty,
-  presets,
-  onChange,
-  onSave,
-  onReprocess,
-}: ConfigPanelProps) {
+export function ConfigPanel({ config, presets, onChange, onReprocess }: ConfigPanelProps) {
   const addWatchedFolder = (folder: string) => {
     if (!config.watchedFolders.includes(folder)) {
       onChange({ watchedFolders: [...config.watchedFolders, folder] });
@@ -99,6 +90,16 @@ export function ConfigPanel({
   const pickOutput = async () => {
     const folder = await api.pickFolder();
     if (folder) onChange({ outputFolder: folder });
+  };
+
+  const openConfigFile = async () => {
+    try {
+      // Ensure the file exists (auto-save may not have flushed yet), then reveal it.
+      await api.setConfig(config);
+      await api.revealInExplorer(await api.getConfigPath());
+    } catch (err) {
+      console.error("open config failed", err);
+    }
   };
 
   return (
@@ -315,6 +316,8 @@ export function ConfigPanel({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="0">Source</SelectItem>
+                <SelectItem value="2160">4K (2160p)</SelectItem>
+                <SelectItem value="1440">1440p</SelectItem>
                 <SelectItem value="1080">1080p</SelectItem>
                 <SelectItem value="720">720p</SelectItem>
               </SelectContent>
@@ -372,9 +375,12 @@ export function ConfigPanel({
         </label>
       </Section>
 
-      <Button className="self-start" disabled={!dirty} onClick={onSave}>
-        {dirty ? "Save settings" : "Saved"}
-      </Button>
+      <div className="flex items-center gap-3">
+        <Button variant="outline" size="sm" onClick={openConfigFile}>
+          Open config file
+        </Button>
+        <span className="text-xs text-muted-foreground">Settings save automatically.</span>
+      </div>
     </div>
   );
 }

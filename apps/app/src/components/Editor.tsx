@@ -57,6 +57,7 @@ export function Editor({ item, config, onPatch }: EditorProps) {
         if (cancelled) return;
         const info = parseFfprobe(raw);
         setMedia(info);
+        onPatch(item.id, { durationSec: info.durationSec });
         setSpec(
           item.edit ?? {
             ...defaultEditSpec(info),
@@ -70,7 +71,7 @@ export function Editor({ item, config, onPatch }: EditorProps) {
     return () => {
       cancelled = true;
     };
-  }, [item.id, item.path, item.edit, config.ffprobePath]);
+  }, [item.id, item.path, item.edit, config.ffprobePath, onPatch]);
 
   const trim = spec.trim ?? { startSec: 0, endSec: media?.durationSec ?? 0 };
 

@@ -1,4 +1,11 @@
-import { formatDate, formatTime, type QueueItem, type QueueStatus } from "@qcksys/qlipq-core";
+import {
+  formatBytes,
+  formatDate,
+  formatDuration,
+  formatTime,
+  type QueueItem,
+  type QueueStatus,
+} from "@qcksys/qlipq-core";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -41,7 +48,16 @@ export function QueueList({ items, selectedId, onSelect, onRename, onRemove }: Q
   return (
     <ul className="flex flex-col gap-1.5">
       {items.map((item) => {
-        const recordedAt = item.recordedAt ? new Date(item.recordedAt) : null;
+        // Prefer the timestamp parsed from the filename; fall back to the file's
+        // modified time so clips with unparseable names still show a date.
+        const when = item.recordedAt ?? item.fileModifiedAt;
+        const whenDate = when ? new Date(when) : null;
+        const meta = [
+          item.source,
+          whenDate ? `${formatDate(whenDate)} ${formatTime(whenDate)}` : "Unknown time",
+          item.durationSec != null ? formatDuration(item.durationSec) : null,
+          item.fileSizeBytes != null ? formatBytes(item.fileSizeBytes) : null,
+        ].filter(Boolean);
         return (
           <li
             key={item.id}
@@ -56,12 +72,7 @@ export function QueueList({ items, selectedId, onSelect, onRename, onRemove }: Q
                 <div className="truncate text-sm font-semibold" title={item.path}>
                   {item.fileName}
                 </div>
-                <div className="text-xs text-muted-foreground">
-                  {item.source ? `${item.source} · ` : ""}
-                  {recordedAt
-                    ? `${formatDate(recordedAt)} ${formatTime(recordedAt)}`
-                    : "Unknown time"}
-                </div>
+                <div className="text-xs text-muted-foreground">{meta.join(" · ")}</div>
               </div>
               <Badge variant={STATUS_VARIANT[item.status]}>{STATUS_LABEL[item.status]}</Badge>
             </div>

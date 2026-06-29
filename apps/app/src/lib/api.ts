@@ -8,6 +8,9 @@ import { toPosixPath } from "./queue.ts";
 /** Public repository URL, used by the in-app GitHub link. */
 export const REPO_URL = "https://github.com/qcksys/qlipq";
 
+/** FFmpeg project homepage, linked from the "Powered by FFmpeg" callout. */
+export const FFMPEG_URL = "https://ffmpeg.org";
+
 /** Load persisted configuration (merged with defaults on the Rust side). */
 export function getConfig(): Promise<AppConfig> {
   return invoke<AppConfig>("get_config");
@@ -15,6 +18,22 @@ export function getConfig(): Promise<AppConfig> {
 
 export function setConfig(config: AppConfig): Promise<void> {
   return invoke("set_config", { config });
+}
+
+/** Absolute path to the persisted config.json. */
+export function getConfigPath(): Promise<string> {
+  return invoke<string>("config_file_path");
+}
+
+/** Filesystem size + modified time for a batch of files. */
+export interface FileInfo {
+  path: string;
+  size: number;
+  modifiedMs: number;
+}
+
+export function fileInfo(paths: string[]): Promise<FileInfo[]> {
+  return invoke<FileInfo[]>("file_info", { paths });
 }
 
 /** List existing video files in the given folders and all their subfolders. */
