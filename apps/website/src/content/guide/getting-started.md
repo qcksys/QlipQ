@@ -33,10 +33,11 @@ The editor shows an estimated file size for the current clip, and you can overri
 ## 5. Edit and export
 
 1. Pick a clip from the **Queue** (each shows its date, length, and size).
-2. Set the **in/out** points on the timeline. The player remembers your position and has −60/−5/−1 and +1/+5/+60 second jump buttons.
-3. Optionally enable **crop** and adjust the rectangle.
-4. Toggle **audio tracks** and set their levels (your selection carries to the next clip). On **export**, the enabled tracks are **mixed together into one track** at the levels you set.
-5. Click **Export clip**. If a file with the same name already exists you can **overwrite** it or **append a timestamp** to keep both, and the **After export** setting decides what happens to the original (keep, delete, move, rename, or prompt). Use **Show file** to reveal the exported clip.
+2. Set the **in/out** points on the timeline. Type a timestamp to jump the playhead, drag the scrubber (playback keeps going if it was already playing), or use the −60/−5/−1 / +1/+5/+60 second jump buttons.
+3. **Keyboard shortcuts** default to Adobe Premiere Pro — **Space** play/pause, **I**/**O** set in/out, **←**/**→** step a frame, **Shift+←**/**→** jump 5 s, **Home**/**End** go to start/end, **Ctrl+M** export — and are rebindable in **Settings → Editor shortcuts**.
+4. Optionally enable **crop** and adjust the rectangle.
+5. Toggle **audio tracks** and set their levels (your selection carries to the next clip). On **export**, the enabled tracks are **mixed together into one track** at the levels you set.
+6. Click **Export clip**. If a file with the same name already exists you can **overwrite** it or **append a timestamp** to keep both, and the **After export** setting decides what happens to the original (keep, delete, move, rename, or prompt). Use **Show file** to reveal the exported clip.
 
 > The built-in player (powered by VLC) plays MKV and HEVC directly, so previews need no conversion. Exports always use the original file.
 

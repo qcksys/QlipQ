@@ -146,8 +146,18 @@ impl App {
         // Timeline.
         let dur = media.duration_sec.max(0.001);
         let scrub = slider(0.0..=dur, ed.current_time.min(dur), Message::Seek).step(0.05);
+        let time_row = row![
+            text_input("0:00.000", &ed.time_input)
+                .on_input(Message::TimestampEdited)
+                .on_submit(Message::TimestampSubmit)
+                .width(Length::Fixed(110.0)),
+            text(format!("/ {}", format_timestamp(dur))).size(12),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
         let timeline = column![
             scrub,
+            time_row,
             row![
                 text(format!("In {:.2}", ed.trim_start)).size(12),
                 button("Set in at playhead").on_press(Message::SetIn),
@@ -409,12 +419,34 @@ impl App {
             ].spacing(6).into()),
             section("FFmpeg", column![ffmpeg_row, ffmpeg_status, ffprobe_row, ffprobe_status].spacing(8).into()),
             section("After export", after.into()),
+            section("Editor shortcuts (Premiere Pro defaults)", self.keybinds_section()),
             button("Open config file").on_press(Message::OpenConfigFile),
         ]
         .spacing(16)
         .padding(20);
 
         scrollable(container(body).max_width(760.0).center_x(Length::Fill)).into()
+    }
+
+    fn keybinds_section(&self) -> Element<'_, Message> {
+        let kb = &self.config.keybinds;
+        column![
+            kb_row("Play / pause", &kb.play_pause, KbField::PlayPause),
+            kb_row("Set in", &kb.set_in, KbField::SetIn),
+            kb_row("Set out", &kb.set_out, KbField::SetOut),
+            kb_row("Frame back", &kb.frame_back, KbField::FrameBack),
+            kb_row("Frame forward", &kb.frame_forward, KbField::FrameForward),
+            kb_row("Jump back 5s", &kb.jump_back, KbField::JumpBack),
+            kb_row("Jump forward 5s", &kb.jump_forward, KbField::JumpForward),
+            kb_row("Go to start", &kb.go_to_start, KbField::GoToStart),
+            kb_row("Go to end", &kb.go_to_end, KbField::GoToEnd),
+            kb_row("Export", &kb.export, KbField::Export),
+            text("Combos like \"Space\", \"I\", \"Shift+Left\", \"Ctrl+M\" (modifiers Ctrl/Shift/Alt/Cmd). Also editable in config.json.")
+                .size(11)
+                .style(|t| text::Style { color: Some(theme::muted(t)) }),
+        ]
+        .spacing(6)
+        .into()
     }
 
     // ---- Modals ----
@@ -520,6 +552,16 @@ fn num_field<'a>(label: &'a str, value: i64, on_input: impl Fn(String) -> Messag
     column![text(label).size(11), text_input("", &value.to_string()).on_input(on_input).width(Length::Fixed(110.0))]
         .spacing(2)
         .into()
+}
+
+fn kb_row<'a>(label: &'a str, value: &'a str, field: KbField) -> Element<'a, Message> {
+    row![
+        text(label).size(13).width(Length::Fixed(150.0)),
+        text_input("unbound", value).on_input(move |s| Message::SetKeybind(field, s)).width(Length::Fixed(150.0)),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
 fn test_text(status: &Option<(bool, String)>) -> Element<'_, Message> {

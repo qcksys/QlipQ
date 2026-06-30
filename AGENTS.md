@@ -27,6 +27,13 @@ editor to trim, crop, pick audio tracks, rename, and export. The repo holds a
 **native Rust desktop app** (`qlipq-desktop`), an **Astro website**, and a small
 **OBS companion script** package.
 
+> **Status: prototyping (Windows-first).** This app is in active prototyping. Prefer
+> the direct, working path over robustness scaffolding: don't invest in toolchain /
+> encoder fallbacks, cross-platform implementation details (get it working on Windows
+> first — Linux/macOS portability comes later), or data migrations unless asked. New
+> work can assume the `libav-preview` (in-process libav + HW) stack; the CLI ffmpeg
+> path is not a required fallback for new features.
+
 > **Desktop history.** The desktop app was a Tauri (React + Rust) app, then a
 > C# / WinUI 3 rewrite. Both are **gone**. The sole desktop app is now the
 > Rust app under **`apps/desktop/`** — **Windows-first; Linux is also

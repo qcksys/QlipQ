@@ -456,7 +456,9 @@ pub fn start_player(
 }
 
 /// Run ffmpeg to export, streaming `-progress` into `progress` (0..1). On failure returns
-/// the last few stderr lines.
+/// the last few stderr lines. The default build's export path; the `libav-preview` build exports
+/// in-process via [`crate::export`] instead, so this is unused there.
+#[cfg_attr(feature = "libav-preview", allow(dead_code))]
 pub fn run_export(
     ffmpeg_path: &str,
     args: &[String],

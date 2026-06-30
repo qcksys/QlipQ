@@ -124,6 +124,41 @@ impl Default for AfterExportSettings {
     }
 }
 
+/// Editor keyboard shortcuts. Each value is a key combo string like `"Space"`, `"I"`, `"Shift+Left"`,
+/// or `"Ctrl+M"` (modifiers `Ctrl`/`Shift`/`Alt`/`Cmd` joined with `+`, then the key). Defaults align
+/// to Adobe Premiere Pro where it has an equivalent. Editable in Settings and in `config.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Keybinds {
+    pub play_pause: String,
+    pub set_in: String,
+    pub set_out: String,
+    pub frame_back: String,
+    pub frame_forward: String,
+    pub jump_back: String,
+    pub jump_forward: String,
+    pub go_to_start: String,
+    pub go_to_end: String,
+    pub export: String,
+}
+
+impl Default for Keybinds {
+    fn default() -> Self {
+        Self {
+            play_pause: "Space".into(),
+            set_in: "I".into(),
+            set_out: "O".into(),
+            frame_back: "Left".into(),
+            frame_forward: "Right".into(),
+            jump_back: "Shift+Left".into(),
+            jump_forward: "Shift+Right".into(),
+            go_to_start: "Home".into(),
+            go_to_end: "End".into(),
+            export: "Ctrl+M".into(),
+        }
+    }
+}
+
 /// Container extensions qlipq treats as editable video by default.
 pub const DEFAULT_VIDEO_EXTENSIONS: [&str; 6] = ["mp4", "mkv", "mov", "flv", "webm", "ts"];
 
@@ -140,6 +175,8 @@ pub struct AppConfig {
     pub ffprobe_path: String,
     pub after_export: AfterExportSettings,
     pub output: OutputSettings,
+    #[serde(default)]
+    pub keybinds: Keybinds,
 }
 
 impl Default for AppConfig {
@@ -153,6 +190,7 @@ impl Default for AppConfig {
             ffprobe_path: "ffprobe".into(),
             after_export: AfterExportSettings::default(),
             output: OutputSettings::default(),
+            keybinds: Keybinds::default(),
         }
     }
 }

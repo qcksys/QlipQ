@@ -14,6 +14,8 @@ mod video;
 
 #[cfg(feature = "libav-preview")]
 mod libav;
+#[cfg(feature = "libav-preview")]
+mod export;
 
 // The preview decoder is feature-selected: the in-process libav player (libplacebo HDR + synced
 // audio) when `libav-preview` is on, else the CLI ffmpeg player. Both expose the same interface
@@ -135,6 +137,21 @@ enum PickPurpose {
     MoveFolder,
 }
 
+/// Which editor shortcut a Settings text field rebinds.
+#[derive(Debug, Clone, Copy)]
+enum KbField {
+    PlayPause,
+    SetIn,
+    SetOut,
+    FrameBack,
+    FrameForward,
+    JumpBack,
+    JumpForward,
+    GoToStart,
+    GoToEnd,
+    Export,
+}
+
 struct AudioRow {
     index: i64,
     label: String,
@@ -153,6 +170,10 @@ struct Editor {
     crop: CropSpec,
     audio: Vec<AudioRow>,
     current_time: f64,
+    /// Editable playhead timestamp text (kept in sync with `current_time` unless `editing_time`).
+    time_input: String,
+    /// True while the user is typing in the timestamp field, so live playback doesn't clobber it.
+    editing_time: bool,
     /// Latest decoded preview frame, shared with the `video` shader widget (persistent GPU texture).
     shared_frame: video::SharedFrame,
     has_frame: bool,
@@ -217,6 +238,10 @@ enum Message {
     FrameExtracted(String, Option<(u32, u32, Vec<u8>, f64)>),
     Seek(f64),
     Skip(f64),
+    TimestampEdited(String),
+    TimestampSubmit,
+    EditorKey(iced::keyboard::Key, iced::keyboard::Modifiers),
+    SetKeybind(KbField, String),
     TogglePlay,
     SetIn,
     SetOut,
@@ -327,15 +352,22 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let base = iced::time::every(TICK).map(|_| Message::Tick);
-        // While playing, add a fast tick at the preview frame rate to pull streamed frames.
-        match self.editor.as_ref().filter(|e| e.playing).and_then(|e| e.player.as_ref()) {
-            Some(player) => {
-                let dt = Duration::from_secs_f64(1.0 / player.fps().clamp(1.0, 60.0));
-                Subscription::batch([base, iced::time::every(dt).map(|_| Message::PlaybackTick)])
-            }
-            None => base,
+        let mut subs = vec![iced::time::every(TICK).map(|_| Message::Tick)];
+        // Editor keyboard shortcuts — active only with a clip open and no modal in front. A focused
+        // text field captures the key (Status::Captured), so `editor_key_event` ignores it; here we
+        // just avoid binding over the queue/settings or a dialog.
+        let modal = self.rename.is_some()
+            || self.delete_confirm.is_some()
+            || self.editor.as_ref().map(|e| e.overwrite_target.is_some() || e.after_prompt).unwrap_or(false);
+        if self.editor.is_some() && !modal {
+            subs.push(iced::event::listen_with(editor_key_event));
         }
+        // While playing, add a fast tick at the preview frame rate to pull streamed frames.
+        if let Some(player) = self.editor.as_ref().filter(|e| e.playing).and_then(|e| e.player.as_ref()) {
+            let dt = Duration::from_secs_f64(1.0 / player.fps().clamp(1.0, 60.0));
+            subs.push(iced::time::every(dt).map(|_| Message::PlaybackTick));
+        }
+        Subscription::batch(subs)
     }
 
     fn theme(&self) -> Theme {
@@ -503,6 +535,7 @@ impl App {
                             // already holds the new target.
                             if !redo {
                                 ed.current_time = realized;
+                                sync_time_input(ed);
                             }
                         }
                     }
@@ -512,13 +545,92 @@ impl App {
                 }
             }
             Message::Seek(sec) => {
-                // Grabbing the scrubber pauses playback (standard editor behaviour).
+                // Scrubbing keeps the current transport state: if it was playing, keep playing from the
+                // new position (warm-seek the decoder, or restart it); if paused, just show the frame.
+                let playing = self.editor.as_ref().map(|e| e.playing).unwrap_or(false);
+                let mut seeked = false;
                 if let Some(ed) = &mut self.editor {
-                    ed.current_time = sec;
-                    ed.playing = false;
-                    ed.player = None;
+                    let max = ed.media.as_ref().map(|m| m.duration_sec).unwrap_or(sec);
+                    ed.current_time = sec.clamp(0.0, max);
+                    ed.editing_time = false;
+                    sync_time_input(ed);
+                    if playing {
+                        seeked = ed.player.as_ref().map(|p| p.try_seek(ed.current_time)).unwrap_or(false);
+                    }
                 }
-                return self.request_frame();
+                if playing && !seeked {
+                    return self.play_from_current();
+                }
+                if !playing {
+                    return self.request_frame();
+                }
+            }
+            Message::TimestampEdited(s) => {
+                if let Some(ed) = &mut self.editor {
+                    ed.editing_time = true;
+                    ed.time_input = s;
+                }
+            }
+            Message::TimestampSubmit => {
+                let parsed = self.editor.as_ref().and_then(|ed| parse_timestamp(&ed.time_input));
+                if let Some(ed) = &mut self.editor {
+                    ed.editing_time = false;
+                }
+                match parsed {
+                    Some(sec) => return self.update(Message::Seek(sec)),
+                    None => {
+                        if let Some(ed) = &mut self.editor {
+                            sync_time_input(ed); // invalid input → snap the field back to the playhead
+                        }
+                    }
+                }
+            }
+            Message::EditorKey(key, mods) => {
+                let snap = self.editor.as_ref().and_then(|e| e.media.as_ref()).map(|m| (m.fps.max(1.0), m.duration_sec));
+                let Some((fps, dur)) = snap else { return Task::none() };
+                let kb = &self.config.keybinds;
+                let action = if binding_matches(&kb.play_pause, &key, mods) {
+                    Some(Message::TogglePlay)
+                } else if binding_matches(&kb.set_in, &key, mods) {
+                    Some(Message::SetIn)
+                } else if binding_matches(&kb.set_out, &key, mods) {
+                    Some(Message::SetOut)
+                } else if binding_matches(&kb.frame_back, &key, mods) {
+                    Some(Message::Skip(-1.0 / fps))
+                } else if binding_matches(&kb.frame_forward, &key, mods) {
+                    Some(Message::Skip(1.0 / fps))
+                } else if binding_matches(&kb.jump_back, &key, mods) {
+                    Some(Message::Skip(-5.0))
+                } else if binding_matches(&kb.jump_forward, &key, mods) {
+                    Some(Message::Skip(5.0))
+                } else if binding_matches(&kb.go_to_start, &key, mods) {
+                    Some(Message::Seek(0.0))
+                } else if binding_matches(&kb.go_to_end, &key, mods) {
+                    Some(Message::Seek(dur))
+                } else if binding_matches(&kb.export, &key, mods) {
+                    Some(Message::Export)
+                } else {
+                    None
+                };
+                if let Some(msg) = action {
+                    return self.update(msg);
+                }
+            }
+            Message::SetKeybind(field, value) => {
+                let kb = &mut self.config.keybinds;
+                match field {
+                    KbField::PlayPause => kb.play_pause = value,
+                    KbField::SetIn => kb.set_in = value,
+                    KbField::SetOut => kb.set_out = value,
+                    KbField::FrameBack => kb.frame_back = value,
+                    KbField::FrameForward => kb.frame_forward = value,
+                    KbField::JumpBack => kb.jump_back = value,
+                    KbField::JumpForward => kb.jump_forward = value,
+                    KbField::GoToStart => kb.go_to_start = value,
+                    KbField::GoToEnd => kb.go_to_end = value,
+                    KbField::Export => kb.export = value,
+                }
+                return self.save_config_task();
             }
             Message::Skip(delta) => {
                 let playing = self.editor.as_ref().map(|e| e.playing).unwrap_or(false);
@@ -526,6 +638,8 @@ impl App {
                 if let Some(ed) = &mut self.editor {
                     let max = ed.media.as_ref().map(|m| m.duration_sec).unwrap_or(0.0);
                     ed.current_time = (ed.current_time + delta).clamp(0.0, max);
+                    ed.editing_time = false;
+                    sync_time_input(ed);
                     if playing {
                         // Prefer an in-process seek of the warm decoder; the CLI player can't, so it
                         // reports false and we restart below instead.
@@ -844,6 +958,7 @@ impl App {
                 }
                 ed.playing = false;
                 ed.player = None;
+                sync_time_input(ed);
                 return;
             }
         };
@@ -864,6 +979,7 @@ impl App {
                 ed.player = None;
             }
         }
+        sync_time_input(ed);
     }
 
     /// Extract a single preview frame at the playhead (scrubbing / paused). Coalesces: if an
@@ -941,6 +1057,8 @@ impl App {
             crop: CropSpec { x: 0, y: 0, width: 0, height: 0 },
             audio: Vec::new(),
             current_time: 0.0,
+            time_input: format_timestamp(0.0),
+            editing_time: false,
             shared_frame: video::new_shared_frame(),
             has_frame: false,
             is_hdr: false,
@@ -1068,25 +1186,15 @@ impl App {
         let Some(id) = self.selected_id.clone() else { return Task::none() };
         let Some(ed) = &self.editor else { return Task::none() };
         let Some(media) = ed.media.clone() else { return Task::none() };
+        let is_hdr = ed.is_hdr;
         let Some(item) = self.items.iter().find(|i| i.id == id).cloned() else { return Task::none() };
 
         let output = self.effective_output(&item);
-        let encode = output_settings_to_encode(&output, &media);
         let spec = editor_spec(ed);
         let total = qlipq_core::edit_spec::effective_duration(&spec, &media);
         let metadata = item.source.clone().map(|s| vec![("game".to_string(), s)]).unwrap_or_default();
-        let args = build_export_args(&BuildExportOptions {
-            input_path: item.path.clone(),
-            output_path: output_path.clone(),
-            spec,
-            reencode: encode.reencode,
-            progress: true,
-            video: Some(encode.video),
-            audio: Some(encode.audio),
-            metadata,
-        });
 
-        self.export_target = Some(output_path);
+        self.export_target = Some(output_path.clone());
 
         let progress = Arc::new(Mutex::new(0.0_f32));
         if let Some(ed) = &mut self.editor {
@@ -1102,10 +1210,64 @@ impl App {
             item.error = None;
         }
 
-        let ffmpeg = self.config.ffmpeg_path.clone();
-        let prog = Arc::clone(&progress);
+        self.spawn_export(id, item.path.clone(), output_path, spec, output, media, total, metadata, is_hdr, progress)
+    }
+
+    /// In-process export: decode → edits → hardware encode → mux ([`export::run_export`]). No CLI.
+    #[cfg(feature = "libav-preview")]
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_export(
+        &self,
+        id: String,
+        input: String,
+        output_path: String,
+        spec: EditSpec,
+        output: OutputSettings,
+        media: MediaInfo,
+        _total: f64,
+        metadata: Vec<(String, String)>,
+        is_hdr: bool,
+        progress: Arc<Mutex<f32>>,
+    ) -> Task<Message> {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         Task::perform(
-            blocking(move || host::run_export(&ffmpeg, &args, total, prog)),
+            blocking(move || {
+                export::run_export(&input, &output_path, &spec, &output, &media, is_hdr, &metadata, progress, cancel)
+            }),
+            move |result| Message::ExportFinished(id.clone(), result),
+        )
+    }
+
+    /// CLI ffmpeg export (the default build without the in-process libav stack).
+    #[cfg(not(feature = "libav-preview"))]
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_export(
+        &self,
+        id: String,
+        input: String,
+        output_path: String,
+        spec: EditSpec,
+        output: OutputSettings,
+        media: MediaInfo,
+        total: f64,
+        metadata: Vec<(String, String)>,
+        _is_hdr: bool,
+        progress: Arc<Mutex<f32>>,
+    ) -> Task<Message> {
+        let encode = output_settings_to_encode(&output, &media);
+        let args = build_export_args(&BuildExportOptions {
+            input_path: input,
+            output_path,
+            spec,
+            reencode: encode.reencode,
+            progress: true,
+            video: Some(encode.video),
+            audio: Some(encode.audio),
+            metadata,
+        });
+        let ffmpeg = self.config.ffmpeg_path.clone();
+        Task::perform(
+            blocking(move || host::run_export(&ffmpeg, &args, total, progress)),
             move |result| Message::ExportFinished(id.clone(), result),
         )
     }
@@ -1369,4 +1531,139 @@ fn build_export_name(config: &AppConfig, item: &QueueItem, name: &str, ext: &str
         index: None,
     };
     rename::build_renamed_file_name(&config.naming_template, &vars)
+}
+
+/// Format seconds as `M:SS.mmm` (or `H:MM:SS.mmm` past an hour) for the editable playhead field.
+fn format_timestamp(secs: f64) -> String {
+    let total_ms = (secs.max(0.0) * 1000.0).round() as u64;
+    let ms = total_ms % 1000;
+    let s = (total_ms / 1000) % 60;
+    let m = (total_ms / 60_000) % 60;
+    let h = total_ms / 3_600_000;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}.{ms:03}")
+    } else {
+        format!("{m}:{s:02}.{ms:03}")
+    }
+}
+
+/// Parse `S`, `M:SS`, `M:SS.mmm`, or `H:MM:SS(.mmm)` into seconds. `None` if a component isn't a number.
+fn parse_timestamp(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut total = 0.0;
+    for part in text.split(':') {
+        let v: f64 = part.trim().parse().ok()?;
+        if v < 0.0 {
+            return None;
+        }
+        total = total * 60.0 + v;
+    }
+    Some(total)
+}
+
+/// Refresh the timestamp field from the playhead, unless the user is mid-edit.
+fn sync_time_input(ed: &mut Editor) {
+    if !ed.editing_time {
+        ed.time_input = format_timestamp(ed.current_time);
+    }
+}
+
+/// Raw key event → [`Message::EditorKey`], but only when no widget captured it (a focused text field
+/// reports `Status::Captured`, so its keystrokes are left alone). Must be a plain `fn` —
+/// `iced::event::listen_with` takes a function pointer, not a closure.
+fn editor_key_event(event: iced::Event, status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+    if status != iced::event::Status::Ignored {
+        return None;
+    }
+    if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) = event {
+        Some(Message::EditorKey(key, modifiers))
+    } else {
+        None
+    }
+}
+
+/// True if `binding` (e.g. `"Shift+Left"`, `"Ctrl+M"`, `"I"`) matches the pressed key + modifiers.
+fn binding_matches(binding: &str, key: &iced::keyboard::Key, mods: iced::keyboard::Modifiers) -> bool {
+    let binding = binding.trim();
+    if binding.is_empty() {
+        return false;
+    }
+    let parts: Vec<&str> = binding.split('+').map(|p| p.trim()).collect();
+    let Some((token, mod_parts)) = parts.split_last() else {
+        return false;
+    };
+    let (mut need_ctrl, mut need_shift, mut need_alt, mut need_logo) = (false, false, false, false);
+    for m in mod_parts {
+        match m.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => need_ctrl = true,
+            "shift" => need_shift = true,
+            "alt" | "option" => need_alt = true,
+            "cmd" | "command" | "super" | "win" | "logo" => need_logo = true,
+            _ => return false,
+        }
+    }
+    if mods.control() != need_ctrl || mods.shift() != need_shift || mods.alt() != need_alt || mods.logo() != need_logo {
+        return false;
+    }
+    key_token_matches(token, key)
+}
+
+fn key_token_matches(token: &str, key: &iced::keyboard::Key) -> bool {
+    use iced::keyboard::key::Named;
+    use iced::keyboard::Key;
+    match key {
+        Key::Character(c) => token.eq_ignore_ascii_case(c.as_str()),
+        Key::Named(named) => {
+            let name = match named {
+                Named::Space => "Space",
+                Named::ArrowLeft => "Left",
+                Named::ArrowRight => "Right",
+                Named::ArrowUp => "Up",
+                Named::ArrowDown => "Down",
+                Named::Home => "Home",
+                Named::End => "End",
+                Named::Enter => "Enter",
+                Named::Escape => "Escape",
+                _ => return false,
+            };
+            token.eq_ignore_ascii_case(name)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::keyboard::{key::Named, Key, Modifiers};
+
+    #[test]
+    fn timestamp_round_trip() {
+        assert_eq!(format_timestamp(65.5), "1:05.500");
+        assert_eq!(format_timestamp(3661.0), "1:01:01.000");
+        assert_eq!(parse_timestamp("90"), Some(90.0));
+        assert_eq!(parse_timestamp("1:05.5"), Some(65.5));
+        assert_eq!(parse_timestamp("1:01:01"), Some(3661.0));
+        assert_eq!(parse_timestamp("  2:00 "), Some(120.0));
+        assert_eq!(parse_timestamp("nope"), None);
+        assert_eq!(parse_timestamp(""), None);
+    }
+
+    #[test]
+    fn keybind_matching() {
+        let none = Modifiers::empty();
+        // Premiere defaults dispatch to the right key/modifier combos.
+        assert!(binding_matches("Space", &Key::Named(Named::Space), none));
+        assert!(binding_matches("i", &Key::Character("i".into()), none));
+        assert!(binding_matches("I", &Key::Character("i".into()), none)); // case-insensitive
+        assert!(!binding_matches("I", &Key::Character("i".into()), Modifiers::SHIFT)); // bare I, not Shift+I
+        assert!(binding_matches("Shift+Left", &Key::Named(Named::ArrowLeft), Modifiers::SHIFT));
+        assert!(!binding_matches("Shift+Left", &Key::Named(Named::ArrowLeft), none)); // shift is required
+        assert!(binding_matches("Ctrl+M", &Key::Character("m".into()), Modifiers::CTRL));
+        assert!(!binding_matches("Left", &Key::Named(Named::ArrowRight), none)); // wrong key
+        assert!(!binding_matches("", &Key::Named(Named::Space), none)); // unbound never matches
+    }
 }

@@ -77,6 +77,20 @@ pub fn parse(text: &str) -> AppConfig {
         }
     }
 
+    if let Some(Value::Object(k)) = obj.get("keybinds") {
+        let kb = &mut cfg.keybinds;
+        if let Some(v) = read_string(k, "playPause") { kb.play_pause = v; }
+        if let Some(v) = read_string(k, "setIn") { kb.set_in = v; }
+        if let Some(v) = read_string(k, "setOut") { kb.set_out = v; }
+        if let Some(v) = read_string(k, "frameBack") { kb.frame_back = v; }
+        if let Some(v) = read_string(k, "frameForward") { kb.frame_forward = v; }
+        if let Some(v) = read_string(k, "jumpBack") { kb.jump_back = v; }
+        if let Some(v) = read_string(k, "jumpForward") { kb.jump_forward = v; }
+        if let Some(v) = read_string(k, "goToStart") { kb.go_to_start = v; }
+        if let Some(v) = read_string(k, "goToEnd") { kb.go_to_end = v; }
+        if let Some(v) = read_string(k, "export") { kb.export = v; }
+    }
+
     cfg
 }
 
@@ -126,6 +140,22 @@ pub fn config_schema() -> Value {
                     "fps": { "type": "integer", "minimum": 0 },
                     "maxHeight": { "type": "integer", "minimum": 0 },
                     "audioBitrateKbps": { "type": "integer", "minimum": 0 }
+                }
+            },
+            "keybinds": {
+                "type": "object",
+                "description": "Editor keyboard shortcuts (key combo strings like \"Space\", \"I\", \"Shift+Left\", \"Ctrl+M\").",
+                "properties": {
+                    "playPause": { "type": "string" },
+                    "setIn": { "type": "string" },
+                    "setOut": { "type": "string" },
+                    "frameBack": { "type": "string" },
+                    "frameForward": { "type": "string" },
+                    "jumpBack": { "type": "string" },
+                    "jumpForward": { "type": "string" },
+                    "goToStart": { "type": "string" },
+                    "goToEnd": { "type": "string" },
+                    "export": { "type": "string" }
                 }
             }
         }
