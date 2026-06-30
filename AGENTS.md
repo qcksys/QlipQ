@@ -23,52 +23,81 @@ symlink to this file, so this guidance is shared by all agents. -->
 
 qlipq is a recording **queue + lightweight FFmpeg clip editor** for gameplay
 capture: it watches capture folders, queues new recordings, and offers a focused
-editor to trim, crop, pick audio tracks, rename, and export. Vite+ monorepo of a
-Tauri desktop app, an Astro website, and two shared TS packages.
+editor to trim, crop, pick audio tracks, rename, and export. It is a Vite+
+monorepo: a **native Rust + [iced](https://iced.rs) desktop app**, an Astro
+website, and shared TypeScript packages.
 
-> **Desktop migration (in progress): Tauri → C# / WinUI 3 + LibVLCSharp.** A native
-> Windows rewrite lives in **`desktop/`** (its own .NET solution, _not_ a pnpm
-> workspace member — see [desktop/README.md](desktop/README.md)). `Qlipq.Core` /
-> `Qlipq.Ffmpeg` are C# ports of the two shared TS packages with **ported parity
-> tests**; the TS packages stay as the parity oracle. Preview proxies were dropped
-> (LibVLC plays MKV/HEVC natively). The Tauri app under `apps/desktop-tauri` is **superseded**
-> and should be removed once the WinUI app is validated on a real machine. Until
-> then both exist; the sections below describe the original Tauri app.
->
-> A **cross-platform** variant lives in **`apps/desktop-native`** (a Cargo workspace; Windows/macOS/Linux,
-> Rust + [iced](https://iced.rs) — see [apps/desktop-native/README.md](apps/desktop/README.md)). It has its own Rust
-> ports of `qlipq-core`/`qlipq-ffmpeg` with ported parity tests, and previews via ffmpeg
-> frame extraction (no libav linking). Both native rewrites share `~/.com.qcksys.qlipq` config/edits.
+> **Desktop history.** The desktop app was a Tauri (React + Rust) app, then a
+> C# / WinUI 3 rewrite. Both are **gone**. The sole desktop app is now the
+> cross-platform Rust + iced app under **`apps/desktop/`** — its own Cargo
+> workspace, **not** a pnpm workspace member (see
+> [apps/desktop/README.md](apps/desktop/README.md)). If you find references to
+> `apps/desktop-tauri`, `apps/desktop-native`, a root `desktop/`, `src-tauri`, or
+> any `.cs`/`.sln`/`.csproj`, they are stale leftovers — none of that code exists.
 
 ## Architecture (the parts that span files)
 
-**FFmpeg command logic lives in exactly one place: `@qcksys/qlipq-ffmpeg`.** This
-package is pure (no I/O) and is the single source of truth for ffmpeg/ffprobe:
-`buildExportArgs` (args.ts), `parseFfprobe` (probe.ts), `parseProgress`
-(progress.ts). It is heavily unit-tested and validated against real ffmpeg
-(`tests/integration.test.ts`). Do not build ffmpeg argument strings anywhere else.
+**FFmpeg command logic has one source of truth: `@qcksys/qlipq-ffmpeg`.** This TS
+package is pure (no I/O): `buildExportArgs` ([args.ts](packages/ffmpeg/src/args.ts)),
+`parseFfprobe` ([probe.ts](packages/ffmpeg/src/probe.ts)), `parseProgress`
+([progress.ts](packages/ffmpeg/src/progress.ts)), `estimateExportSize`. It is
+heavily unit-tested and is the **parity oracle**. The Rust crate
+[`qlipq-ffmpeg`](apps/desktop/crates/qlipq-ffmpeg) is a line-for-line port
+(`build_export_args`, `parse_ffprobe`, `parse_progress`, …) whose `cargo test`
+suite asserts the **same** arg vectors. Do not build ffmpeg argument strings
+anywhere else; change the TS first, then mirror it in the Rust port (or vice
+versa) so the parity tests stay green.
 
-**The frontend builds, Rust executes.** Flow for an export
-([Editor.tsx](apps/desktop-tauri/src/components/Editor.tsx) → [api.ts](apps/desktop-tauri/src/lib/api.ts)
-→ [lib.rs](apps/desktop-tauri/src-tauri/src/lib.rs)):
+**The app builds args, then spawns ffmpeg — it never interprets the edit.** Export
+flow in the iced app:
 
-1. React calls `buildExportArgs(...)` to produce the full `string[]` of ffmpeg args.
-2. It invokes the Rust `run_export(id, ffmpegPath, args)` command, which just spawns
-   the process — Rust never interprets the edit, it only runs the given args.
-3. Rust streams ffmpeg's `-progress` stdout as `export-progress` events keyed by
-   `id`; the frontend parses each line with `parseProgress`. ffprobe works the same
-   way (`probe_raw` returns raw JSON → `parseFfprobe`).
+1. `build_export_args(...)` (the `qlipq-ffmpeg` crate) produces the full `Vec<String>`.
+2. `host::run_export` ([host.rs](apps/desktop/crates/qlipq-iced/src/host.rs)) spawns
+   the `ffmpeg` binary with exactly those args — no edit logic on the host side.
+3. ffmpeg's `-progress` output is parsed with `parse_progress` into a `0..1`
+   fraction read by the UI. ffprobe works the same way (raw JSON → `parse_ffprobe`).
 
-**The IPC boundary is camelCase.** Rust's `AppConfig` (`#[serde(rename_all =
-"camelCase", default)]`) deliberately mirrors `@qcksys/qlipq-core`'s `AppConfig`.
-If you add a config field, change it in **both** [config.ts](packages/core/src/config.ts)
-and the Rust struct, or the round-trip silently drops it.
+**Two preview backends, selected by a Cargo feature** — export is unaffected by
+either; preview accuracy is advisory, export accuracy comes from the parity-tested
+`-ss`/`-t` args.
+
+- **Default (CLI, dependency-light):** a warm ffmpeg process streams raw RGBA
+  frames into a persistent `wgpu` texture (custom iced shader widget,
+  [video.rs](apps/desktop/crates/qlipq-iced/src/video.rs)); HDR is CPU-tonemapped
+  via a zscale chain. No audio. Builds with no native libav dependency (this is
+  what CI builds).
+- **`--features libav-preview` (in-process):** decodes with **rsmpeg** (libav) →
+  **libplacebo** HDR→SDR tonemap → **cpal** audio (audio is the A/V master clock),
+  in [libav.rs](apps/desktop/crates/qlipq-iced/src/libav.rs). Needs a shared FFmpeg
+  8.x dev build wired via the (gitignored) `.cargo/config.toml`; off by default.
+  _Known limitation:_ preview audio plays the single best audio stream at full
+  volume (`find_best_stream`, ~libav.rs:475) — the per-track enable/volume you set
+  in the editor is honored **only on export**, not in preview.
+
+**Audio export is multi-track, not mixed.** `buildExportArgs`/`build_export_args`
+map each enabled audio track as a **separate output stream**, each with its own
+`volume=` filter when gain ≠ 1.0. There is **no `amix`**. (The old `amix`-based
+[proxy.ts](packages/ffmpeg/src/proxy.ts) is legacy preview-proxy code, unused and
+not ported to Rust — don't wire it back in.)
+
+**Config is shared and camelCase.** `@qcksys/qlipq-core`'s `AppConfig`
+([config.ts](packages/core/src/config.ts)) and the Rust `qlipq-core`
+[config.rs](apps/desktop/crates/qlipq-core/src/config.rs) (`#[serde(rename_all =
+"camelCase")]`) must agree. The app persists `config.json` + per-clip `edits.json`
+(camelCase, with a `$schema` ref) under **`~/.com.qcksys.qlipq/`**
+(`host::data_dir`). Add a config field in **both** sides or the round-trip silently
+drops it — and update the schema generator (below). `@qcksys/qlipq-core` also owns
+the domain model (QueueItem, EditSpec, MediaInfo), config defaults, OBS filename
+parsing, and rename templating; the Rust `qlipq-core` crate ports all of it with
+parity tests, and `@qcksys/qlipq-ffmpeg` depends on `@qcksys/qlipq-core`.
 
 **No OBS plugin (by design).** OBS already writes a timestamp (+ optional
-scene/game prefix) into filenames; `parseObsFilename` in `@qcksys/qlipq-core` plus
-ffprobe recover everything needed, so there is no native plugin. Don't reintroduce
-one. `@qcksys/qlipq-core` also owns the domain model (QueueItem, EditSpec, MediaInfo),
-config defaults, and rename templating; `@qcksys/qlipq-ffmpeg` depends on it.
+scene/game prefix) into filenames; `parseObsFilename` ([obs.ts](packages/core/src/obs.ts))
+plus ffprobe recover everything, so there is no native plugin — don't reintroduce
+one. The separate **QlipQRenamer** OBS companion _Lua script_ lives in
+[packages/obs-script](packages/obs-script) (`@qcksys/qlipq-obs-script`) and sorts
+recordings into per-game folders inside OBS; the website serves it from the package
+source via a `?raw` import (no `public/` copy). Don't brand it "RecORDER".
 
 `apps/website` is an Astro static site deployed to Cloudflare Workers via Static
 Assets, with two wrangler envs (`dev` → dev.qlipq.com, `production` → qlipq.com);
@@ -85,20 +114,23 @@ Content Layer API: the `glob()` loader in
 functionality without updating the relevant guide markdown is incomplete.
 
 **Config schema.** The app's `config.json` is described by a JSON Schema generated
-from `@qcksys/qlipq-core`'s `AppConfig` and hosted on the site at
-`/schema/config-<version>.json` (version = `@qcksys/qlipq-core`'s package version).
-When you add/rename a config field (in both `config.ts` and the Rust struct), also
-update the schema generator so the hosted schema stays accurate.
+at build time from `@qcksys/qlipq-core`'s `AppConfig` by
+[schema/[id].json.ts](apps/website/src/pages/schema/[id].json.ts) and hosted on the
+site at `/schema/config-<version>.json` (version = `@qcksys/qlipq-core`'s package
+version), with a `/schema/config.json` "latest" alias. When you add/rename a config
+field (in both `config.ts` and the Rust struct), also update that generator so the
+hosted schema stays accurate.
 
 ## Commands
 
-Use `vp` for everything except the Tauri app (which uses its own CLI via pnpm).
+Use `vp` for the TS packages + website (the pnpm workspace). The desktop app is a
+**separate Cargo workspace** under `apps/desktop/` — use `cargo`, not `vp`.
 
 ```bash
 vp install                          # install workspace deps (run after pulling)
 vp check                            # format + lint + type-check
-vp run -r test                      # all tests, every package (flags BEFORE the task)
-vp run -r build                     # build packages + website + app frontend
+vp run -r test                      # all TS tests, every package (flags BEFORE the task)
+vp run -r build                     # build packages + website
 pnpm ready                          # fmt + lint + test + build (the full gate)
 ```
 
@@ -110,11 +142,14 @@ vp test -t "stream copy"                          # by test-name regex
 vp test watch                                     # watch mode
 ```
 
-Desktop app (Tauri — needs Rust + ffmpeg/ffprobe on PATH):
+Desktop app (Rust + iced — needs a Rust toolchain; ffmpeg/ffprobe on `PATH` or set
+in Settings → FFmpeg). Run from `apps/desktop/`:
 
 ```bash
-pnpm -C apps/desktop-tauri tauri dev          # dev, hot-reloads the React frontend
-pnpm -C apps/desktop-tauri tauri build        # produce installers
+cargo test -p qlipq-core -p qlipq-ffmpeg   # the ported parity tests
+cargo run -p qlipq-iced                     # launch the app (default CLI preview)
+cargo run -p qlipq-iced --features libav-preview   # in-process libav/cpal preview
+cargo build --release                       # produce the `qlipq` binary
 ```
 
 Website:
@@ -145,3 +180,15 @@ packages; merging to `main` opens a "Version Packages" PR that publishes
   (tsgo needs `@typescript/native-preview`, which isn't installed).
 - **On Windows PowerShell the `pnpm` shim is flaky** for `exec`/`view`/`run`; run
   raw `pnpm` subcommands via the Bash tool. `vp` itself is fine in PowerShell.
+- **The desktop app is a Cargo workspace, not a pnpm member.** `pnpm-workspace.yaml`
+  excludes it; `vp`/changesets never touch it, and its `qlipq-core`/`qlipq-ffmpeg`
+  crates version independently of the published `@qcksys/*` packages.
+- **`libav-preview` wiring is machine-specific and gitignored.** It links a shared
+  FFmpeg 8.x dev build via `apps/desktop/.cargo/config.toml` (`FFMPEG_*` env vars +
+  the vendored `apps/desktop/vendor/rusty_ffmpeg_*_binding.rs`, which skips bindgen
+  so no libclang/MSVC headers are needed). The default build doesn't need any of it.
+- **Some leftovers from the Tauri/C# eras are still in the tree** and should not be
+  trusted: `pnpm-workspace.yaml` excludes the old `!apps/desktop-native` (should be
+  `apps/desktop`), and `.github/workflows/{build-app,dotnet-desktop,iced-desktop}.yml`
+  reference deleted apps. `README.md` (root) and `apps/desktop/README.md` also still
+  mention the removed apps. Treat these as cleanup, not as current behavior.
