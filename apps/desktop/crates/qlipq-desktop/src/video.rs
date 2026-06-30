@@ -1,13 +1,12 @@
-//! A custom iced `shader` widget that renders raw RGBA video frames through a single, **persistent**
+//! A custom GPU `shader` widget that renders raw RGBA video frames through a single, **persistent**
 //! `wgpu::Texture` updated in place via `queue.write_texture`.
 //!
 //! Why this exists: feeding live frames through `image::Handle::from_rgba` mints a brand-new image
-//! id every frame, and iced's wgpu image cache evicts ids not seen in the current frame — so each
+//! id every frame, and the GUI's wgpu image cache evicts ids not seen in the current frame — so each
 //! frame allocates then frees a slot in the shared texture atlas, which repacks and **flickers**. A
-//! shader primitive owns its own texture and bypasses the atlas entirely. This mirrors how
-//! `iced_video_player` renders on iced 0.14.
+//! shader primitive owns its own texture and bypasses the atlas entirely.
 //!
-//! iced sets the render-pass viewport to the widget's bounds before [`Primitive::draw`], so a
+//! The GUI sets the render-pass viewport to the widget's bounds before [`Primitive::draw`], so a
 //! fullscreen triangle with UV 0..1 maps the whole frame into the widget — no transform needed.
 //! Size the widget to the frame's aspect ratio to avoid stretching.
 
@@ -106,7 +105,7 @@ impl shader::Primitive for VideoPrimitive {
     }
 }
 
-/// Long-lived GPU state, created once and stored by iced for all [`VideoPrimitive`]s.
+/// Long-lived GPU state, created once and stored by the GUI runtime for all [`VideoPrimitive`]s.
 pub struct VideoPipeline {
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,

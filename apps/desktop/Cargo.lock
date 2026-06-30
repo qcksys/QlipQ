@@ -3251,17 +3251,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qlipq-ffmpeg"
-version = "0.1.0"
-dependencies = [
- "qlipq-core",
- "regex",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "qlipq-iced"
+name = "qlipq-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3280,6 +3270,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "winreg",
+]
+
+[[package]]
+name = "qlipq-ffmpeg"
+version = "0.1.0"
+dependencies = [
+ "qlipq-core",
+ "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

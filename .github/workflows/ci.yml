@@ -23,14 +23,11 @@ jobs:
 
       - run: vp install
 
-      - name: Install FFmpeg (for ffmpeg integration tests)
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
       - name: Format, lint & type check
         run: vp check
 
       - name: Test
         run: vp run -r test
 
-      - name: Build packages, website & app frontend
+      - name: Build website
         run: vp run -r build

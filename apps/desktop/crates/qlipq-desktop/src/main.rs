@@ -1,6 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-//! qlipq — cross-platform recording queue + FFmpeg clip editor (iced front-end).
+//! qlipq — recording queue + FFmpeg clip editor desktop app.
 //!
 //! The pure crates (`qlipq-core`, `qlipq-ffmpeg`) build the ffmpeg command lines and parse
 //! output; this binary is the host + UI. Video preview uses ffmpeg frame extraction (a frame is

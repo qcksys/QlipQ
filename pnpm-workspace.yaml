@@ -1,6 +1,6 @@
 packages:
   - apps/*
-  - "!apps/desktop-native" # Rust + iced app (own Cargo workspace, not a pnpm member)
+  - "!apps/desktop" # Rust + iced app (own Cargo workspace, not a pnpm member)
   - packages/*
   - tools/*
 

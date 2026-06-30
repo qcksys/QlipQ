@@ -1,5 +1,5 @@
 [package]
-name = "qlipq-iced"
+name = "qlipq-desktop"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

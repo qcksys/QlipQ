@@ -9,7 +9,6 @@ order: 1
 QlipQ is powered by [FFmpeg](https://ffmpeg.org) — it shells out to `ffmpeg` and `ffprobe` for probing and exporting. Install FFmpeg and ensure it is available on your `PATH`:
 
 - **Windows:** `winget install Gyan.FFmpeg`
-- **macOS:** `brew install ffmpeg`
 - **Linux:** `sudo apt install ffmpeg`
 
 If FFmpeg is not on your `PATH`, open QlipQ's **Settings → FFmpeg** and set the full paths to the `ffmpeg` and `ffprobe` binaries. There's a **Test** button next to each to confirm they run.

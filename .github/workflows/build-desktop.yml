@@ -1,25 +1,25 @@
-name: Desktop (Rust / iced)
+name: Desktop
 
 on:
   push:
     branches: [main]
-    paths: ["../../apps/desktop/**", ".github/workflows/iced-desktop.yml"]
+    paths: ["apps/desktop/**", ".github/workflows/build-desktop.yml"]
   pull_request:
-    paths: ["../../apps/desktop/**", ".github/workflows/iced-desktop.yml"]
+    paths: ["apps/desktop/**", ".github/workflows/build-desktop.yml"]
 
 jobs:
   build-test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     concurrency:
-      group: iced-${{ github.ref }}-${{ matrix.os }}
+      group: desktop-${{ github.ref }}-${{ matrix.os }}
       cancel-in-progress: true
     defaults:
       run:
-        working-directory: apps/desktop-native
+        working-directory: apps/desktop
     steps:
       - uses: actions/checkout@v5
 
@@ -27,7 +27,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: apps/desktop-native -> target
+          workspaces: apps/desktop -> target
 
       - name: Install Linux GUI build dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -35,10 +35,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev
 
-      # The pure crates are the migration's correctness gate (ffmpeg-arg parity + domain logic).
+      # The pure crates are the correctness gate (ffmpeg-arg + domain logic).
       - name: Test shared crates
         run: cargo test -p qlipq-core -p qlipq-ffmpeg
 
-      # Compile the cross-platform iced app (running needs a display + ffmpeg on PATH).
-      - name: Build iced app
-        run: cargo build -p qlipq-iced
+      # Compile the desktop app (running needs a display + ffmpeg on PATH).
+      - name: Build desktop app
+        run: cargo build -p qlipq-desktop

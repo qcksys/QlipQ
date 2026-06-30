@@ -1,24 +1,22 @@
-# qlipq — cross-platform desktop app (Rust + iced)
+# qlipq — desktop app (Rust)
 
-A **cross-platform** (Windows / macOS / Linux) build of the qlipq desktop app, written in
-Rust with the [iced](https://iced.rs) GUI. It's an alternative front-end to the Windows-only
-WinUI 3 app in [`../../desktop`](../../desktop), sharing the same architecture and on-disk data.
-It lives in its own Cargo workspace — **not** a member of the Vite+ JS monorepo.
+The qlipq desktop app: a native **Windows-first** build (Linux is also supported; macOS is **not** a
+target) written in Rust. It lives in its own Cargo workspace — **not** a member of the
+Vite+ JS monorepo. (It supersedes the earlier Tauri and C# / WinUI 3 apps, both since removed.)
 
 ## Architecture
 
 Same split as every qlipq front-end: **the app builds ffmpeg/ffprobe argument strings; the
-host only spawns processes.** The two pure crates are Rust ports of the shared TS packages and
-are covered by ported parity tests.
+host only spawns processes.** The two pure crates (`qlipq-core`, `qlipq-ffmpeg`) hold the
+domain + ffmpeg-arg logic and are covered by unit tests.
 
-| Crate                              | Role                                                                                                                                                                                       |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `crates/qlipq-core`                | Domain model + pure logic — config (+ lenient JSON), edit spec, OBS filename parsing, rename templating, INI/OBS detection, datetimes. Port of `@qcksys/qlipq-core`.                       |
-| `crates/qlipq-ffmpeg`              | The single source of truth for ffmpeg/ffprobe **arg building & parsing** — `build_export_args`, `parse_ffprobe`, `parse_progress`, `estimate_export_size`. Port of `@qcksys/qlipq-ffmpeg`. |
-| `crates/qlipq-iced` (`bin: qlipq`) | The iced UI + host layer (process spawning, folder scan/watch, config/edits persistence, OBS/NVIDIA detection, frame extraction).                                                          |
+| Crate                                 | Role                                                                                                                                                       |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/qlipq-core`                   | Domain model + pure logic — config (+ lenient JSON), edit spec, OBS filename parsing, rename templating, INI/OBS detection, datetimes.                     |
+| `crates/qlipq-ffmpeg`                 | The single source of truth for ffmpeg/ffprobe **arg building & parsing** — `build_export_args`, `parse_ffprobe`, `parse_progress`, `estimate_export_size`. |
+| `crates/qlipq-desktop` (`bin: qlipq`) | The GUI + host layer (process spawning, folder scan/watch, config/edits persistence, OBS/NVIDIA detection, frame extraction).                              |
 
-The TS packages remain the **parity oracle**; the Rust ports mirror them (and the C# ports) and
-the ported `cargo test` suites assert the same behaviour, including exact ffmpeg-arg vectors.
+The `cargo test` suites assert exact behaviour, including the precise ffmpeg-arg vectors.
 
 ## Build, test & run
 
@@ -26,9 +24,9 @@ Requires a stable Rust toolchain. ffmpeg/ffprobe must be on `PATH` (or set expli
 **Settings → FFmpeg**) — the app shells out to them.
 
 ```bash
-# From apps/desktop-native/
-cargo test -p qlipq-core -p qlipq-ffmpeg   # 72 parity/domain tests
-cargo run -p qlipq-iced                     # launch the app
+# From apps/desktop/
+cargo test -p qlipq-core -p qlipq-ffmpeg   # the crate tests
+cargo run -p qlipq-desktop                  # launch the app
 ```
 
 Linux build deps (for the GUI crate): `libxkbcommon-dev libwayland-dev libgtk-3-dev`.
@@ -36,7 +34,7 @@ Linux build deps (for the GUI crate): `libxkbcommon-dev libwayland-dev libgtk-3-
 ## Video preview
 
 There is no cross-platform native video widget, so the preview decodes frames itself and uploads
-them to a persistent `wgpu` texture (a custom `iced` shader widget — see `src/video.rs`). There are
+them to a persistent `wgpu` texture (a custom GPU shader widget — see `src/video.rs`). There are
 two backends:
 
 **Default (CLI, dependency-light).** A warm ffmpeg process streams raw RGBA frames to the app
@@ -52,7 +50,7 @@ so CI / other machines build the CLI path. _Note: software AV1 decode of very he
 10-bit) tops out below realtime, so video lags audio there — hardware-accelerated decode is the
 planned fix._
 
-In all cases **export accuracy comes from ffmpeg `-ss`/`-t`** (the parity-tested arg-vector); the
+In all cases **export accuracy comes from ffmpeg `-ss`/`-t`** (the unit-tested arg-vector); the
 preview is an advisory guide.
 
 ## Data compatibility

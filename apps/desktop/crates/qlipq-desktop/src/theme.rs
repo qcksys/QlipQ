@@ -1,6 +1,6 @@
 //! Custom brand theme + reusable widget styles. Centralizes the app's "design tokens" (palette,
 //! radius, surfaces) so the look stays consistent and a re-skin is a one-file change. Built on
-//! iced 0.14's custom `Palette` (Oklch-derived extended palette) + per-widget style closures.
+//! the GUI toolkit's custom `Palette` (Oklch-derived extended palette) + per-widget style closures.
 
 use iced::border::Radius;
 use iced::theme::Palette;

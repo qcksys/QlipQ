@@ -1,17 +1,9 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import type { APIRoute, GetStaticPaths } from "astro";
 
-// The schema describes the desktop app's config.json (mirrors @qcksys/qlipq-core's
-// AppConfig). It is versioned by that package's version, read at build time.
-const corePkg = JSON.parse(
-  readFileSync(
-    fileURLToPath(new URL("../../../../../packages/core/package.json", import.meta.url)),
-    "utf8",
-  ),
-) as { version: string };
-
-const VERSION = corePkg.version;
+// The schema describes the desktop app's config.json. Bump VERSION when the AppConfig
+// shape changes; the app stamps the unversioned /schema/config.json alias, so this only
+// names the pinned /schema/config-<VERSION>.json artifact.
+const VERSION = "0.0.0";
 
 function buildConfigSchema(id: string) {
   return {
