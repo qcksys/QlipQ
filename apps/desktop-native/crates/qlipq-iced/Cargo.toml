@@ -18,6 +18,10 @@ libav-preview = ["dep:rsmpeg"]
 name = "smoke"
 required-features = ["libav-preview"]
 
+[[example]]
+name = "hdr_probe"
+required-features = ["libav-preview"]
+
 [dependencies]
 qlipq-core = { workspace = true }
 qlipq-ffmpeg = { workspace = true }
