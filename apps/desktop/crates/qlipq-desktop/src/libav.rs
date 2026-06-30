@@ -17,7 +17,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::CString;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -88,6 +88,9 @@ struct Shared {
     /// HDR→SDR preview brightness (`eq` gamma applied after the tonemap); read when (re)building the
     /// per-segment filter graph. Set once at `start_player`.
     gamma: f64,
+    /// Pixel format the filter buffer source must declare — the post-transfer NV12/P010 when the
+    /// decoder is hardware-accelerated, else the decoder's native format. Set once at `start_player`.
+    video_pix_fmt: i32,
 }
 
 enum Command {
@@ -200,7 +203,7 @@ pub fn start_player(
     let input = AVFormatContextInput::open(&cpath).ok()?;
 
     let vid_idx = input.find_best_stream(ffi::AVMEDIA_TYPE_VIDEO).ok()?.map(|(i, _)| i)?;
-    let (vdec, tb_v, sar) = build_video_decoder(&input, vid_idx)?;
+    let (vdec, tb_v, sar, video_pix_fmt) = build_video_decoder(&input, vid_idx)?;
     // Preview audio is a monitor mixdown of the *enabled* tracks (per-track gain), so "has audio"
     // means the file has audio AND at least one track is enabled — disabling them all plays silence
     // (video then runs on the wall clock).
@@ -214,6 +217,7 @@ pub fn start_player(
         video: Mutex::new(VecDeque::new()),
         ended: AtomicBool::new(false),
         gamma,
+        video_pix_fmt,
         clock: Clock {
             use_audio: AtomicBool::new(has_audio),
             base: Mutex::new(start_sec),
@@ -279,6 +283,8 @@ pub struct ScrubDecoder {
     is_hdr: bool,
     /// HDR→SDR preview brightness (`eq` gamma); baked into the warm graph on first `frame_at`.
     gamma: f64,
+    /// Buffer-source pixel format (NV12/P010 if hardware-decoded, else native). See `build_video_decoder`.
+    pix_fmt: i32,
     /// Warm filter graph, built lazily on the first `frame_at` and reused for every scrub.
     graph: Option<AVFilterGraph>,
     /// Monotonic PTS handed to buffersrc so reused-graph pushes never look like backward time.
@@ -293,7 +299,7 @@ impl ScrubDecoder {
         let cpath = CString::new(path).ok()?;
         let input = AVFormatContextInput::open(&cpath).ok()?;
         let vid_idx = input.find_best_stream(ffi::AVMEDIA_TYPE_VIDEO).ok()?.map(|(i, _)| i)?;
-        let (vdec, tb_v, sar) = build_video_decoder(&input, vid_idx)?;
+        let (vdec, tb_v, sar, pix_fmt) = build_video_decoder(&input, vid_idx)?;
         Some(Self {
             input,
             vdec,
@@ -303,6 +309,7 @@ impl ScrubDecoder {
             dims: placebo_dims(src_w, src_h),
             is_hdr,
             gamma,
+            pix_fmt,
             graph: None,
             mono_pts: 0,
         })
@@ -328,7 +335,7 @@ impl ScrubDecoder {
         // Build the warm graph once (its libplacebo/Vulkan init is the one-time cost).
         if self.graph.is_none() {
             let graph = AVFilterGraph::new();
-            build_video_filter(&graph, &self.vdec, self.tb_v, self.sar, w, h, self.is_hdr, self.gamma).ok()?;
+            build_video_filter(&graph, &self.vdec, self.tb_v, self.sar, w, h, self.is_hdr, self.gamma, self.pix_fmt).ok()?;
             self.graph = Some(graph);
         }
 
@@ -352,6 +359,7 @@ fn decode_to_target(
     loop {
         match vdec.receive_frame() {
             Ok(f) => {
+                let f = to_sw_frame(f)?; // download from GPU if hw-decoded (pts is carried across)
                 if f.pts as f64 * tb_v_secs + 1e-3 >= target {
                     return Some(f);
                 }
@@ -379,7 +387,7 @@ fn decode_to_target(
 fn decode_next_frame(input: &mut AVFormatContextInput, vdec: &mut AVCodecContext, vid_idx: i32) -> Option<AVFrame> {
     loop {
         match vdec.receive_frame() {
-            Ok(f) => return Some(f),
+            Ok(f) => return to_sw_frame(f),
             Err(RsmpegError::DecoderDrainError) => {}
             Err(_) => return None,
         }
@@ -484,7 +492,7 @@ fn video_segment(
     vdec.flush_buffers();
 
     let graph = AVFilterGraph::new();
-    let (mut src, mut sink) = match build_video_filter(&graph, vdec, tb_v, sar, w, h, is_hdr, shared.gamma) {
+    let (mut src, mut sink) = match build_video_filter(&graph, vdec, tb_v, sar, w, h, is_hdr, shared.gamma, shared.video_pix_fmt) {
         Ok(pair) => pair,
         Err(_) => return SegEnd::Eof,
     };
@@ -542,7 +550,9 @@ fn feed_video(vdec: &mut AVCodecContext, src: &mut AVFilterContextMut) {
     loop {
         match vdec.receive_frame() {
             Ok(frame) => {
-                let _ = src.buffersrc_add_frame(Some(frame), None);
+                if let Some(sw) = to_sw_frame(frame) {
+                    let _ = src.buffersrc_add_frame(Some(sw), None);
+                }
             }
             Err(_) => break, // drain / flushed / error — nothing more to pull right now
         }
@@ -935,14 +945,83 @@ fn rational_secs(r: ffi::AVRational) -> f64 {
     }
 }
 
+/// The D3D11VA hardware pixel format (e.g. `AV_PIX_FMT_D3D11`), read from `avcodec_get_hw_config` and
+/// shared with the `get_hw_format` callback (a C function pointer that can't capture). It's the same
+/// value for every decoder in the process, so a single global is race-free.
+static HW_PIX_FMT: AtomicI32 = AtomicI32::new(ffi::AV_PIX_FMT_NONE);
+
+/// Decoder `get_format` callback: pick the D3D11VA surface format if the decoder offers it, else fall
+/// back to its first (software) choice. Selecting the hw format is what actually engages hwaccel.
+unsafe extern "C" fn get_hw_format(
+    _ctx: *mut ffi::AVCodecContext,
+    fmts: *const ffi::AVPixelFormat,
+) -> ffi::AVPixelFormat {
+    let want = HW_PIX_FMT.load(Ordering::Relaxed);
+    let mut p = fmts;
+    while unsafe { *p } != ffi::AV_PIX_FMT_NONE {
+        if unsafe { *p } == want {
+            return want;
+        }
+        p = unsafe { p.add(1) };
+    }
+    unsafe { *fmts } // hw not offered for this stream → first (software) format
+}
+
+/// The D3D11VA hardware pixel format this decoder supports via a hw device context, if any.
+fn d3d11va_hw_pix_fmt(codec: &AVCodec) -> Option<i32> {
+    let mut i = 0;
+    loop {
+        let cfg = unsafe { ffi::avcodec_get_hw_config(codec.as_ptr(), i) };
+        if cfg.is_null() {
+            return None;
+        }
+        let cfg = unsafe { &*cfg };
+        if cfg.methods & ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0
+            && cfg.device_type == ffi::AV_HWDEVICE_TYPE_D3D11VA
+        {
+            return Some(cfg.pix_fmt as i32);
+        }
+        i += 1;
+    }
+}
+
+/// True if `fmt` (an `AVPixelFormat`) carries more than 8 bits per component (→ P010 after hw transfer).
+fn pix_fmt_is_10bit(fmt: i32) -> bool {
+    let desc = unsafe { ffi::av_pix_fmt_desc_get(fmt) };
+    !desc.is_null() && unsafe { (*desc).comp[0].depth } > 8
+}
+
+/// If `frame` is a hardware surface (D3D11), download it to a software frame (NV12/P010) for the CPU
+/// filter graph, carrying timestamps/color props across. Software frames pass through untouched.
+fn to_sw_frame(frame: AVFrame) -> Option<AVFrame> {
+    if unsafe { (*frame.as_ptr()).hw_frames_ctx.is_null() } {
+        return Some(frame);
+    }
+    let mut sw = AVFrame::new();
+    unsafe {
+        if ffi::av_hwframe_transfer_data(sw.as_mut_ptr(), frame.as_ptr(), 0) < 0 {
+            return None;
+        }
+        ffi::av_frame_copy_props(sw.as_mut_ptr(), frame.as_ptr());
+    }
+    Some(sw)
+}
+
+/// Build the video decoder, enabling **D3D11VA hardware decode** when the codec + GPU support it (it
+/// works on Windows for all vendors). Returns the pixel format the filter buffer source should expect:
+/// the post-transfer software format (NV12 / P010) when hwaccel engages, else the decoder's native
+/// format. Falls back to software decode automatically if the hw device can't be created — so this is
+/// a no-op on machines without a usable GPU decoder. Heavy 1440p10 AV1/HEVC is where this earns its
+/// keep (software decode there runs below realtime and starves preview audio).
 fn build_video_decoder(
     input: &AVFormatContextInput,
     idx: usize,
-) -> Option<(AVCodecContext, ffi::AVRational, ffi::AVRational)> {
+) -> Option<(AVCodecContext, ffi::AVRational, ffi::AVRational, i32)> {
     let stream = &input.streams()[idx];
     let tb = stream.time_base;
     let par = stream.codecpar();
     let sar = par.sample_aspect_ratio;
+    let src_fmt = par.format; // bitstream sw pixel format
     let codec = AVCodec::find_decoder(par.codec_id)?;
     let mut dec = AVCodecContext::new(&codec);
     dec.apply_codecpar(&par).ok()?;
@@ -952,9 +1031,34 @@ fn build_video_decoder(
     unsafe {
         (*dec.as_mut_ptr()).thread_count = 0;
     }
+
+    // Try D3D11VA. If the device is created, frames come back as hw surfaces and `to_sw_frame`
+    // downloads them to NV12 (8-bit) / P010 (10-bit) — which is what the buffer source must declare.
+    let mut buffersrc_fmt = src_fmt;
+    if let Some(hw_pix_fmt) = d3d11va_hw_pix_fmt(&codec) {
+        let mut hw_device: *mut ffi::AVBufferRef = std::ptr::null_mut();
+        let created = unsafe {
+            ffi::av_hwdevice_ctx_create(
+                &mut hw_device,
+                ffi::AV_HWDEVICE_TYPE_D3D11VA,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if created >= 0 {
+            HW_PIX_FMT.store(hw_pix_fmt, Ordering::Relaxed);
+            unsafe {
+                (*dec.as_mut_ptr()).hw_device_ctx = hw_device; // ownership → freed with the context
+                (*dec.as_mut_ptr()).get_format = Some(get_hw_format);
+            }
+            buffersrc_fmt = if pix_fmt_is_10bit(src_fmt) { ffi::AV_PIX_FMT_P010LE } else { ffi::AV_PIX_FMT_NV12 };
+        }
+    }
+
     dec.open(None).ok()?;
     let sar = if sar.num == 0 { ffi::AVRational { num: 1, den: 1 } } else { sar };
-    Some((dec, tb, sar))
+    Some((dec, tb, sar, buffersrc_fmt))
 }
 
 fn build_audio_decoder(input: &AVFormatContextInput, idx: usize) -> Option<(AVCodecContext, ffi::AVRational)> {
@@ -980,6 +1084,7 @@ fn build_video_filter<'g>(
     h: u32,
     is_hdr: bool,
     gamma: f64,
+    pix_fmt: i32,
 ) -> Result<(AVFilterContextMut<'g>, AVFilterContextMut<'g>), String> {
     // Carry the decoded color matrix + range into the buffer source. Without them the source is
     // created as colorspace/range "unknown", so the first HDR frame (bt2020nc / tv) trips
@@ -987,11 +1092,14 @@ fn build_video_filter<'g>(
     // libplacebo's continuous output (playback freezes after one frame) and feeds it the wrong
     // input colorimetry (a limited-range source read as unknown comes out dull/dark). color_primaries
     // and color_trc ride along on each frame, so the buffer only needs colorspace + range.
+    // `pix_fmt` is the frame format the source will actually receive — NV12/P010 after a hardware
+    // decode + transfer, the decoder's native format otherwise (not `vdec.pix_fmt`, which is the
+    // opaque D3D11 surface format under hwaccel).
     let (colorspace, color_range) =
         unsafe { ((*vdec.as_ptr()).colorspace as i32, (*vdec.as_ptr()).color_range as i32) };
     let args = CString::new(format!(
         "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}:colorspace={}:range={}",
-        vdec.width, vdec.height, vdec.pix_fmt as i32, tb_v.num, tb_v.den, sar.num, sar.den, colorspace, color_range
+        vdec.width, vdec.height, pix_fmt, tb_v.num, tb_v.den, sar.num, sar.den, colorspace, color_range
     ))
     .map_err(|e| e.to_string())?;
 

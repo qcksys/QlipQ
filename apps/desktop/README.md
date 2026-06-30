@@ -48,9 +48,9 @@ the portable build with no native libav dependency — what CI and the release b
 detection, 203-nit BT.2408 SDR white) and audio → swresample → **cpal**, with audio as the master
 clock for A/V sync (`src/libav.rs`). Needs a shared FFmpeg dev build wired via `.cargo/config.toml`; on
 by default, so build with `--no-default-features` where that SDK isn't set up (CI / other machines).
-_Note: software AV1 decode of very heavy clips (1440p60
-10-bit) tops out below realtime, so video lags audio there — hardware-accelerated decode is the
-planned fix._
+_Decode is **D3D11VA hardware-accelerated** when the GPU + codec support it (it keeps heavy 1440p10
+AV1/HEVC in realtime so video doesn't lag and starve preview audio), with automatic software fallback
+on machines without a usable GPU decoder._
 
 In all cases **export accuracy comes from ffmpeg `-ss`/`-t`** (the unit-tested arg-vector); the
 preview is an advisory guide.
