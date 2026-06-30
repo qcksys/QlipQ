@@ -12,6 +12,17 @@ mod iso;
 mod theme;
 mod video;
 
+#[cfg(feature = "libav-preview")]
+mod libav;
+
+// The preview decoder is feature-selected: the in-process libav player (libplacebo HDR + synced
+// audio) when `libav-preview` is on, else the CLI ffmpeg player. Both expose the same interface
+// (`poll`/`dimensions`/`fps`/`position`/`try_seek`) so the editor code below is feature-agnostic.
+#[cfg(feature = "libav-preview")]
+use libav::{extract_frame, start_player, Player as PreviewPlayer};
+#[cfg(not(feature = "libav-preview"))]
+use host::{extract_frame, start_player, Player as PreviewPlayer};
+
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -150,8 +161,8 @@ struct Editor {
     frame_dirty: bool,
     extracting: bool,
     playing: bool,
-    /// Warm streaming decoder, present only while playing (dropped → ffmpeg killed).
-    player: Option<host::Player>,
+    /// Warm streaming decoder, present only while playing (dropped → decoder stopped).
+    player: Option<PreviewPlayer>,
     exporting: bool,
     progress: Arc<Mutex<f32>>,
     progress_display: f32,
@@ -500,13 +511,20 @@ impl App {
             }
             Message::Skip(delta) => {
                 let playing = self.editor.as_ref().map(|e| e.playing).unwrap_or(false);
+                let mut seeked = false;
                 if let Some(ed) = &mut self.editor {
                     let max = ed.media.as_ref().map(|m| m.duration_sec).unwrap_or(0.0);
                     ed.current_time = (ed.current_time + delta).clamp(0.0, max);
+                    if playing {
+                        // Prefer an in-process seek of the warm decoder; the CLI player can't, so it
+                        // reports false and we restart below instead.
+                        seeked = ed.player.as_ref().map(|p| p.try_seek(ed.current_time)).unwrap_or(false);
+                    }
                 }
-                if playing {
-                    return self.play_from_current(); // re-seek the warm decoder to the new position
-                } else {
+                if playing && !seeked {
+                    return self.play_from_current(); // re-seek by restarting the warm decoder
+                }
+                if !playing {
                     return self.request_frame();
                 }
             }
@@ -796,28 +814,41 @@ impl App {
     /// from the channel backpressure: the decoder produces at roughly the rate we consume).
     fn on_playback_tick(&mut self) {
         let Some(ed) = &mut self.editor else { return };
-        let polled = ed.player.as_ref().map(|p| (p.poll(), p.dimensions(), p.fps()));
-        let Some((frame, (w, h), fps)) = polled else { return };
-        match frame {
+        let polled = ed.player.as_ref().map(|p| (p.poll(), p.dimensions(), p.fps(), p.position()));
+        let Some((frame, (w, h), fps, position)) = polled else { return };
+        let dur = ed.media.as_ref().map(|m| m.duration_sec).filter(|d| *d > 0.0);
+
+        let advance = match frame {
             host::FramePoll::Frame(bytes) => {
                 video::push_frame(&ed.shared_frame, w, h, bytes);
                 ed.has_frame = true;
-                ed.current_time += 1.0 / fps;
-                // Hard-stop at the known end so playback halts cleanly and never overruns or loops.
-                // `Ended` (ffmpeg EOF) below remains the fallback when the duration is unknown/0.
-                if let Some(dur) = ed.media.as_ref().map(|m| m.duration_sec).filter(|d| *d > 0.0) {
-                    if ed.current_time >= dur {
-                        ed.current_time = dur;
-                        ed.playing = false;
-                        ed.player = None;
-                    }
-                }
+                true
             }
-            host::FramePoll::Empty => {}
+            // Keep the playhead tracking the master clock between video frames (smooth scrubber with
+            // synced audio); a no-op for the CLI player, which has no clock.
+            host::FramePoll::Empty => position.is_some(),
             host::FramePoll::Ended => {
-                if let Some(dur) = ed.media.as_ref().map(|m| m.duration_sec).filter(|d| *d > 0.0) {
+                if let Some(dur) = dur {
                     ed.current_time = dur;
                 }
+                ed.playing = false;
+                ed.player = None;
+                return;
+            }
+        };
+        if !advance {
+            return;
+        }
+        // Advance the playhead from the player's master clock when it has one (libav: audio-synced),
+        // else by one frame interval (CLI player). Then hard-stop at the known end so playback halts
+        // cleanly and never overruns or loops — `Ended` (decoder EOF) is the fallback when dur is 0.
+        match position {
+            Some(p) => ed.current_time = p,
+            None => ed.current_time += 1.0 / fps,
+        }
+        if let Some(dur) = dur {
+            if ed.current_time >= dur {
+                ed.current_time = dur;
                 ed.playing = false;
                 ed.player = None;
             }
@@ -850,7 +881,7 @@ impl App {
             ed.frame_dirty = false;
         }
         Task::perform(
-            blocking(move || host::extract_frame(&path, &ffmpeg, sec, mw, mh, is_hdr).ok()),
+            blocking(move || extract_frame(&path, &ffmpeg, sec, mw, mh, is_hdr).ok()),
             move |frame| Message::FrameExtracted(id.clone(), frame),
         )
     }
@@ -872,7 +903,7 @@ impl App {
             return Task::none();
         };
         let ffmpeg = self.config.ffmpeg_path.clone();
-        let player = host::start_player(&path, &ffmpeg, start, mw, mh, mfps, is_hdr);
+        let player = start_player(&path, &ffmpeg, start, mw, mh, mfps, is_hdr);
         let started = player.is_some();
         if let Some(ed) = &mut self.editor {
             ed.current_time = start;

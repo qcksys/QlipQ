@@ -33,17 +33,27 @@ cargo run -p qlipq-iced                     # launch the app
 
 Linux build deps (for the GUI crate): `libxkbcommon-dev libwayland-dev libgtk-3-dev`.
 
-## Video preview (deliberate tradeoff)
+## Video preview
 
-There is no cross-platform native video widget, and this app avoids linking libav. Instead the
-preview **extracts a single frame at the playhead with the ffmpeg CLI** (`-ss … -frames:v 1`,
-scaled to ≤720p) and shows it; the scrubber and ±1/5/60s buttons move the playhead and refresh
-the frame, and **Play** advances it at a low frame rate. This keeps the build dependency-light
-and portable.
+There is no cross-platform native video widget, so the preview decodes frames itself and uploads
+them to a persistent `wgpu` texture (a custom `iced` shader widget — see `src/video.rs`). There are
+two backends:
 
-As with the other front-ends, **export accuracy comes from ffmpeg `-ss`/`-t`** — the preview is
-an advisory guide, not a real-time player. (If real-time A/V playback is needed later, an
-`egui-video`-style libav binding or a GStreamer backend could replace the frame extractor.)
+**Default (CLI, dependency-light).** A warm ffmpeg process streams raw RGBA frames to the app
+(`src/host.rs`); the scrubber/±buttons move the playhead and **Play** advances at ≤30fps. HDR is
+tonemapped to SDR with a CPU zscale chain (an approximation — not VLC-accurate). No audio. This is
+the portable build with no native libav dependency.
+
+**`--features libav-preview` (in-process, VLC-quality).** Decodes with **rsmpeg** (libav) inside the
+process: video → **libplacebo** HDR→SDR tonemap (the engine VLC uses — dynamic peak detection,
+203-nit BT.2408 SDR white) and audio → swresample → **cpal**, with audio as the master clock for A/V
+sync (`src/libav.rs`). Needs a shared FFmpeg dev build wired via `.cargo/config.toml`; off by default
+so CI / other machines build the CLI path. _Note: software AV1 decode of very heavy clips (1440p60
+10-bit) tops out below realtime, so video lags audio there — hardware-accelerated decode is the
+planned fix._
+
+In all cases **export accuracy comes from ffmpeg `-ss`/`-t`** (the parity-tested arg-vector); the
+preview is an advisory guide.
 
 ## Data compatibility
 

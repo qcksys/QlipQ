@@ -5,7 +5,11 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
+// The streaming CLI decoder (Player) only exists when the in-process libav preview is off.
+#[cfg(not(feature = "libav-preview"))]
+use std::process::Child;
+#[cfg(not(feature = "libav-preview"))]
 use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
@@ -240,6 +244,7 @@ fn detect_hdr(probe_json: &str) -> bool {
 /// Build the preview filter chain. For HDR sources, tonemap BT.2020 PQ/HLG → BT.709 SDR (otherwise
 /// HDR is shown with washed-out/clipped colors); for SDR, a plain scale. Both fix the output size so
 /// the raw RGBA byte count is exact. Pass `fps` for the streaming decoder (resamples the rate).
+#[cfg(not(feature = "libav-preview"))]
 fn preview_vf(w: u32, h: u32, is_hdr: bool, fps: Option<f64>) -> String {
     let fps_part = fps.map(|f| format!(",fps={f:.5}")).unwrap_or_default();
     if is_hdr {
@@ -260,6 +265,7 @@ fn preview_vf(w: u32, h: u32, is_hdr: bool, fps: Option<f64>) -> String {
 
 /// Preview output dimensions: scaled to ≤720 tall (never upscaled), preserving aspect.
 /// Both dimensions are fixed explicitly so raw RGBA frames have an exactly known byte count.
+#[cfg(not(feature = "libav-preview"))]
 pub fn preview_dims(src_w: i64, src_h: i64) -> (u32, u32) {
     let src_w = src_w.max(2) as f64;
     let src_h = src_h.max(2) as f64;
@@ -270,6 +276,7 @@ pub fn preview_dims(src_w: i64, src_h: i64) -> (u32, u32) {
 
 /// Extract a single frame at `sec` as raw RGBA bytes for the preview (scrubbing / paused).
 /// Outputs `rawvideo` — no PNG encode/decode round-trip — at a fixed, pre-computed size.
+#[cfg(not(feature = "libav-preview"))]
 pub fn extract_frame(
     path: &str,
     ffmpeg_path: &str,
@@ -313,6 +320,7 @@ pub enum FramePoll {
 /// per frame, so sequential playback avoids the per-frame spawn + container-open + seek cost. A
 /// reader thread pushes frames into a small bounded channel; the full pipe applies backpressure so
 /// ffmpeg decodes at roughly the consumption rate rather than buffering the whole clip in memory.
+#[cfg(not(feature = "libav-preview"))]
 pub struct Player {
     child: Child,
     rx: Receiver<Vec<u8>>,
@@ -321,6 +329,7 @@ pub struct Player {
     fps: f64,
 }
 
+#[cfg(not(feature = "libav-preview"))]
 impl Player {
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -328,6 +337,18 @@ impl Player {
 
     pub fn fps(&self) -> f64 {
         self.fps
+    }
+
+    /// The CLI player has no master clock — the caller advances time by 1/fps per frame.
+    /// (The in-process libav player returns `Some(position)` here instead.)
+    pub fn position(&self) -> Option<f64> {
+        None
+    }
+
+    /// The CLI player can't seek a warm process; `false` tells the caller to restart instead.
+    /// (The in-process libav player seeks via a command channel and returns `true`.)
+    pub fn try_seek(&self, _sec: f64) -> bool {
+        false
     }
 
     /// Non-blocking: take the next decoded frame if one is ready.
@@ -340,6 +361,7 @@ impl Player {
     }
 }
 
+#[cfg(not(feature = "libav-preview"))]
 impl Drop for Player {
     fn drop(&mut self) {
         // Kill the decoder; the reader thread then hits EOF (or the dropped receiver) and exits.
@@ -349,6 +371,7 @@ impl Drop for Player {
 }
 
 /// Start a streaming decoder from `start_sec`, emitting frames at ≤30fps (downsampled from source).
+#[cfg(not(feature = "libav-preview"))]
 pub fn start_player(
     path: &str,
     ffmpeg_path: &str,
