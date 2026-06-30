@@ -2,7 +2,7 @@
 
 A **cross-platform** (Windows / macOS / Linux) build of the qlipq desktop app, written in
 Rust with the [iced](https://iced.rs) GUI. It's an alternative front-end to the Windows-only
-WinUI 3 app in [`../desktop`](../desktop), sharing the same architecture and on-disk data.
+WinUI 3 app in [`../../desktop`](../../desktop), sharing the same architecture and on-disk data.
 It lives in its own Cargo workspace — **not** a member of the Vite+ JS monorepo.
 
 ## Architecture
@@ -26,7 +26,7 @@ Requires a stable Rust toolchain. ffmpeg/ffprobe must be on `PATH` (or set expli
 **Settings → FFmpeg**) — the app shells out to them.
 
 ```bash
-# From iced/
+# From apps/desktop-native/
 cargo test -p qlipq-core -p qlipq-ffmpeg   # 72 parity/domain tests
 cargo run -p qlipq-iced                     # launch the app
 ```

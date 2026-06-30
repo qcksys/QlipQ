@@ -31,12 +31,12 @@ Tauri desktop app, an Astro website, and two shared TS packages.
 > workspace member — see [desktop/README.md](desktop/README.md)). `Qlipq.Core` /
 > `Qlipq.Ffmpeg` are C# ports of the two shared TS packages with **ported parity
 > tests**; the TS packages stay as the parity oracle. Preview proxies were dropped
-> (LibVLC plays MKV/HEVC natively). The Tauri app under `apps/app` is **superseded**
+> (LibVLC plays MKV/HEVC natively). The Tauri app under `apps/desktop-tauri` is **superseded**
 > and should be removed once the WinUI app is validated on a real machine. Until
 > then both exist; the sections below describe the original Tauri app.
 >
-> A **cross-platform** variant lives in **`iced/`** (a Cargo workspace; Windows/macOS/Linux,
-> Rust + [iced](https://iced.rs) — see [iced/README.md](iced/README.md)). It has its own Rust
+> A **cross-platform** variant lives in **`apps/desktop-native`** (a Cargo workspace; Windows/macOS/Linux,
+> Rust + [iced](https://iced.rs) — see [apps/desktop-native/README.md](apps/desktop-native/README.md)). It has its own Rust
 > ports of `qlipq-core`/`qlipq-ffmpeg` with ported parity tests, and previews via ffmpeg
 > frame extraction (no libav linking). Both native rewrites share `~/.com.qcksys.qlipq` config/edits.
 
@@ -49,8 +49,8 @@ package is pure (no I/O) and is the single source of truth for ffmpeg/ffprobe:
 (`tests/integration.test.ts`). Do not build ffmpeg argument strings anywhere else.
 
 **The frontend builds, Rust executes.** Flow for an export
-([Editor.tsx](apps/app/src/components/Editor.tsx) → [api.ts](apps/app/src/lib/api.ts)
-→ [lib.rs](apps/app/src-tauri/src/lib.rs)):
+([Editor.tsx](apps/desktop-tauri/src/components/Editor.tsx) → [api.ts](apps/desktop-tauri/src/lib/api.ts)
+→ [lib.rs](apps/desktop-tauri/src-tauri/src/lib.rs)):
 
 1. React calls `buildExportArgs(...)` to produce the full `string[]` of ffmpeg args.
 2. It invokes the Rust `run_export(id, ffmpegPath, args)` command, which just spawns
@@ -113,8 +113,8 @@ vp test watch                                     # watch mode
 Desktop app (Tauri — needs Rust + ffmpeg/ffprobe on PATH):
 
 ```bash
-pnpm -C apps/app tauri dev          # dev, hot-reloads the React frontend
-pnpm -C apps/app tauri build        # produce installers
+pnpm -C apps/desktop-tauri tauri dev          # dev, hot-reloads the React frontend
+pnpm -C apps/desktop-tauri tauri build        # produce installers
 ```
 
 Website:

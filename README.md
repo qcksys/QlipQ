@@ -11,8 +11,9 @@ editor to **trim, crop, pick audio tracks, and export** — all backed by FFmpeg
 
 ```
 apps/
-  app/        Tauri desktop app — React + TypeScript frontend, Rust backend
-  website/    Astro content site (user guide + download), Cloudflare Workers
+  desktop-tauri/   Tauri desktop app — React + TypeScript frontend, Rust backend
+  desktop-native/  Cross-platform desktop app — Rust + iced (own Cargo workspace)
+  website/         Astro content site (user guide + download), Cloudflare Workers
 packages/
   core/       @qcksys/qlipq-core   — domain model, config, OBS filename parsing, renaming
   ffmpeg/     @qcksys/qlipq-ffmpeg — ffmpeg/ffprobe command builders + output parsers
@@ -56,8 +57,8 @@ vp run -r build     # build packages, website, and the app frontend
 ### Run the desktop app
 
 ```bash
-pnpm -C apps/app tauri dev      # dev (hot-reloads the frontend)
-pnpm -C apps/app tauri build    # produce installers
+pnpm -C apps/desktop-tauri tauri dev      # dev (hot-reloads the frontend)
+pnpm -C apps/desktop-tauri tauri build    # produce installers
 ```
 
 ### Run the website

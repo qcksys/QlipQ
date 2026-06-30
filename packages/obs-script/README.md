@@ -8,12 +8,12 @@ application captured by the scene's **Game Capture** or **Window Capture** sourc
 The point of the port is to drop the **Python dependency**: OBS bundles LuaJIT,
 so a Lua script runs with no separate Python install or version/path setup.
 
-> **This is the `qlipq-obs-script` workspace app.** `recorder.lua` here is the
-> source of truth. The website serves it as a download at `/recorder.lua`
-> (qlipq.com/recorder.lua), documented in
-> [`organize-by-game.md`](../website/src/content/guide/organize-by-game.md).
-> `vp run qlipq-obs-script#build` republishes the copy under `apps/website/public/`;
-> `vp run qlipq-obs-script#test` fails if the two have drifted.
+> **This is the `@qcksys/qlipq-obs-script` package.** `recorder.lua` is its only
+> artifact (exported as `@qcksys/qlipq-obs-script/recorder.lua`). The website
+> consumes it as the single source of truth — [`recorder.lua.ts`](../../apps/website/src/pages/recorder.lua.ts)
+> imports it with `?raw` and serves it at `/recorder.lua` (qlipq.com/recorder.lua).
+> There is no copied file to keep in sync. Usage is documented in
+> [`organize-by-game.md`](../../apps/website/src/content/guide/organize-by-game.md).
 
 ## Install
 
@@ -86,13 +86,13 @@ per-scene config table, respectively).
 
 ## Relationship to qlipq
 
-It lives in the monorepo as the `qlipq-obs-script` app, but it is operationally
-independent of the qlipq desktop app — it is an OBS script, not a build target.
-Its only build step republishes `recorder.lua` to the website's downloads.
+It lives in the monorepo as the `@qcksys/qlipq-obs-script` package, consumed by
+the website (which serves it as a download). It is otherwise independent of the
+qlipq desktop app — an OBS script, not a build target.
 
 qlipq itself avoids running inside OBS by design, recovering scene/game metadata
 after the fact from OBS filename prefixes + `ffprobe`. This script is the opposite
 approach: detect the game **live** from inside OBS at capture time. The two
 compose — the per-game folders this script creates are exactly what qlipq reads
 back as a clip's `{source}`. See
-[`organize-by-game.md`](../website/src/content/guide/organize-by-game.md).
+[`organize-by-game.md`](../../apps/website/src/content/guide/organize-by-game.md).

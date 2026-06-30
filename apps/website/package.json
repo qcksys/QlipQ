@@ -12,6 +12,7 @@
     "deploy:prod": "astro build && wrangler deploy --env production"
   },
   "dependencies": {
+    "@qcksys/qlipq-obs-script": "workspace:*",
     "astro": "^5"
   },
   "devDependencies": {

@@ -39,7 +39,7 @@ jobs:
       - name: Cache Rust
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: apps/app/src-tauri -> target
+          workspaces: apps/desktop-tauri/src-tauri -> target
 
       - uses: voidzero-dev/setup-vp@v1
         with:
@@ -53,7 +53,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: apps/app
+          projectPath: apps/desktop-tauri
           tagName: ${{ github.ref_name }}
           releaseName: "qlipq ${{ github.ref_name }}"
           releaseDraft: true

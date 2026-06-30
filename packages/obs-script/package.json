@@ -1,0 +1,12 @@
+{
+  "name": "@qcksys/qlipq-obs-script",
+  "version": "0.0.0",
+  "private": true,
+  "description": "RecORDER (Lua): OBS companion script that sorts recordings into per-game folders. Consumed by the qlipq website as a download.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./recorder.lua": "./recorder.lua",
+    "./package.json": "./package.json"
+  }
+}

@@ -3,9 +3,9 @@ name: Desktop (Rust / iced)
 on:
   push:
     branches: [main]
-    paths: ["iced/**", ".github/workflows/iced-desktop.yml"]
+    paths: ["apps/desktop-native/**", ".github/workflows/iced-desktop.yml"]
   pull_request:
-    paths: ["iced/**", ".github/workflows/iced-desktop.yml"]
+    paths: ["apps/desktop-native/**", ".github/workflows/iced-desktop.yml"]
 
 concurrency:
   group: iced-${{ github.ref }}-${{ matrix.os }}
@@ -20,7 +20,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     defaults:
       run:
-        working-directory: iced
+        working-directory: apps/desktop-native
     steps:
       - uses: actions/checkout@v5
 
@@ -28,7 +28,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: iced -> target
+          workspaces: apps/desktop-native -> target
 
       - name: Install Linux GUI build dependencies
         if: matrix.os == 'ubuntu-latest'
