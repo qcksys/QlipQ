@@ -3,9 +3,9 @@ name: Desktop (Rust / iced)
 on:
   push:
     branches: [main]
-    paths: ["apps/desktop-native/**", ".github/workflows/iced-desktop.yml"]
+    paths: ["../../apps/desktop/**", ".github/workflows/iced-desktop.yml"]
   pull_request:
-    paths: ["apps/desktop-native/**", ".github/workflows/iced-desktop.yml"]
+    paths: ["../../apps/desktop/**", ".github/workflows/iced-desktop.yml"]
 
 jobs:
   build-test:

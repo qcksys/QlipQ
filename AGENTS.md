@@ -36,7 +36,7 @@ Tauri desktop app, an Astro website, and two shared TS packages.
 > then both exist; the sections below describe the original Tauri app.
 >
 > A **cross-platform** variant lives in **`apps/desktop-native`** (a Cargo workspace; Windows/macOS/Linux,
-> Rust + [iced](https://iced.rs) — see [apps/desktop-native/README.md](apps/desktop-native/README.md)). It has its own Rust
+> Rust + [iced](https://iced.rs) — see [apps/desktop-native/README.md](apps/desktop/README.md)). It has its own Rust
 > ports of `qlipq-core`/`qlipq-ffmpeg` with ported parity tests, and previews via ffmpeg
 > frame extraction (no libav linking). Both native rewrites share `~/.com.qcksys.qlipq` config/edits.
 
