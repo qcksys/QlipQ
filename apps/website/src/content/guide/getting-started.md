@@ -4,24 +4,15 @@ description: Install QlipQ and export your first clip.
 order: 1
 ---
 
-## 1. Install FFmpeg
-
-QlipQ is powered by [FFmpeg](https://ffmpeg.org) — it shells out to `ffmpeg` and `ffprobe` for probing and exporting. Install FFmpeg and ensure it is available on your `PATH`:
-
-- **Windows:** `winget install Gyan.FFmpeg`
-- **Linux:** `sudo apt install ffmpeg`
-
-If FFmpeg is not on your `PATH`, open QlipQ's **Settings → FFmpeg** and set the full paths to the `ffmpeg` and `ffprobe` binaries. There's a **Test** button next to each to confirm they run.
-
-## 2. Add watched folders
+## 1. Add watched folders
 
 In **Settings → Watched folders**, add the folder(s) where your recordings land (for OBS this is your recording or replay-buffer output path). QlipQ can auto-detect the **OBS** and **NVIDIA Share** output folders and offer them as one-click presets. It scans these folders — including subfolders — on launch and watches for new files while it runs.
 
-## 3. Choose an output folder and naming template
+## 2. Choose an output folder and naming template
 
 Set an **Output folder** for exports. The **naming template** controls how exported (and renamed) files are named. Available tokens: `{date}`, `{time}`, `{datetime}`, `{source}`, `{name}`, `{index}`.
 
-## 4. Pick your output quality
+## 3. Pick your output quality
 
 **Settings → Output defaults** controls export quality and is applied to every export:
 
@@ -30,7 +21,7 @@ Set an **Output folder** for exports. The **naming template** controls how expor
 
 The editor shows an estimated file size for the current clip, and you can override the quality per clip.
 
-## 5. Edit and export
+## 4. Edit and export
 
 1. Pick a clip from the **Queue** (each shows its date, length, and size).
 2. Set the **in/out** points on the timeline. Type a timestamp to jump the playhead, drag the scrubber (playback keeps going if it was already playing), or use the −60/−5/−1 / +1/+5/+60 second jump buttons.

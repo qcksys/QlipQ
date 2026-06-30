@@ -7,13 +7,12 @@ use qlipq_core::media::format_bytes;
 fn parse_fills_in_missing_fields() {
     let merged = config_json::parse(r#"{"outputFolder":"D:/out"}"#);
     assert_eq!(merged.output_folder, "D:/out");
-    assert_eq!(merged.ffmpeg_path, "ffmpeg");
     assert_eq!(merged.naming_template, AppConfig::default().naming_template);
 }
 
 #[test]
 fn parse_tolerates_empty_and_invalid_json() {
-    assert_eq!(config_json::parse("").ffmpeg_path, "ffmpeg");
+    assert_eq!(config_json::parse("").naming_template, "{date}_{source}_{name}");
     assert_eq!(config_json::parse("not json").naming_template, "{date}_{source}_{name}");
 }
 

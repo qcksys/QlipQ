@@ -177,8 +177,6 @@ pub struct AppConfig {
     /// Lower-case extensions (no dot) considered video files.
     pub video_extensions: Vec<String>,
     pub naming_template: String,
-    pub ffmpeg_path: String,
-    pub ffprobe_path: String,
     /// HDR→SDR **preview** brightness, as an `eq` gamma applied after the tonemap (higher = brighter;
     /// `1.0` = off). Compensates for HDR (esp. Windows desktop) captures that preview too dark.
     /// Preview only — exports are unaffected; SDR clips ignore it.
@@ -196,8 +194,6 @@ impl Default for AppConfig {
             output_folder: String::new(),
             video_extensions: DEFAULT_VIDEO_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
             naming_template: "{date}_{source}_{name}".into(),
-            ffmpeg_path: "ffmpeg".into(),
-            ffprobe_path: "ffprobe".into(),
             hdr_preview_gamma: 1.8,
             after_export: AfterExportSettings::default(),
             output: OutputSettings::default(),

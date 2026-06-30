@@ -1,0 +1,46 @@
+name: Set up LGPL FFmpeg SDK
+description: >
+  Download a BtbN LGPL FFmpeg 8.1 shared dev build and export the FFMPEG_* env the libav build needs
+  (the gitignored apps/desktop/.cargo/config.toml is machine-specific, so CI wires it via env instead).
+  Pinned to the n8.1 ABI series so the vendored rusty_ffmpeg binding (avcodec-62, …) stays compatible.
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch FFmpeg SDK (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip"
+        Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\ffmpeg-sdk.zip"
+        Expand-Archive -Path "$env:RUNNER_TEMP\ffmpeg-sdk.zip" -DestinationPath "$env:RUNNER_TEMP\ffmpeg-sdk" -Force
+        $root = (Get-ChildItem "$env:RUNNER_TEMP\ffmpeg-sdk" -Directory | Select-Object -First 1).FullName
+        @(
+          "FFMPEG_SDK=$root"
+          "FFMPEG_LIBS_DIR=$root\lib"
+          "FFMPEG_DLL_DIR=$root\bin"
+          "FFMPEG_LINK_MODE=dynamic"
+          "FFMPEG_BINDING_PATH=$env:GITHUB_WORKSPACE\apps\desktop\vendor\rusty_ffmpeg_ffmpeg8_binding.rs"
+        ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+    # NOTE: Linux is UNVERIFIED. The vendored binding was generated on MSVC; reusing it via
+    # FFMPEG_BINDING_PATH assumes the FFmpeg 8.1 struct ABI matches on x86-64 Linux. If the build
+    # fails on the binding, drop FFMPEG_BINDING_PATH here and install libclang so rusty_ffmpeg runs
+    # bindgen against the SDK headers instead.
+    - name: Fetch FFmpeg SDK (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-lgpl-shared-8.1.tar.xz"
+        curl -fL "$url" -o "$RUNNER_TEMP/ffmpeg-sdk.tar.xz"
+        mkdir -p "$RUNNER_TEMP/ffmpeg-sdk"
+        tar -xf "$RUNNER_TEMP/ffmpeg-sdk.tar.xz" -C "$RUNNER_TEMP/ffmpeg-sdk"
+        root="$RUNNER_TEMP/ffmpeg-sdk/$(ls "$RUNNER_TEMP/ffmpeg-sdk")"
+        {
+          echo "FFMPEG_SDK=$root"
+          echo "FFMPEG_LIBS_DIR=$root/lib"
+          echo "FFMPEG_DLL_DIR=$root/bin"
+          echo "FFMPEG_LINK_MODE=dynamic"
+          echo "FFMPEG_BINDING_PATH=$GITHUB_WORKSPACE/apps/desktop/vendor/rusty_ffmpeg_ffmpeg8_binding.rs"
+          echo "LD_LIBRARY_PATH=$root/lib:${LD_LIBRARY_PATH:-}"
+        } >> "$GITHUB_ENV"

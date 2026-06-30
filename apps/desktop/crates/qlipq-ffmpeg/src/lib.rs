@@ -1,14 +1,11 @@
-//! ffmpeg/ffprobe argument building & output parsing for qlipq.
-//! This is the single source of truth for the ffmpeg command line; the host only spawns it.
+//! Pure encode planning for qlipq: resolve persisted output settings into concrete encode options,
+//! plan the hardware encoder + rate control, and estimate output size. No I/O — the in-process libav
+//! export ([`qlipq-desktop`]'s `export` module) consumes these.
 
 pub mod args;
 pub mod estimate;
 pub mod hw;
-pub mod probe;
-pub mod progress;
 
 pub use args::*;
 pub use estimate::*;
 pub use hw::*;
-pub use probe::*;
-pub use progress::*;

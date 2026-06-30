@@ -30,9 +30,9 @@ editor to trim, crop, pick audio tracks, rename, and export. The repo holds a
 > **Status: prototyping (Windows-first).** This app is in active prototyping. Prefer
 > the direct, working path over robustness scaffolding: don't invest in toolchain /
 > encoder fallbacks, cross-platform implementation details (get it working on Windows
-> first — Linux/macOS portability comes later), or data migrations unless asked. New
-> work can assume the `libav-preview` (in-process libav + HW) stack; the CLI ffmpeg
-> path is not a required fallback for new features.
+> first — Linux/macOS portability comes later), or data migrations unless asked. The
+> in-process libav (rsmpeg + HW) stack is the **only** media path — there is no CLI
+> `ffmpeg`/`ffprobe` fallback; don't reintroduce one.
 
 > **Desktop history.** The desktop app was a Tauri (React + Rust) app, then a
 > C# / WinUI 3 rewrite. Both are **gone**. The sole desktop app is now the
@@ -51,54 +51,40 @@ editor to trim, crop, pick audio tracks, rename, and export. The repo holds a
 
 ## Architecture (the parts that span files)
 
-**FFmpeg command logic has one source of truth: the `qlipq-ffmpeg` crate**
+**Encode planning has one source of truth: the `qlipq-ffmpeg` crate**
 ([apps/desktop/crates/qlipq-ffmpeg](apps/desktop/crates/qlipq-ffmpeg)). It is pure
-(no I/O): `build_export_args` (args.rs), `parse_ffprobe` (probe.rs),
-`parse_progress` (progress.rs), `estimate_export_size` (estimate.rs), and is
-heavily unit-tested (`cargo test -p qlipq-ffmpeg`). Don't build ffmpeg argument
-strings anywhere else.
+(no I/O): `output_settings_to_encode` (args.rs) resolves persisted `OutputSettings` into concrete
+encode options, `plan_hw_video` (hw.rs) maps that to a HW encoder + rate control, and
+`estimate_export_size` (estimate.rs) predicts output size. Heavily unit-tested
+(`cargo test -p qlipq-ffmpeg`). Don't duplicate encode/rate-control decisions anywhere else.
 
-**The app builds args, then spawns ffmpeg — it never interprets the edit.** Export
-flow in `qlipq-desktop`:
+**The app decodes, edits, and exports in process via libav — no external `ffmpeg`/`ffprobe`.** Export
+flow in `qlipq-desktop` ([export.rs](apps/desktop/crates/qlipq-desktop/src/export.rs), `run_export`):
+decode → apply the edit → hardware-encode (NVENC/AMF/QSV, planned by `qlipq_ffmpeg::hw::plan_hw_video`)
+→ mux. It dispatches to `export_transcode` (re-encode: crop/scale/fps or non-Original quality) or
+`export_remux` (lossless stream-copy of the video when nothing forces a re-encode; audio still mixes).
+`App::run_export_to` → `spawn_export` runs it on a blocking task; progress is an `Arc<Mutex<f32>>`
+written by the export and read by the UI. This is the only export path — there is no CLI fallback, and
+it's what CI and the release ship (CI links the bundled LGPL FFmpeg libs).
 
-1. `build_export_args(...)` (the `qlipq-ffmpeg` crate) produces the full `Vec<String>`.
-2. `host::run_export` ([host.rs](apps/desktop/crates/qlipq-desktop/src/host.rs)) spawns
-   the `ffmpeg` binary with exactly those args — no edit logic on the host side.
-3. ffmpeg's `-progress` output is parsed with `parse_progress` into a `0..1`
-   fraction read by the UI. ffprobe works the same way (raw JSON → `parse_ffprobe`).
+**One preview/probe stack, in process.** The preview decodes frames itself and uploads them to a
+persistent `wgpu` texture (custom GPU shader widget, [video.rs](apps/desktop/crates/qlipq-desktop/src/video.rs)).
+Decode/preview/probe all run via **rsmpeg** (libav) in [libav.rs](apps/desktop/crates/qlipq-desktop/src/libav.rs):
+video → **libplacebo** HDR→SDR tonemap → **cpal** audio (audio is the A/V master clock), with
+**D3D11VA hardware decode** when the GPU + codec support it (automatic software fallback otherwise).
+`libav::probe` reads `MediaInfo` + HDR detection straight off the container's codec parameters
+(replacing the old ffprobe shell-out). Requires a shared FFmpeg 8.x dev build wired via the
+(gitignored) `.cargo/config.toml`.
 
-This CLI path is what **CI and the release ship** (built with `--no-default-features`). The **`libav-preview` build exports in-process**
-instead ([export.rs](apps/desktop/crates/qlipq-desktop/src/export.rs), `run_export`): it
-decodes → applies the edit → hardware-encodes (the `qlipq-ffmpeg::hw::plan_hw_video` rate-control
-model) → muxes, with no CLI ffmpeg. It dispatches to `export_transcode` (re-encode: crop/scale/fps
-or non-Original quality) or `export_remux` (lossless stream-copy of the video when nothing forces a
-re-encode; audio still mixes). `App::run_export_to` picks the path via a cfg'd `spawn_export`; there
-is no CLI fallback in the libav build.
+Preview audio is a **monitor mixdown** of the enabled tracks: `audio_loop` decodes every enabled
+track, applies per-track gain, and sums them into one cpal output (manual sum on the audio thread —
+`mix_and_push`, never blocking the cpal callback / master clock). It will not byte-match the export (a
+monitor sum vs. the export filtergraph), and that's fine.
 
-**Two preview backends, selected by a Cargo feature** — the **CLI** preview is advisory (export
-accuracy comes from the parity-tested `-ss`/`-t` args); the **libav-preview** build shares its
-decode/edit stack with the in-process export above.
-
-- **CLI (`--no-default-features`, dependency-light):** a warm ffmpeg process streams raw RGBA
-  frames into a persistent `wgpu` texture (custom GPU shader widget,
-  [video.rs](apps/desktop/crates/qlipq-desktop/src/video.rs)); HDR is CPU-tonemapped
-  via a zscale chain. No audio. Builds with no native libav dependency (this is
-  what CI/release builds).
-- **`libav-preview` (in-process, the default local build):** decodes with **rsmpeg** (libav) →
-  **libplacebo** HDR→SDR tonemap → **cpal** audio (audio is the A/V master clock),
-  in [libav.rs](apps/desktop/crates/qlipq-desktop/src/libav.rs). Needs a shared FFmpeg
-  8.x dev build wired via the (gitignored) `.cargo/config.toml`; on by default, opt out
-  with `--no-default-features`.
-  Preview audio is a **monitor mixdown** of the enabled tracks: `audio_loop` decodes every
-  enabled track, applies per-track gain, and sums them into one cpal output (manual sum on the
-  audio thread — `mix_and_push`, never blocking the cpal callback / master clock). It will not
-  byte-match the export (a monitor sum vs. the export filtergraph), and that's fine.
-
-**Audio export is mixed down to one track.** `build_export_args` applies each enabled track's
-`volume=` then sums them with `amix=inputs=N:normalize=0` (sum at the set levels, so the export
-matches the preview monitor mix); a lone enabled track skips `amix` (its `volume` filter, or a
-stream-copy at unity). Mixing forces an audio re-encode. This `amix` lives **only** in
-`build_export_args` — don't add mixing anywhere else.
+**Audio export is mixed down to one track.** `export.rs` builds a per-track `abuffer → atrim,asetpts,
+[volume] → amix(inputs=N, normalize=0) → aformat → abuffersink` filtergraph (sum at the set levels, so
+the export matches the preview monitor mix); a lone enabled track skips `amix`. Mixing means audio is
+always AAC-encoded. This mixing lives **only** in `export.rs` — don't add it anywhere else.
 
 **Config lives in the `qlipq-core` crate.** `AppConfig`
 ([config.rs](apps/desktop/crates/qlipq-core/src/config.rs),
@@ -115,8 +101,8 @@ and rename templating; `qlipq-ffmpeg` depends on it.
 
 **No OBS plugin (by design).** OBS already writes a timestamp (+ optional
 scene/game prefix) into filenames; `parse_obs_filename`
-([obs.rs](apps/desktop/crates/qlipq-core/src/obs.rs)) plus ffprobe recover
-everything, so there is no native plugin — don't reintroduce one. The separate
+([obs.rs](apps/desktop/crates/qlipq-core/src/obs.rs)) plus the in-process libav
+probe recover everything, so there is no native plugin — don't reintroduce one. The separate
 **QlipQRenamer** OBS companion _Lua script_ lives in
 [packages/obs-script](packages/obs-script) (`@qcksys/qlipq-obs-script`) and sorts
 recordings into per-game folders inside OBS; the website serves it from the package
@@ -160,14 +146,13 @@ vp run qlipq-website#dev   # website dev server
 pnpm ready                 # fmt + lint + test + build (the full gate)
 ```
 
-Desktop app (`qlipq-desktop`) — needs a Rust toolchain; `ffmpeg`/`ffprobe` on `PATH`
-(or set in Settings → FFmpeg). Run from `apps/desktop/`:
+Desktop app (`qlipq-desktop`) — needs a Rust toolchain and a shared FFmpeg 8.x dev build wired via
+the (gitignored) `apps/desktop/.cargo/config.toml`. Run from `apps/desktop/`:
 
 ```bash
-cargo test                                             # all crate tests
-cargo run -p qlipq-desktop                             # launch the app (in-process libav/cpal preview — the default)
-cargo run -p qlipq-desktop --no-default-features        # CLI ffmpeg preview (dependency-light; what CI/release build)
-cargo build --release --no-default-features             # produce the shippable `qlipq` binary
+cargo test                              # all crate tests
+cargo run -p qlipq-desktop              # launch the app (in-process libav decode/preview/export)
+cargo build --release -p qlipq-desktop  # produce the shippable `qlipq` binary (CI bundles the FFmpeg libs)
 ```
 
 Website deploy:
@@ -191,15 +176,17 @@ pnpm -C apps/website deploy:prod   # build + wrangler deploy --env production
   (`qlipq-core`, `qlipq-ffmpeg`, `qlipq-desktop`) are internal path-deps (not on
   crates.io); release-plz versions them from git tags (`apps/desktop/release-plz.toml`,
   `git_only`).
-- **`libav-preview` wiring is machine-specific and gitignored.** It links a shared
-  FFmpeg 8.x dev build via `apps/desktop/.cargo/config.toml` (`FFMPEG_*` env vars +
-  the vendored `apps/desktop/vendor/rusty_ffmpeg_*_binding.rs`, which skips bindgen
-  so no libclang/MSVC headers are needed). The CLI build (`--no-default-features`) doesn't need any of it.
+- **The libav build links a shared FFmpeg 8.x dev build, wired machine-specifically and gitignored.**
+  `apps/desktop/.cargo/config.toml` sets `FFMPEG_*` env vars + the vendored
+  `apps/desktop/vendor/rusty_ffmpeg_*_binding.rs` (skips bindgen, so no libclang/MSVC headers needed).
+  This is required for **every** build now — there is no no-libav path. CI provides the same via the
+  `.github/actions/setup-ffmpeg` composite action (downloads a BtbN **LGPL** FFmpeg 8.1 shared build
+  and exports the `FFMPEG_*` env).
 - **On Windows PowerShell the `pnpm` shim is flaky** for `exec`/`view`/`run`; run
   raw `pnpm` subcommands via the Bash tool. `vp` itself is fine in PowerShell.
 - **CI** (`.github/workflows/`): `ci.yml` (website — `vp check` + build),
-  `build-desktop.yml` (the Rust app — `cargo test` + `cargo build --no-default-features` on
-  Windows + Linux; `.cargo/config.toml` is gitignored, so CI builds the no-libav CLI path),
-  `deploy-website.yml` (Cloudflare Workers), `release-plz.yml` (versions/changelogs the
-  crates and tags the app `vX.Y.Z`), and `qlipq-desktop-release.yml` (on a `v*` tag,
-  builds + attaches the Windows/Linux binaries to a GitHub Release).
+  `build-desktop.yml` (the Rust app — `cargo test` + `cargo build -p qlipq-desktop` against libav on
+  Windows + Linux, after `setup-ffmpeg` pulls the LGPL SDK), `deploy-website.yml` (Cloudflare Workers),
+  `release-plz.yml` (versions/changelogs the crates and tags the app `vX.Y.Z`), and
+  `qlipq-desktop-release.yml` (on a `v*` tag, builds libav + bundles the FFmpeg shared libs and
+  attaches the Windows/Linux binaries to a GitHub Release).

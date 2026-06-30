@@ -439,20 +439,6 @@ impl App {
         ]
         .spacing(theme::SM);
 
-        // FFmpeg.
-        let ffmpeg_row = row![
-            text_input("ffmpeg", &self.config.ffmpeg_path).on_input(Message::FfmpegPathChanged).style(theme::input).width(Length::Fill),
-            button(text("Test").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::TestFfmpeg),
-        ]
-        .spacing(theme::SM);
-        let ffprobe_row = row![
-            text_input("ffprobe", &self.config.ffprobe_path).on_input(Message::FfprobePathChanged).style(theme::input).width(Length::Fill),
-            button(text("Test").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::TestFfprobe),
-        ]
-        .spacing(theme::SM);
-        let ffmpeg_status = test_text(&self.ffmpeg_test);
-        let ffprobe_status = test_text(&self.ffprobe_test);
-
         // After export.
         let ae = &self.config.after_export;
         let mut after = column![pick_list(AfterChoice::ALL.to_vec(), Some(AfterChoice::from_core(ae.action)), Message::SetAfter).style(theme::pick_list_style)].spacing(theme::SM);
@@ -507,7 +493,6 @@ impl App {
                 .spacing(theme::XS)
                 .into(),
             ),
-            section("FFmpeg", column![ffmpeg_row, ffmpeg_status, ffprobe_row, ffprobe_status].spacing(theme::SM).into()),
             section("HDR preview", hdr_preview.into()),
             section("After export", after.into()),
             section("Editor shortcuts (Premiere Pro defaults)", self.keybinds_section()),
@@ -759,22 +744,6 @@ fn kb_row<'a>(label: &'a str, value: &'a str, field: KbField) -> Element<'a, Mes
     .spacing(theme::SM)
     .align_y(iced::Alignment::Center)
     .into()
-}
-
-fn test_text(status: &Option<(bool, String)>) -> Element<'_, Message> {
-    match status {
-        Some((ok, msg)) => {
-            let ok = *ok;
-            text(format!("{} {}", if ok { "✓" } else { "✗" }, msg))
-                .size(theme::META)
-                .style(move |t: &Theme| {
-                    let p = t.extended_palette();
-                    text::Style { color: Some(if ok { p.success.base.color } else { p.danger.base.color }) }
-                })
-                .into()
-        }
-        None => Space::new().into(),
-    }
 }
 
 fn section<'a>(title: &'a str, content: Element<'a, Message>) -> Element<'a, Message> {

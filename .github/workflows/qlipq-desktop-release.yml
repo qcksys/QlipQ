@@ -41,20 +41,39 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev
 
-      # Release build of the `qlipq` binary. libav-preview is the default feature, but it needs a
-      # machine-specific FFmpeg dev build (gitignored `.cargo/config.toml`) and can't ship (LGPL), so
-      # CI ships the dependency-light CLI-preview path.
-      - name: Build release binary
-        run: cargo build --release -p qlipq-desktop --no-default-features
+      # The shipped binary links FFmpeg in process (libav) — the LGPL shared build below is bundled
+      # with the release so users need no external ffmpeg/ffprobe.
+      - name: Set up LGPL FFmpeg SDK
+        uses: ./.github/actions/setup-ffmpeg
 
+      # Release build of the `qlipq` binary against the in-process libav stack (no CLI fallback). On
+      # Linux, rpath `$ORIGIN/lib` makes the binary load the FFmpeg .so bundled alongside it.
+      - name: Build release binary
+        run: cargo build --release -p qlipq-desktop
+        env:
+          RUSTFLAGS: ${{ matrix.os == 'ubuntu-latest' && '-C link-arg=-Wl,-rpath,$ORIGIN/lib' || '' }}
+
+      # Bundle the FFmpeg DLLs next to qlipq.exe (Windows loads DLLs from the exe's dir first) plus the
+      # FFmpeg LGPL license text.
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: Compress-Archive -Path target/release/${{ matrix.bin }} -DestinationPath ${{ matrix.asset }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/${{ matrix.bin }} dist/
+          Copy-Item "$env:FFMPEG_DLL_DIR/*.dll" dist/
+          Copy-Item "$env:FFMPEG_SDK/LICENSE.txt" dist/FFMPEG-LICENSE.txt
+          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.asset }}
 
+      # Bundle the FFmpeg .so into dist/lib (found via the binary's $ORIGIN/lib rpath) plus the license.
       - name: Package (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: tar -czf "${{ matrix.asset }}" -C target/release "${{ matrix.bin }}"
+        run: |
+          mkdir -p dist/lib
+          cp target/release/${{ matrix.bin }} dist/
+          cp -P "$FFMPEG_LIBS_DIR"/*.so* dist/lib/
+          cp "$FFMPEG_SDK/LICENSE.txt" dist/FFMPEG-LICENSE.txt
+          tar -czf "${{ matrix.asset }}" -C dist .
 
       # `files:` is repo-root-relative (the action ignores `working-directory`).
       - name: Attach to release

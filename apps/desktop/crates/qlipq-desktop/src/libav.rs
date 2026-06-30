@@ -16,7 +16,7 @@
 //! — it stays on the parity-tested CLI arg-vector; only the preview decodes in-process.
 
 use std::collections::VecDeque;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -35,11 +35,92 @@ use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 use rsmpeg::swresample::SwrContext;
 
+use qlipq_core::media::{AudioStreamInfo, MediaInfo};
+
 pub use crate::host::FramePoll;
 
 /// How many decoded video frames the video thread may run ahead before it blocks. Presentation
 /// drains the queue at the master-clock rate, so this caps lookahead (≈0.3 s) and paces decoding.
 const VIDEO_LOOKAHEAD: usize = 12;
+
+/// Probe a media file **in process** (libav), returning its [`MediaInfo`] and whether the video
+/// stream is HDR (PQ/HLG). This replaces the old `ffprobe` shell-out so the app needs no external
+/// binary: it opens the container, reads codec parameters off the streams, and reports the same
+/// fields the editor/queue consume. Audio-relative `index` matches ffmpeg's `0:a:N` selector.
+pub fn probe(path: &str) -> Result<(MediaInfo, bool), String> {
+    let cpath = CString::new(path).map_err(|e| e.to_string())?;
+    let input = AVFormatContextInput::open(&cpath).map_err(|e| format!("Failed to open {path}: {e}"))?;
+
+    // Container duration is in AV_TIME_BASE units (like ffprobe's `format.duration`).
+    let duration_sec = {
+        let d = unsafe { (*input.as_ptr()).duration };
+        if d > 0 { d as f64 / ffi::AV_TIME_BASE as f64 } else { 0.0 }
+    };
+
+    let (mut width, mut height, mut video_codec, mut fps, mut is_hdr) = (0i64, 0i64, String::from("unknown"), 0.0f64, false);
+    let mut have_video = false;
+    let mut audio_streams: Vec<AudioStreamInfo> = Vec::new();
+
+    for (i, stream) in input.streams().iter().enumerate() {
+        let par = stream.codecpar();
+        if par.codec_type == ffi::AVMEDIA_TYPE_VIDEO && !have_video {
+            have_video = true;
+            width = par.width as i64;
+            height = par.height as i64;
+            video_codec = codec_name(par.codec_id);
+            // `r_frame_rate`/`metadata` are raw `AVStream` fields, reached through the stream ref's Deref.
+            fps = stream_fps(stream.r_frame_rate, stream.avg_frame_rate);
+            // HDR transfer = PQ (smpte2084) or HLG (arib-std-b67), mirroring the old ffprobe check.
+            is_hdr = par.color_trc == ffi::AVCOL_TRC_SMPTE2084 || par.color_trc == ffi::AVCOL_TRC_ARIB_STD_B67;
+        } else if par.codec_type == ffi::AVMEDIA_TYPE_AUDIO {
+            audio_streams.push(AudioStreamInfo {
+                stream_index: i as i64,
+                index: audio_streams.len() as i64,
+                codec: codec_name(par.codec_id),
+                channels: par.ch_layout.nb_channels as i64,
+                language: dict_tag(stream.metadata, c"language"),
+                title: dict_tag(stream.metadata, c"title"),
+            });
+        }
+    }
+
+    let size_bytes = std::fs::metadata(path).ok().map(|m| m.len() as i64);
+    let media = MediaInfo { duration_sec, width, height, video_codec, fps, audio_streams, size_bytes };
+    Ok((media, is_hdr))
+}
+
+/// The canonical ffmpeg short name for a codec id (e.g. `h264`, `av1`, `aac`); `unknown` if unnamed.
+fn codec_name(id: ffi::AVCodecID) -> String {
+    let p = unsafe { ffi::avcodec_get_name(id) };
+    if p.is_null() {
+        return String::from("unknown");
+    }
+    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+/// Frame rate as fps (prefer `r_frame_rate`, fall back to `avg_frame_rate`), rounded to 3 dp to
+/// match the old ffprobe parse.
+fn stream_fps(r: ffi::AVRational, avg: ffi::AVRational) -> f64 {
+    let pick = if r.num != 0 && r.den != 0 { r } else { avg };
+    if pick.den != 0 {
+        ((pick.num as f64 / pick.den as f64) * 1000.0).round() / 1000.0
+    } else {
+        0.0
+    }
+}
+
+/// Read a tag (e.g. `language`, `title`) from a libav metadata dictionary, if present.
+fn dict_tag(metadata: *mut ffi::AVDictionary, key: &CStr) -> Option<String> {
+    let entry = unsafe { ffi::av_dict_get(metadata, key.as_ptr(), std::ptr::null(), 0) };
+    if entry.is_null() {
+        return None;
+    }
+    let value = unsafe { (*entry).value };
+    if value.is_null() {
+        return None;
+    }
+    Some(unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned())
+}
 
 // ---- master clock ----
 
@@ -184,13 +265,11 @@ impl Drop for Player {
     }
 }
 
-/// Start the in-process player from `start_sec`. Signature matches `host::start_player` (the
-/// `ffmpeg_path` is unused — decoding is in-process). Returns `None` if the file/decoder can't open,
+/// Start the in-process player from `start_sec`. Returns `None` if the file/decoder can't open,
 /// so the caller falls back to a single-frame preview.
 #[allow(clippy::too_many_arguments)]
 pub fn start_player(
     path: &str,
-    _ffmpeg_path: &str,
     start_sec: f64,
     src_w: i64,
     src_h: i64,
@@ -293,9 +372,8 @@ pub struct ScrubDecoder {
 
 impl ScrubDecoder {
     /// Open the file and build the video decoder once (the filter graph is built lazily on first use).
-    /// The `_ffmpeg_path` is unused (decoding is in-process); the signature matches
-    /// `host::ScrubDecoder::open` so the editor is feature-agnostic. `None` if the file/decoder can't open.
-    pub fn open(path: &str, _ffmpeg_path: &str, src_w: i64, src_h: i64, is_hdr: bool, gamma: f64) -> Option<Self> {
+    /// `None` if the file/decoder can't open.
+    pub fn open(path: &str, src_w: i64, src_h: i64, is_hdr: bool, gamma: f64) -> Option<Self> {
         let cpath = CString::new(path).ok()?;
         let input = AVFormatContextInput::open(&cpath).ok()?;
         let vid_idx = input.find_best_stream(ffi::AVMEDIA_TYPE_VIDEO).ok()?.map(|(i, _)| i)?;

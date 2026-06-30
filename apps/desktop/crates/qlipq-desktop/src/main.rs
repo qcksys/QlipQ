@@ -1,29 +1,23 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-//! qlipq — recording queue + FFmpeg clip editor desktop app.
+//! qlipq — recording queue + libav clip editor desktop app.
 //!
-//! The pure crates (`qlipq-core`, `qlipq-ffmpeg`) build the ffmpeg command lines and parse
-//! output; this binary is the host + UI. Video preview uses ffmpeg frame extraction (a frame is
-//! decoded at the playhead) rather than a media framework, keeping the build dependency-light and
-//! portable — the export cut comes from ffmpeg `-ss`/`-t`, the preview is an advisory guide.
+//! `qlipq-core` owns the domain model; `qlipq-ffmpeg` owns the pure encode/rate-control planning.
+//! This binary is the host + UI, and it decodes, previews, probes, and exports **in process** via
+//! libav (rsmpeg) — no external `ffmpeg`/`ffprobe` binary is spawned. Preview runs through libplacebo
+//! (HDR→SDR tonemap) with synced cpal audio ([`libav`]); export decodes → edits → hardware-encodes →
+//! muxes ([`export`]).
 
 mod host;
 mod iso;
 mod theme;
 mod video;
-
-#[cfg(feature = "libav-preview")]
 mod libav;
-#[cfg(feature = "libav-preview")]
 mod export;
 
-// The preview decoder is feature-selected: the in-process libav player (libplacebo HDR + synced
-// audio) when `libav-preview` is on, else the CLI ffmpeg player. Both expose the same interface
-// (`poll`/`dimensions`/`fps`/`position`/`try_seek`) so the editor code below is feature-agnostic.
-#[cfg(feature = "libav-preview")]
+// The in-process libav preview player (libplacebo HDR tonemap + synced cpal audio), exposing
+// `poll`/`dimensions`/`fps`/`position`/`try_seek` for the editor below.
 use libav::{start_player, Player as PreviewPlayer, ScrubDecoder};
-#[cfg(not(feature = "libav-preview"))]
-use host::{start_player, Player as PreviewPlayer, ScrubDecoder};
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,7 +34,7 @@ use qlipq_core::config::*;
 use qlipq_core::edit_spec::{AudioTrackSpec, CropSpec, EditSpec, TrimSpec};
 use qlipq_core::media::{audio_stream_label, format_bytes, MediaInfo};
 use qlipq_core::{datetimes, queue::*, rename};
-use qlipq_ffmpeg::args::*;
+use qlipq_ffmpeg::args::output_settings_to_encode;
 use qlipq_ffmpeg::estimate::estimate_export_size;
 
 const DISMISSED_TAG: &str = "dismissed";
@@ -194,8 +188,8 @@ struct Editor {
     playing: bool,
     /// Warm streaming decoder, present only while playing (dropped → decoder stopped).
     player: Option<PreviewPlayer>,
-    /// Warm single-frame decoder for scrubbing/paused preview, opened once per clip (libav: warm
-    /// demuxer+decoder; CLI: per-frame ffmpeg spawn). Behind `Arc<Mutex>` so the blocking scrub task
+    /// Warm single-frame decoder for scrubbing/paused preview, opened once per clip (a warm libav
+    /// demuxer+decoder). Behind `Arc<Mutex>` so the blocking scrub task
     /// can drive it. `None` until the clip is probed, or if the decoder fails to open.
     scrubber: Option<Arc<Mutex<ScrubDecoder>>>,
     exporting: bool,
@@ -224,8 +218,6 @@ struct App {
     watcher: Option<host::Watcher>,
     editor: Option<Editor>,
     audio_defaults: Vec<AudioTrackSpec>,
-    ffmpeg_test: Option<(bool, String)>,
-    ffprobe_test: Option<(bool, String)>,
     rename: Option<RenameState>,
     delete_confirm: Option<String>,
     new_tag: String,
@@ -305,11 +297,6 @@ enum Message {
     AddPreset(String),
     OutputFolderChanged(String),
     NamingChanged(String),
-    FfmpegPathChanged(String),
-    FfprobePathChanged(String),
-    TestFfmpeg,
-    TestFfprobe,
-    BinaryTested(bool, Result<String, String>),
     SetQm(QmChoice),
     SetQp(QpChoice),
     SetCrf(String),
@@ -361,8 +348,6 @@ impl App {
             watcher,
             editor: None,
             audio_defaults: Vec::new(),
-            ffmpeg_test: None,
-            ffprobe_test: None,
             rename: None,
             delete_confirm: None,
             new_tag: String::new(),
@@ -466,7 +451,6 @@ impl App {
         for item in new_items.into_iter().rev() {
             self.items.insert(0, item);
         }
-        let ffprobe = self.config.ffprobe_path.clone();
         let to_probe = fresh.clone();
         let info = Task::perform(
             blocking(move || {
@@ -477,12 +461,11 @@ impl App {
         // Background duration probing, capped at PROBE_SEM permits so a large folder doesn't
         // saturate the blocking pool and starve the editor's on-demand probe.
         let durations = Task::batch(to_probe.into_iter().map(move |path| {
-            let ffprobe = ffprobe.clone();
             let id_path = path.clone();
             Task::perform(
                 async move {
                     let _permit = PROBE_SEM.acquire().await;
-                    blocking(move || host::probe(&path, &ffprobe)).await
+                    blocking(move || libav::probe(&path).map(|(m, _)| m)).await
                 },
                 move |res| {
                     Message::FileInfoLoaded(match res {
@@ -939,25 +922,6 @@ impl App {
             Message::AddPreset(folder) => return self.add_watched_folder(folder),
             Message::OutputFolderChanged(s) => { self.config.output_folder = s; return self.save_config_task(); }
             Message::NamingChanged(s) => { self.config.naming_template = s; return self.save_config_task(); }
-            Message::FfmpegPathChanged(s) => { self.config.ffmpeg_path = s; return self.save_config_task(); }
-            Message::FfprobePathChanged(s) => { self.config.ffprobe_path = s; return self.save_config_task(); }
-            Message::TestFfmpeg => {
-                self.ffmpeg_test = Some((true, "Testing…".into()));
-                let path = self.config.ffmpeg_path.clone();
-                return Task::perform(blocking(move || host::check_binary(&path)), |r| Message::BinaryTested(true, r));
-            }
-            Message::TestFfprobe => {
-                self.ffprobe_test = Some((true, "Testing…".into()));
-                let path = self.config.ffprobe_path.clone();
-                return Task::perform(blocking(move || host::check_binary(&path)), |r| Message::BinaryTested(false, r));
-            }
-            Message::BinaryTested(is_ffmpeg, result) => {
-                let entry = match &result {
-                    Ok(v) => (true, if v.is_empty() { "OK".to_string() } else { v.clone() }),
-                    Err(e) => (false, e.clone()),
-                };
-                if is_ffmpeg { self.ffmpeg_test = Some(entry); } else { self.ffprobe_test = Some(entry); }
-            }
             Message::SetQm(c) => { self.config.output.quality_mode = c.to_core(); return self.save_config_task(); }
             Message::SetQp(c) => { self.config.output.quality_preset = c.to_core(); return self.save_config_task(); }
             Message::SetCrf(s) => { if let Ok(v) = s.parse::<i64>() { self.config.output.crf = v.clamp(0, 51); return self.save_config_task(); } }
@@ -1068,10 +1032,9 @@ impl App {
         let Some(media) = ed.media.as_ref() else { return };
         let (mw, mh, is_hdr, id) = (media.width, media.height, ed.is_hdr, ed.item_id.clone());
         let path = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone());
-        let ffmpeg = self.config.ffmpeg_path.clone();
         let gamma = self.config.hdr_preview_gamma;
         let scrubber = path
-            .and_then(|p| ScrubDecoder::open(&p, &ffmpeg, mw, mh, is_hdr, gamma))
+            .and_then(|p| ScrubDecoder::open(&p, mw, mh, is_hdr, gamma))
             .map(|s| Arc::new(Mutex::new(s)));
         if let Some(ed) = self.editor.as_mut() {
             ed.scrubber = scrubber;
@@ -1108,7 +1071,7 @@ impl App {
     }
 
     /// (Re)start the warm streaming decoder from the current playhead and enter the playing state.
-    /// Returns a fallback single-frame task if the decoder can't be started (e.g. bad ffmpeg path).
+    /// Returns a fallback single-frame task if the decoder can't be started (e.g. an unreadable file).
     fn play_from_current(&mut self) -> Task<Message> {
         let snap = match self.editor.as_ref() {
             Some(ed) if ed.media.is_some() => {
@@ -1126,9 +1089,8 @@ impl App {
         let Some(path) = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone()) else {
             return Task::none();
         };
-        let ffmpeg = self.config.ffmpeg_path.clone();
         let gamma = self.config.hdr_preview_gamma;
-        let player = start_player(&path, &ffmpeg, start, mw, mh, mfps, is_hdr, audio_tracks, gamma);
+        let player = start_player(&path, start, mw, mh, mfps, is_hdr, audio_tracks, gamma);
         let started = player.is_some();
         if let Some(ed) = &mut self.editor {
             ed.current_time = start;
@@ -1172,8 +1134,7 @@ impl App {
             after_prompt: false,
         });
         let path = item.path.clone();
-        let ffprobe = self.config.ffprobe_path.clone();
-        Task::perform(blocking(move || host::probe_with_hdr(&path, &ffprobe)), move |r| Message::MediaProbed(id.clone(), r))
+        Task::perform(blocking(move || libav::probe(&path)), move |r| Message::MediaProbed(id.clone(), r))
     }
 
     fn on_media_probed(&mut self, id: String, result: Result<(MediaInfo, bool), String>) {
@@ -1223,10 +1184,9 @@ impl App {
                 // Open the warm scrub decoder for this clip (synchronous, like `start_player`); it
                 // lives until the next selection drops this Editor.
                 let path = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone());
-                let ffmpeg = self.config.ffmpeg_path.clone();
                 let gamma = self.config.hdr_preview_gamma;
                 ed.scrubber = path
-                    .and_then(|p| ScrubDecoder::open(&p, &ffmpeg, mw, mh, is_hdr, gamma))
+                    .and_then(|p| ScrubDecoder::open(&p, mw, mh, is_hdr, gamma))
                     .map(|s| Arc::new(Mutex::new(s)));
             }
         }
@@ -1315,7 +1275,6 @@ impl App {
     }
 
     /// In-process export: decode → edits → hardware encode → mux ([`export::run_export`]). No CLI.
-    #[cfg(feature = "libav-preview")]
     #[allow(clippy::too_many_arguments)]
     fn spawn_export(
         &self,
@@ -1335,41 +1294,6 @@ impl App {
             blocking(move || {
                 export::run_export(&input, &output_path, &spec, &output, &media, is_hdr, &metadata, progress, cancel)
             }),
-            move |result| Message::ExportFinished(id.clone(), result),
-        )
-    }
-
-    /// CLI ffmpeg export (the default build without the in-process libav stack).
-    #[cfg(not(feature = "libav-preview"))]
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_export(
-        &self,
-        id: String,
-        input: String,
-        output_path: String,
-        spec: EditSpec,
-        output: OutputSettings,
-        media: MediaInfo,
-        total: f64,
-        metadata: Vec<(String, String)>,
-        _is_hdr: bool,
-        progress: Arc<Mutex<f32>>,
-        _cancel: Arc<AtomicBool>,
-    ) -> Task<Message> {
-        let encode = output_settings_to_encode(&output, &media);
-        let args = build_export_args(&BuildExportOptions {
-            input_path: input,
-            output_path,
-            spec,
-            reencode: encode.reencode,
-            progress: true,
-            video: Some(encode.video),
-            audio: Some(encode.audio),
-            metadata,
-        });
-        let ffmpeg = self.config.ffmpeg_path.clone();
-        Task::perform(
-            blocking(move || host::run_export(&ffmpeg, &args, total, progress)),
             move |result| Message::ExportFinished(id.clone(), result),
         )
     }
