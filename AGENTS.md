@@ -73,14 +73,16 @@ either; preview accuracy is advisory, export accuracy comes from the parity-test
   **libplacebo** HDR→SDR tonemap → **cpal** audio (audio is the A/V master clock),
   in [libav.rs](apps/desktop/crates/qlipq-desktop/src/libav.rs). Needs a shared FFmpeg
   8.x dev build wired via the (gitignored) `.cargo/config.toml`; off by default.
-  _Known limitation:_ preview audio plays the single best audio stream at full
-  volume (`find_best_stream`, ~libav.rs:475) — the per-track enable/volume you set
-  in the editor is honored **only on export**, not in preview.
+  Preview audio is a **monitor mixdown** of the enabled tracks: `audio_loop` decodes every
+  enabled track, applies per-track gain, and sums them into one cpal output (manual sum on the
+  audio thread — `mix_and_push`, never blocking the cpal callback / master clock). It will not
+  byte-match the export (a monitor sum vs. the export filtergraph), and that's fine.
 
-**Audio export is multi-track, not mixed.** `build_export_args` maps each enabled
-audio track as a **separate output stream**, each with its own `volume=` filter when
-gain ≠ 1.0. There is **no `amix`** anywhere (the old TS preview-proxy that used it
-was removed with the TS packages).
+**Audio export is mixed down to one track.** `build_export_args` applies each enabled track's
+`volume=` then sums them with `amix=inputs=N:normalize=0` (sum at the set levels, so the export
+matches the preview monitor mix); a lone enabled track skips `amix` (its `volume` filter, or a
+stream-copy at unity). Mixing forces an audio re-encode. This `amix` lives **only** in
+`build_export_args` — don't add mixing anywhere else.
 
 **Config lives in the `qlipq-core` crate.** `AppConfig`
 ([config.rs](apps/desktop/crates/qlipq-core/src/config.rs),

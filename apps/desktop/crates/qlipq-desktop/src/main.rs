@@ -19,9 +19,9 @@ mod libav;
 // audio) when `libav-preview` is on, else the CLI ffmpeg player. Both expose the same interface
 // (`poll`/`dimensions`/`fps`/`position`/`try_seek`) so the editor code below is feature-agnostic.
 #[cfg(feature = "libav-preview")]
-use libav::{extract_frame, start_player, Player as PreviewPlayer};
+use libav::{start_player, Player as PreviewPlayer, ScrubDecoder};
 #[cfg(not(feature = "libav-preview"))]
-use host::{extract_frame, start_player, Player as PreviewPlayer};
+use host::{start_player, Player as PreviewPlayer, ScrubDecoder};
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -163,6 +163,10 @@ struct Editor {
     playing: bool,
     /// Warm streaming decoder, present only while playing (dropped → decoder stopped).
     player: Option<PreviewPlayer>,
+    /// Warm single-frame decoder for scrubbing/paused preview, opened once per clip (libav: warm
+    /// demuxer+decoder; CLI: per-frame ffmpeg spawn). Behind `Arc<Mutex>` so the blocking scrub task
+    /// can drive it. `None` until the clip is probed, or if the decoder fails to open.
+    scrubber: Option<Arc<Mutex<ScrubDecoder>>>,
     exporting: bool,
     progress: Arc<Mutex<f32>>,
     progress_display: f32,
@@ -210,7 +214,7 @@ enum Message {
     PresetsDetected(Option<String>, Option<String>),
     SelectItem(String),
     MediaProbed(String, Result<(MediaInfo, bool), String>),
-    FrameExtracted(String, Option<(u32, u32, Vec<u8>)>),
+    FrameExtracted(String, Option<(u32, u32, Vec<u8>, f64)>),
     Seek(f64),
     Skip(f64),
     TogglePlay,
@@ -490,11 +494,17 @@ impl App {
                 if let Some(ed) = &mut self.editor {
                     if ed.item_id == id {
                         ed.extracting = false;
-                        if let Some((w, h, rgba)) = frame {
+                        redo = ed.frame_dirty; // position moved again while extracting
+                        if let Some((w, h, rgba, realized)) = frame {
                             video::push_frame(&ed.shared_frame, w, h, rgba);
                             ed.has_frame = true;
+                            // Snap the playhead to the frame we actually decoded (frame-accurate
+                            // scrubber) — but not if a newer scrub is pending, where `current_time`
+                            // already holds the new target.
+                            if !redo {
+                                ed.current_time = realized;
+                            }
                         }
-                        redo = ed.frame_dirty; // position moved again while extracting
                     }
                 }
                 if redo {
@@ -861,28 +871,26 @@ impl App {
     fn request_frame(&mut self) -> Task<Message> {
         let snap = match self.editor.as_ref() {
             Some(ed) if !ed.playing && ed.media.is_some() => {
-                let m = ed.media.as_ref().unwrap();
-                Some((ed.extracting, ed.current_time, ed.item_id.clone(), m.width, m.height, ed.is_hdr))
+                Some((ed.extracting, ed.current_time, ed.item_id.clone(), ed.scrubber.clone()))
             }
             _ => None,
         };
-        let Some((extracting, sec, id, mw, mh, is_hdr)) = snap else { return Task::none() };
+        let Some((extracting, sec, id, scrubber)) = snap else { return Task::none() };
         if extracting {
             if let Some(ed) = &mut self.editor {
                 ed.frame_dirty = true;
             }
             return Task::none();
         }
-        let Some(path) = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone()) else {
-            return Task::none();
-        };
-        let ffmpeg = self.config.ffmpeg_path.clone();
+        let Some(scrubber) = scrubber else { return Task::none() };
         if let Some(ed) = &mut self.editor {
             ed.extracting = true;
             ed.frame_dirty = false;
         }
+        // Drive the warm scrub decoder on the blocking pool; coalescing (extracting/frame_dirty)
+        // keeps at most one in flight, so the Mutex is never contended.
         Task::perform(
-            blocking(move || extract_frame(&path, &ffmpeg, sec, mw, mh, is_hdr).ok()),
+            blocking(move || scrubber.lock().ok().and_then(|mut s| s.frame_at(sec))),
             move |frame| Message::FrameExtracted(id.clone(), frame),
         )
     }
@@ -893,18 +901,21 @@ impl App {
         let snap = match self.editor.as_ref() {
             Some(ed) if ed.media.is_some() => {
                 let m = ed.media.as_ref().unwrap();
-                Some((ed.item_id.clone(), ed.current_time, m.width, m.height, m.fps, m.duration_sec, ed.is_hdr))
+                // Enabled tracks (audio-relative index + gain) drive the preview's monitor mixdown.
+                let audio_tracks: Vec<(i64, f64)> =
+                    ed.audio.iter().filter(|r| r.enabled).map(|r| (r.index, r.volume)).collect();
+                Some((ed.item_id.clone(), ed.current_time, m.width, m.height, m.fps, m.duration_sec, ed.is_hdr, audio_tracks))
             }
             _ => None,
         };
-        let Some((id, cur, mw, mh, mfps, dur, is_hdr)) = snap else { return Task::none() };
+        let Some((id, cur, mw, mh, mfps, dur, is_hdr, audio_tracks)) = snap else { return Task::none() };
         // Restart from the top only when we know we're at the real end (avoid rewinding on a 0/unknown duration).
         let start = if dur > 0.0 && cur >= dur { 0.0 } else { cur };
         let Some(path) = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone()) else {
             return Task::none();
         };
         let ffmpeg = self.config.ffmpeg_path.clone();
-        let player = start_player(&path, &ffmpeg, start, mw, mh, mfps, is_hdr);
+        let player = start_player(&path, &ffmpeg, start, mw, mh, mfps, is_hdr, audio_tracks);
         let started = player.is_some();
         if let Some(ed) = &mut self.editor {
             ed.current_time = start;
@@ -937,6 +948,7 @@ impl App {
             extracting: false,
             playing: false,
             player: None,
+            scrubber: None,
             exporting: false,
             progress: Arc::new(Mutex::new(0.0)),
             progress_display: 0.0,
@@ -989,8 +1001,16 @@ impl App {
                         }
                     })
                     .collect();
+                let (mw, mh) = (media.width, media.height);
                 ed.media = Some(media);
                 ed.frame_dirty = true;
+                // Open the warm scrub decoder for this clip (synchronous, like `start_player`); it
+                // lives until the next selection drops this Editor.
+                let path = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone());
+                let ffmpeg = self.config.ffmpeg_path.clone();
+                ed.scrubber = path
+                    .and_then(|p| ScrubDecoder::open(&p, &ffmpeg, mw, mh, is_hdr))
+                    .map(|s| Arc::new(Mutex::new(s)));
             }
         }
     }

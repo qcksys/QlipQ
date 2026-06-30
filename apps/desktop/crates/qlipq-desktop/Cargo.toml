@@ -26,6 +26,22 @@ required-features = ["libav-preview"]
 name = "play_probe"
 required-features = ["libav-preview"]
 
+[[example]]
+name = "encode_probe"
+required-features = ["libav-preview"]
+
+[[example]]
+name = "scrub_probe"
+required-features = ["libav-preview"]
+
+[[example]]
+name = "mixdown_probe"
+required-features = ["libav-preview"]
+
+[[example]]
+name = "scrubgraph_probe"
+required-features = ["libav-preview"]
+
 [dependencies]
 qlipq-core = { workspace = true }
 qlipq-ffmpeg = { workspace = true }

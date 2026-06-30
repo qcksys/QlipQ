@@ -35,7 +35,7 @@ The editor shows an estimated file size for the current clip, and you can overri
 1. Pick a clip from the **Queue** (each shows its date, length, and size).
 2. Set the **in/out** points on the timeline. The player remembers your position and has −60/−5/−1 and +1/+5/+60 second jump buttons.
 3. Optionally enable **crop** and adjust the rectangle.
-4. Toggle **audio tracks** and set their levels (your selection carries to the next clip). The preview plays your primary enabled track; the **export mixes all enabled tracks** at the levels you set.
+4. Toggle **audio tracks** and set their levels (your selection carries to the next clip). On **export**, the enabled tracks are **mixed together into one track** at the levels you set.
 5. Click **Export clip**. If a file with the same name already exists you can **overwrite** it or **append a timestamp** to keep both, and the **After export** setting decides what happens to the original (keep, delete, move, rename, or prompt). Use **Show file** to reveal the exported clip.
 
 > The built-in player (powered by VLC) plays MKV and HEVC directly, so previews need no conversion. Exports always use the original file.

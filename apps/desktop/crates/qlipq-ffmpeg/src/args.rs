@@ -130,9 +130,10 @@ pub fn output_settings_to_encode(output: &OutputSettings, media: &MediaInfo) -> 
     }
 }
 
-/// Build the ffmpeg argument list to apply an [`EditSpec`] to a clip. Mirrors the TS/C#
-/// `buildExportArgs`: fast-seek trim, crop+scale filter chain, per-track audio mapping/volume,
-/// bitrate-vs-CRF rate control, constrained VBR, `-an` for no audio, and trailing metadata/progress.
+/// Build the ffmpeg argument list to apply an [`EditSpec`] to a clip: fast-seek trim, crop+scale
+/// filter chain, audio mixdown (per-track `volume` then `amix=normalize=0` to one track, summed at
+/// the set levels), bitrate-vs-CRF rate control, constrained VBR, `-an` for no audio, and trailing
+/// metadata/progress.
 pub fn build_export_args(opts: &BuildExportOptions) -> Vec<String> {
     let spec = &opts.spec;
     let v = opts.video.clone().unwrap_or_default();
@@ -151,7 +152,10 @@ pub fn build_export_args(opts: &BuildExportOptions) -> Vec<String> {
     let enabled_audio: Vec<&qlipq_core::edit_spec::AudioTrackSpec> =
         spec.audio_tracks.iter().filter(|t| t.enabled).collect();
     let needs_video_filter = spec.crop.is_some() || truthy(video_scale_height);
-    let needs_audio_filter = enabled_audio.iter().any(|t| t.volume != 1.0);
+    // Two or more enabled tracks are mixed down to one (amix); a single track only needs a filter
+    // when its volume isn't unity.
+    let mix_audio = enabled_audio.len() >= 2;
+    let needs_audio_filter = mix_audio || enabled_audio.iter().any(|t| t.volume != 1.0);
     let video_reencode = needs_video_filter || truthy(video_fps) || opts.reencode;
     let audio_reencode = needs_audio_filter;
 
@@ -186,14 +190,30 @@ pub fn build_export_args(opts: &BuildExportOptions) -> Vec<String> {
             video_map = "[vout]".to_string();
         }
 
+        // Mix the enabled tracks into one: apply each track's volume, then sum with amix(normalize=0)
+        // so the levels you set are preserved (this matches the preview monitor mix). A lone enabled
+        // track skips amix — its volume filter, or a direct map when unity.
         let mut audio_maps: Vec<String> = Vec::new();
-        for (i, track) in enabled_audio.iter().enumerate() {
-            if track.volume != 1.0 {
-                let label = format!("[aout{}]", i);
-                filters.push(format!("[0:a:{}]volume={}{}", track.index, format_volume(track.volume), label));
-                audio_maps.push(label);
-            } else {
-                audio_maps.push(format!("0:a:{}", track.index));
+        match enabled_audio.as_slice() {
+            [] => {}
+            [t] if t.volume == 1.0 => audio_maps.push(format!("0:a:{}", t.index)),
+            [t] => {
+                filters.push(format!("[0:a:{}]volume={}[aout]", t.index, format_volume(t.volume)));
+                audio_maps.push("[aout]".to_string());
+            }
+            tracks => {
+                let mut inputs = String::new();
+                for t in tracks {
+                    if t.volume != 1.0 {
+                        let label = format!("[a{}]", t.index);
+                        filters.push(format!("[0:a:{}]volume={}{}", t.index, format_volume(t.volume), label));
+                        inputs.push_str(&label);
+                    } else {
+                        inputs.push_str(&format!("[0:a:{}]", t.index));
+                    }
+                }
+                filters.push(format!("{inputs}amix=inputs={}:normalize=0[aout]", tracks.len()));
+                audio_maps.push("[aout]".to_string());
             }
         }
         args.push("-filter_complex".to_string());

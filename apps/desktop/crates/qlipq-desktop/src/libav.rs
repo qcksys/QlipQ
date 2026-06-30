@@ -188,13 +188,18 @@ pub fn start_player(
     src_h: i64,
     src_fps: f64,
     is_hdr: bool,
+    audio_tracks: Vec<(i64, f64)>,
 ) -> Option<Player> {
     let cpath = CString::new(path).ok()?;
     let input = AVFormatContextInput::open(&cpath).ok()?;
 
     let vid_idx = input.find_best_stream(ffi::AVMEDIA_TYPE_VIDEO).ok()?.map(|(i, _)| i)?;
     let (vdec, tb_v, sar) = build_video_decoder(&input, vid_idx)?;
-    let has_audio = input.find_best_stream(ffi::AVMEDIA_TYPE_AUDIO).ok().flatten().is_some();
+    // Preview audio is a monitor mixdown of the *enabled* tracks (per-track gain), so "has audio"
+    // means the file has audio AND at least one track is enabled — disabling them all plays silence
+    // (video then runs on the wall clock).
+    let file_has_audio = input.find_best_stream(ffi::AVMEDIA_TYPE_AUDIO).ok().flatten().is_some();
+    let has_audio = file_has_audio && !audio_tracks.is_empty();
 
     let dims = placebo_dims(src_w, src_h);
     let fps = if src_fps.is_finite() && src_fps > 0.0 { src_fps.min(60.0) } else { 30.0 };
@@ -223,7 +228,7 @@ pub fn start_player(
         let shared_a = Arc::clone(&shared);
         let path = path.to_string();
         let handle = std::thread::spawn(move || {
-            audio_loop(path, start_sec, shared_a, rx);
+            audio_loop(path, start_sec, shared_a, rx, audio_tracks);
         });
         (Some(tx), Some(handle))
     } else {
@@ -242,64 +247,108 @@ pub fn start_player(
     })
 }
 
-/// Extract a single preview frame at `sec` (scrubbing / paused), in-process through the same
-/// libplacebo/scale pipeline as playback so the color matches. Signature matches `host::extract_frame`.
-#[allow(clippy::too_many_arguments)]
-pub fn extract_frame(
-    path: &str,
-    _ffmpeg_path: &str,
-    sec: f64,
-    src_w: i64,
-    src_h: i64,
+/// A warm single-frame decoder for scrubbing / paused preview. Holds the demuxer, video decoder, **and
+/// the libplacebo/scale filter graph** open across scrubs, so each [`frame_at`](ScrubDecoder::frame_at)
+/// only warm-seeks, decodes forward to the target frame, and pushes that **one** frame through the warm
+/// graph — avoiding the per-scrub graph rebuild that dominates HDR scrub latency (measured ~11× faster
+/// for HDR; see `examples/scrubgraph_probe.rs`). It uses the same pipeline as playback so the color
+/// matches. Interface-compatible with `host::ScrubDecoder`.
+///
+/// The graph is built lazily on the first `frame_at` — its libplacebo/Vulkan init is a one-time cost,
+/// paid off the UI thread (scrubs already run on the blocking pool). Because the graph is reused, pushed
+/// frames get a monotonic PTS (`mono_pts`) so a backward seek doesn't look like time running backwards;
+/// the realized image is unaffected.
+///
+/// _Caveat:_ libplacebo's temporal peak-detect state carries across reused frames, so a frame's tonemap
+/// could in principle adapt slightly between scrubs. If that's ever visible, add `peak_detect=0` to the
+/// libplacebo args in [`build_video_filter`].
+pub struct ScrubDecoder {
+    input: AVFormatContextInput,
+    vdec: AVCodecContext,
+    vid_idx: i32,
+    tb_v: ffi::AVRational,
+    sar: ffi::AVRational,
+    dims: (u32, u32),
     is_hdr: bool,
-) -> Result<(u32, u32, Vec<u8>), String> {
-    let (w, h) = placebo_dims(src_w, src_h);
-    let cpath = CString::new(path).map_err(|e| e.to_string())?;
-    let mut input = AVFormatContextInput::open(&cpath).map_err(|e| format!("open failed: {e:?}"))?;
+    /// Warm filter graph, built lazily on the first `frame_at` and reused for every scrub.
+    graph: Option<AVFilterGraph>,
+    /// Monotonic PTS handed to buffersrc so reused-graph pushes never look like backward time.
+    mono_pts: i64,
+}
 
-    let vid_idx = input
-        .find_best_stream(ffi::AVMEDIA_TYPE_VIDEO)
-        .map_err(|e| format!("{e:?}"))?
-        .map(|(i, _)| i)
-        .ok_or("no video stream")?;
-    let (mut vdec, tb_v, sar) = build_video_decoder(&input, vid_idx).ok_or("decoder init failed")?;
-
-    let target = sec.max(0.0);
-    if tb_v.num != 0 {
-        let ts = (target * tb_v.den as f64 / tb_v.num as f64) as i64;
-        let _ = input.seek(vid_idx as i32, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
-        vdec.flush_buffers();
+impl ScrubDecoder {
+    /// Open the file and build the video decoder once (the filter graph is built lazily on first use).
+    /// The `_ffmpeg_path` is unused (decoding is in-process); the signature matches
+    /// `host::ScrubDecoder::open` so the editor is feature-agnostic. `None` if the file/decoder can't open.
+    pub fn open(path: &str, _ffmpeg_path: &str, src_w: i64, src_h: i64, is_hdr: bool) -> Option<Self> {
+        let cpath = CString::new(path).ok()?;
+        let input = AVFormatContextInput::open(&cpath).ok()?;
+        let vid_idx = input.find_best_stream(ffi::AVMEDIA_TYPE_VIDEO).ok()?.map(|(i, _)| i)?;
+        let (vdec, tb_v, sar) = build_video_decoder(&input, vid_idx)?;
+        Some(Self {
+            input,
+            vdec,
+            vid_idx: vid_idx as i32,
+            tb_v,
+            sar,
+            dims: placebo_dims(src_w, src_h),
+            is_hdr,
+            graph: None,
+            mono_pts: 0,
+        })
     }
 
-    let graph = AVFilterGraph::new();
-    let (mut src, mut sink) = build_video_filter(&graph, &vdec, tb_v, sar, w, h, is_hdr)
-        .map_err(|e| format!("filter graph init failed: {e}"))?;
+    /// Decode the frame at `sec` as tight RGBA, returning `(w, h, rgba, realized_sec)` where
+    /// `realized_sec` is the PTS of the frame actually returned (≈ `sec`, within one frame) so the
+    /// caller can snap the playhead to the real frame (frame-accurate scrubber). `None` on decode end.
+    pub fn frame_at(&mut self, sec: f64) -> Option<(u32, u32, Vec<u8>, f64)> {
+        let target = sec.max(0.0);
+        let (w, h) = self.dims;
+        let tb_v_secs = rational_secs(self.tb_v);
 
-    let tb_v_secs = rational_secs(tb_v);
-    let mut flushed = false;
-    let vid_idx = vid_idx as i32;
-    loop {
-        // Pull any filtered frame; return the first whose PTS reaches the target.
-        match sink.buffersink_get_frame(None) {
-            Ok(out) => {
-                let pts = out.pts as f64 * tb_v_secs;
-                if pts + 1e-3 < target && !flushed {
-                    continue;
-                }
-                return Ok((w, h, frame_to_rgba(&out)));
-            }
-            Err(RsmpegError::BufferSinkDrainError) => {}
-            Err(RsmpegError::BufferSinkEofError) => return Err("no frame decoded".into()),
-            Err(e) => return Err(format!("buffersink: {e:?}")),
+        // Warm-seek, then decode forward to the first frame at/after the target.
+        if self.tb_v.num != 0 {
+            let ts = (target * self.tb_v.den as f64 / self.tb_v.num as f64) as i64;
+            let _ = self.input.seek(self.vid_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
+            self.vdec.flush_buffers();
         }
+        let frame = decode_to_target(&mut self.input, &mut self.vdec, self.vid_idx, tb_v_secs, target)?;
+        let realized = (frame.pts as f64 * tb_v_secs).max(0.0);
+
+        // Build the warm graph once (its libplacebo/Vulkan init is the one-time cost).
+        if self.graph.is_none() {
+            let graph = AVFilterGraph::new();
+            build_video_filter(&graph, &self.vdec, self.tb_v, self.sar, w, h, self.is_hdr).ok()?;
+            self.graph = Some(graph);
+        }
+
+        // Push the target frame through the warm graph (take/restore so the graph isn't a self-borrow).
+        let graph = self.graph.take().unwrap();
+        let rgba = filter_target_frame(&graph, &mut self.input, &mut self.vdec, self.vid_idx, frame, &mut self.mono_pts);
+        self.graph = Some(graph);
+        rgba.map(|px| (w, h, px, realized))
+    }
+}
+
+/// Seek-forward decode: return the first frame whose PTS reaches `target` (discarding earlier frames).
+fn decode_to_target(
+    input: &mut AVFormatContextInput,
+    vdec: &mut AVCodecContext,
+    vid_idx: i32,
+    tb_v_secs: f64,
+    target: f64,
+) -> Option<AVFrame> {
+    let mut flushed = false;
+    loop {
         match vdec.receive_frame() {
-            Ok(decoded) => {
-                let _ = src.buffersrc_add_frame(Some(decoded), None);
-                continue;
+            Ok(f) => {
+                if f.pts as f64 * tb_v_secs + 1e-3 >= target {
+                    return Some(f);
+                }
+                continue; // before the target — keep decoding forward
             }
             Err(RsmpegError::DecoderDrainError) => {}
-            Err(RsmpegError::DecoderFlushedError) => return Err("no frame decoded".into()),
-            Err(e) => return Err(format!("decode: {e:?}")),
+            Err(_) => return None,
         }
         match input.read_packet() {
             Ok(Some(pkt)) => {
@@ -309,11 +358,67 @@ pub fn extract_frame(
             }
             Ok(None) if !flushed => {
                 let _ = vdec.send_packet(None);
-                let _ = src.buffersrc_add_frame(None, None);
                 flushed = true;
             }
-            _ => return Err("no frame decoded".into()),
+            _ => return None,
         }
+    }
+}
+
+/// Decode the next frame in sequence — used to flush libplacebo's frame latency after the target push.
+fn decode_next_frame(input: &mut AVFormatContextInput, vdec: &mut AVCodecContext, vid_idx: i32) -> Option<AVFrame> {
+    loop {
+        match vdec.receive_frame() {
+            Ok(f) => return Some(f),
+            Err(RsmpegError::DecoderDrainError) => {}
+            Err(_) => return None,
+        }
+        match input.read_packet() {
+            Ok(Some(pkt)) => {
+                if pkt.stream_index == vid_idx {
+                    let _ = vdec.send_packet(Some(&pkt));
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Push `first` (the target frame) through the warm graph, feeding the following frames until the graph
+/// emits its first output — that output is the target (1-in-1-out, but libplacebo may hold one frame).
+/// Stale outputs from a prior scrub are drained first; pushed frames get a monotonic PTS so backward
+/// seeks don't look like time going backwards.
+fn filter_target_frame(
+    graph: &AVFilterGraph,
+    input: &mut AVFormatContextInput,
+    vdec: &mut AVCodecContext,
+    vid_idx: i32,
+    first: AVFrame,
+    mono: &mut i64,
+) -> Option<Vec<u8>> {
+    let mut src = graph.get_filter(c"in")?;
+    let mut sink = graph.get_filter(c"out")?;
+    while sink.buffersink_get_frame(None).is_ok() {} // drop stale output left from the previous scrub
+
+    let mut next = Some(first);
+    let mut pushes = 0;
+    loop {
+        if let Some(mut f) = next.take() {
+            unsafe { (*f.as_mut_ptr()).pts = *mono };
+            *mono += 1;
+            let _ = src.buffersrc_add_frame(Some(f), None);
+            pushes += 1;
+        }
+        match sink.buffersink_get_frame(None) {
+            Ok(out) => return Some(frame_to_rgba(&out)),
+            Err(RsmpegError::BufferSinkDrainError) => {}
+            Err(_) => return None,
+        }
+        if pushes > 8 {
+            return None; // gave up flushing the target frame through
+        }
+        next = decode_next_frame(input, vdec, vid_idx);
+        next.as_ref()?; // decode ended before the frame flushed through
     }
 }
 
@@ -467,48 +572,104 @@ fn pull_video(
     }
 }
 
-// ---- audio thread ----
+// ---- audio thread (monitor mixdown) ----
 
-fn audio_loop(path: String, start_sec: f64, shared: Arc<Shared>, cmd_rx: Receiver<Command>) {
+/// One enabled audio track in the monitor mix: its decoder, per-track gain, a resampler to the device
+/// format, and a FIFO of resampled-but-not-yet-mixed interleaved f32 samples.
+struct MixTrack {
+    abs_idx: i32,
+    dec: AVCodecContext,
+    tb_secs: f64,
+    gain: f32,
+    swr: Option<SwrContext>,
+    pending: Vec<f32>,
+    seeking: bool,
+}
+
+/// Decode the **enabled** audio tracks, apply per-track gain, and **sum** them into one cpal output —
+/// a monitor mixdown so you hear what you configured. (This is preview-only; export still writes each
+/// enabled track as its own stream, so it never byte-matches this mix, by design.) The mix is built
+/// on this thread and pushed through the ring buffer, so the cpal callback (the master clock) never
+/// blocks. `audio_tracks` is `(audio-relative index, volume)` for each enabled track.
+fn audio_loop(
+    path: String,
+    start_sec: f64,
+    shared: Arc<Shared>,
+    cmd_rx: Receiver<Command>,
+    audio_tracks: Vec<(i64, f64)>,
+) {
     let Ok(cpath) = CString::new(path) else { return };
     let Ok(mut input) = AVFormatContextInput::open(&cpath) else { return };
-    let Some(aud_idx) = input.find_best_stream(ffi::AVMEDIA_TYPE_AUDIO).ok().flatten().map(|(i, _)| i) else {
+
+    // Map audio-relative indices (0:a:N, as the editor/export use) to absolute stream indices.
+    let abs: Vec<i32> = input
+        .streams()
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.codecpar().codec_type == ffi::AVMEDIA_TYPE_AUDIO)
+        .map(|(i, _)| i as i32)
+        .collect();
+
+    let mut tracks: Vec<MixTrack> = Vec::new();
+    for (rel, vol) in audio_tracks {
+        let Some(&abs_idx) = abs.get(rel.max(0) as usize) else { continue };
+        if let Some((dec, tb)) = build_audio_decoder(&input, abs_idx as usize) {
+            tracks.push(MixTrack {
+                abs_idx,
+                dec,
+                tb_secs: rational_secs(tb),
+                gain: vol as f32,
+                swr: None,
+                pending: Vec::new(),
+                seeking: true,
+            });
+        }
+    }
+    if tracks.is_empty() {
+        // `start_player` optimistically set `has_audio` (so the video thread runs with
+        // `manages_clock = false`), but none of the enabled tracks turned out to be decodable. Hand
+        // the clock to wall time here so the (now silent) video still plays instead of freezing.
+        shared.clock.use_audio.store(false, Ordering::Relaxed);
+        *shared.clock.base.lock().unwrap() = start_sec;
+        *shared.clock.wall.lock().unwrap() = Some((Instant::now(), start_sec));
         return;
-    };
-    let Some((mut adec, tb_a)) = build_audio_decoder(&input, aud_idx) else { return };
-    let aud_idx = aud_idx as i32;
+    }
 
     let host = cpal::default_host();
     let device = host.default_output_device();
     let mut start = start_sec;
     loop {
-        match audio_segment(&mut input, &mut adec, aud_idx, tb_a, start, &shared, device.as_ref(), &cmd_rx) {
+        match audio_segment(&mut input, &mut tracks, start, &shared, device.as_ref(), &cmd_rx) {
             SegEnd::Seek(t) => start = t,
             SegEnd::Eof | SegEnd::Stopped => break,
         }
     }
 }
 
-/// Decode audio for one segment: seek, build a fresh cpal output + ring buffer (so stale audio never
-/// survives a seek), then resample and feed it until EOF / seek / drop. Owns the master clock.
-#[allow(clippy::too_many_arguments)]
+/// Decode all tracks for one segment: seek the container once, reset every track's decoder + FIFO,
+/// build a fresh cpal output (so stale audio never survives a seek), then decode → resample → sum →
+/// feed until EOF / seek / drop. Owns the master clock.
 fn audio_segment(
     input: &mut AVFormatContextInput,
-    adec: &mut AVCodecContext,
-    aud_idx: i32,
-    tb_a: ffi::AVRational,
+    tracks: &mut [MixTrack],
     start: f64,
     shared: &Arc<Shared>,
     device: Option<&cpal::Device>,
     cmd_rx: &Receiver<Command>,
 ) -> SegEnd {
-    let tb_a_secs = rational_secs(tb_a);
-
-    if tb_a.num != 0 {
-        let ts = (start * tb_a.den as f64 / tb_a.num as f64) as i64;
-        let _ = input.seek(aud_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
+    // Seek the container once (by the first track's timeline), then reset every track.
+    if let Some(t0) = tracks.first() {
+        if t0.tb_secs > 0.0 {
+            let ts = (start / t0.tb_secs) as i64;
+            let _ = input.seek(t0.abs_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
+        }
     }
-    adec.flush_buffers();
+    for t in tracks.iter_mut() {
+        t.dec.flush_buffers();
+        t.pending.clear();
+        t.swr = None;
+        t.seeking = true;
+    }
 
     let mut audio = device.and_then(build_audio_out);
     let use_audio = audio.is_some();
@@ -522,29 +683,26 @@ fn audio_segment(
     shared.clock.rate.store((out_rate as f64).to_bits(), Ordering::Relaxed);
     let played = audio.as_ref().map(|a| Arc::clone(&a.played));
 
-    let mut swr: Option<SwrContext> = None;
-    let mut seeking = true;
-
     loop {
         if let Some(end) = poll_cmd(cmd_rx) {
             return end;
         }
         match input.read_packet() {
             Ok(Some(pkt)) => {
-                if pkt.stream_index == aud_idx {
-                    let _ = adec.send_packet(Some(&pkt));
-                    if let Some(end) =
-                        drain_audio(adec, &mut swr, &mut audio, out_ch, out_rate, tb_a_secs, start, &mut seeking, cmd_rx)
-                    {
-                        return end;
-                    }
+                if let Some(t) = tracks.iter_mut().find(|t| t.abs_idx == pkt.stream_index) {
+                    let _ = t.dec.send_packet(Some(&pkt));
+                    decode_into_pending(t, out_ch, out_rate, start);
+                }
+                if let Some(end) = mix_and_push(tracks, &mut audio, out_ch, out_rate, false, cmd_rx) {
+                    return end;
                 }
             }
             Ok(None) => {
-                let _ = adec.send_packet(None);
-                if let Some(end) =
-                    drain_audio(adec, &mut swr, &mut audio, out_ch, out_rate, tb_a_secs, start, &mut seeking, cmd_rx)
-                {
+                for t in tracks.iter_mut() {
+                    let _ = t.dec.send_packet(None);
+                    decode_into_pending(t, out_ch, out_rate, start);
+                }
+                if let Some(end) = mix_and_push(tracks, &mut audio, out_ch, out_rate, true, cmd_rx) {
                     return end;
                 }
                 // Keep the device alive until its buffer drains (so the last ~0.5 s isn't cut off),
@@ -572,51 +730,29 @@ fn audio_segment(
     }
 }
 
-/// Pull decoded audio frames, resample to the device format, and push them into the ring buffer
-/// (with backpressure). Returns `Some(SegEnd)` if a seek/stop interrupts the (blocking) push.
-#[allow(clippy::too_many_arguments)]
-fn drain_audio(
-    adec: &mut AVCodecContext,
-    swr: &mut Option<SwrContext>,
-    audio: &mut Option<AudioOut>,
-    out_ch: usize,
-    out_rate: i32,
-    tb_a_secs: f64,
-    start: f64,
-    seeking: &mut bool,
-    cmd_rx: &Receiver<Command>,
-) -> Option<SegEnd> {
+/// Pull all decoded frames from one track, discard the pre-seek ones, and resample the rest into its
+/// pending FIFO. Never touches the device (that's [`mix_and_push`]), so it can't block the clock.
+fn decode_into_pending(t: &mut MixTrack, out_ch: usize, out_rate: i32, start: f64) {
     loop {
-        let frame = match adec.receive_frame() {
+        let frame = match t.dec.receive_frame() {
             Ok(f) => f,
             Err(_) => break,
         };
         // Discard whole audio frames that end before the seek target.
-        let apts = frame.pts as f64 * tb_a_secs;
+        let apts = frame.pts as f64 * t.tb_secs;
         let dur = if frame.sample_rate > 0 { frame.nb_samples as f64 / frame.sample_rate as f64 } else { 0.0 };
-        if *seeking && apts + dur <= start {
+        if t.seeking && apts + dur <= start {
             continue;
         }
-        *seeking = false;
-        let Some(out) = audio.as_mut() else { continue };
-        if let Some(end) = push_audio(swr, &frame, out_ch, out_rate, &mut out.producer, cmd_rx) {
-            return Some(end);
-        }
+        t.seeking = false;
+        resample_into(&mut t.swr, &frame, out_ch, out_rate, &mut t.pending);
     }
-    None
 }
 
-/// Resample one audio frame to f32 interleaved at the device rate and push it into the ring buffer.
-fn push_audio(
-    swr: &mut Option<SwrContext>,
-    frame: &AVFrame,
-    out_ch: usize,
-    out_rate: i32,
-    producer: &mut HeapProd<f32>,
-    cmd_rx: &Receiver<Command>,
-) -> Option<SegEnd> {
+/// Resample one frame to f32 interleaved at the device rate, appending to the track's pending FIFO.
+fn resample_into(swr: &mut Option<SwrContext>, frame: &AVFrame, out_ch: usize, out_rate: i32, dst: &mut Vec<f32>) {
     if out_ch == 0 {
-        return None;
+        return;
     }
     if swr.is_none() {
         let in_ch = frame.ch_layout().nb_channels.max(1);
@@ -625,38 +761,89 @@ fn push_audio(
         let mut s =
             match SwrContext::new(&out_layout, ffi::AV_SAMPLE_FMT_FLT, out_rate, &in_layout, frame.format, frame.sample_rate) {
                 Ok(s) => s,
-                Err(_) => return None,
+                Err(_) => return,
             };
         if s.init().is_err() {
-            return None;
+            return;
         }
         *swr = Some(s);
     }
     let s = swr.as_mut().unwrap();
     let out_count = s.get_out_samples(frame.nb_samples);
     if out_count <= 0 {
-        return None;
+        return;
     }
     let mut buf = vec![0f32; out_count as usize * out_ch];
     let mut out_ptr = buf.as_mut_ptr() as *mut u8;
     let in_ptr = frame.data.as_ptr() as *const *const u8;
     let got = match unsafe { s.convert(&mut out_ptr, out_count, in_ptr, frame.nb_samples) } {
         Ok(n) => n as usize,
-        Err(_) => return None,
+        Err(_) => return,
     };
-    let n = got * out_ch;
-    let mut off = 0;
-    while off < n {
-        off += producer.push_slice(&buf[off..n]);
-        if off < n {
-            // Ring full → audio is keeping pace; wait, but stay responsive to seek/stop.
-            if let Some(end) = poll_cmd(cmd_rx) {
-                return Some(end);
+    buf.truncate(got * out_ch);
+    dst.extend_from_slice(&buf);
+}
+
+/// Sum each track's pending samples (× its gain) into one interleaved buffer and push it to the ring
+/// (with backpressure). Streaming mode mixes only the length all tracks share, so they stay aligned;
+/// on EOF (`flush`) — or if a stalled track makes another's FIFO back up past ~1 s — it mixes
+/// everything, padding short tracks with silence. Returns `Some(SegEnd)` if seek/stop interrupts the
+/// blocking push.
+fn mix_and_push(
+    tracks: &mut [MixTrack],
+    audio: &mut Option<AudioOut>,
+    out_ch: usize,
+    out_rate: i32,
+    flush: bool,
+    cmd_rx: &Receiver<Command>,
+) -> Option<SegEnd> {
+    let Some(out) = audio.as_mut() else {
+        // No output device — drop pending so it can't grow without bound.
+        for t in tracks.iter_mut() {
+            t.pending.clear();
+        }
+        return None;
+    };
+    if out_ch == 0 {
+        return None;
+    }
+    let backlog_cap = out_rate as usize * out_ch; // ~1 s; force a drain if a track stalls
+    loop {
+        let max_len = tracks.iter().map(|t| t.pending.len()).max().unwrap_or(0);
+        let n = if flush || max_len > backlog_cap {
+            max_len
+        } else {
+            tracks.iter().map(|t| t.pending.len()).min().unwrap_or(0)
+        };
+        if n == 0 {
+            return None;
+        }
+        let mut mix = vec![0f32; n];
+        for t in tracks.iter() {
+            let g = t.gain;
+            for (m, &s) in mix.iter_mut().zip(t.pending.iter()) {
+                *m += s * g;
             }
-            std::thread::sleep(Duration::from_millis(3));
+        }
+        for m in mix.iter_mut() {
+            *m = m.clamp(-1.0, 1.0); // summed tracks can exceed full scale; clamp like a hard limiter
+        }
+        let mut off = 0;
+        while off < n {
+            off += out.producer.push_slice(&mix[off..n]);
+            if off < n {
+                // Ring full → audio is keeping pace; wait, but stay responsive to seek/stop.
+                if let Some(end) = poll_cmd(cmd_rx) {
+                    return Some(end);
+                }
+                std::thread::sleep(Duration::from_millis(3));
+            }
+        }
+        for t in tracks.iter_mut() {
+            let take = t.pending.len().min(n);
+            t.pending.drain(0..take);
         }
     }
-    None
 }
 
 fn poll_cmd(cmd_rx: &Receiver<Command>) -> Option<SegEnd> {

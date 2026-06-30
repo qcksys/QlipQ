@@ -312,6 +312,33 @@ pub fn extract_frame(
     Ok((w, h, output.stdout))
 }
 
+/// CLI-path scrub decoder. The streaming ffmpeg path can't hold a warm single-frame decoder, so this
+/// just remembers the source parameters and spawns ffmpeg per frame (the original behaviour) behind
+/// the same `open`/`frame_at` interface as `libav::ScrubDecoder`, keeping the editor feature-agnostic.
+#[cfg(not(feature = "libav-preview"))]
+pub struct ScrubDecoder {
+    path: String,
+    ffmpeg: String,
+    src_w: i64,
+    src_h: i64,
+    is_hdr: bool,
+}
+
+#[cfg(not(feature = "libav-preview"))]
+impl ScrubDecoder {
+    pub fn open(path: &str, ffmpeg_path: &str, src_w: i64, src_h: i64, is_hdr: bool) -> Option<Self> {
+        Some(Self { path: path.to_string(), ffmpeg: ffmpeg_path.to_string(), src_w, src_h, is_hdr })
+    }
+
+    /// Extract the frame at `sec`. The CLI path can't report the exact decoded PTS, so `realized_sec`
+    /// echoes the request.
+    pub fn frame_at(&mut self, sec: f64) -> Option<(u32, u32, Vec<u8>, f64)> {
+        extract_frame(&self.path, &self.ffmpeg, sec, self.src_w, self.src_h, self.is_hdr)
+            .ok()
+            .map(|(w, h, rgba)| (w, h, rgba, sec))
+    }
+}
+
 /// Result of polling a [`Player`] for the next decoded frame.
 pub enum FramePoll {
     /// A frame is ready (raw RGBA, `width * height * 4` bytes).
@@ -379,7 +406,10 @@ impl Drop for Player {
 }
 
 /// Start a streaming decoder from `start_sec`, emitting frames at ≤30fps (downsampled from source).
+/// The CLI preview is video-only, so `_audio_tracks` (the enabled monitor-mix tracks the libav player
+/// honors) is ignored here; the parameter just keeps the two `start_player`s interchangeable.
 #[cfg(not(feature = "libav-preview"))]
+#[allow(clippy::too_many_arguments)]
 pub fn start_player(
     path: &str,
     ffmpeg_path: &str,
@@ -388,6 +418,7 @@ pub fn start_player(
     src_h: i64,
     src_fps: f64,
     is_hdr: bool,
+    _audio_tracks: Vec<(i64, f64)>,
 ) -> Option<Player> {
     let (w, h) = preview_dims(src_w, src_h);
     let fps = if src_fps.is_finite() && src_fps > 0.0 { src_fps.min(30.0) } else { 30.0 };

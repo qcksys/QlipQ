@@ -65,18 +65,45 @@ fn crop_builds_filter_and_reencodes() {
 }
 
 #[test]
-fn audio_volume_reencodes_audio_copies_video() {
+fn enabled_tracks_mix_with_amix_and_reencode_audio() {
     let out = args(
         EditSpec { trim: None, crop: None, audio_tracks: vec![track(0, true, 0.5), track(1, true, 1.0)] },
         |_| {},
     );
     let j = out.join(" ");
-    assert!(j.contains("-filter_complex [0:a:0]volume=0.5[aout0]"));
+    // Track 0 gets its volume, track 1 (unity) feeds amix directly; both sum into one [aout] track.
+    assert!(j.contains("-filter_complex [0:a:0]volume=0.5[a0];[a0][0:a:1]amix=inputs=2:normalize=0[aout]"));
     assert!(j.contains("-map 0:v:0"));
-    assert!(j.contains("-map [aout0]"));
-    assert!(j.contains("-map 0:a:1"));
+    assert!(j.contains("-map [aout]"));
+    assert!(!j.contains("-map 0:a:1")); // mixed in, not mapped as its own stream
     assert!(j.contains("-c:v copy"));
     assert!(j.contains("-c:a aac -b:a 192k"));
+}
+
+#[test]
+fn unity_tracks_still_mix_to_one() {
+    // Two enabled tracks at unity are still summed to a single track (no separate streams).
+    let out = args(
+        EditSpec { trim: None, crop: None, audio_tracks: vec![track(0, true, 1.0), track(1, true, 1.0)] },
+        |_| {},
+    );
+    let j = out.join(" ");
+    assert!(j.contains("-filter_complex [0:a:0][0:a:1]amix=inputs=2:normalize=0[aout]"));
+    assert!(j.contains("-map 0:v:0"));
+    assert!(j.contains("-map [aout]"));
+    assert!(j.contains("-c:v copy"));
+    assert!(j.contains("-c:a aac"));
+}
+
+#[test]
+fn single_track_at_unity_is_stream_copy() {
+    // A lone enabled track is not mixed — it's mapped directly and stream-copied.
+    let out = args(EditSpec { trim: None, crop: None, audio_tracks: vec![track(2, true, 1.0)] }, |_| {});
+    let j = out.join(" ");
+    assert!(!j.contains("amix"));
+    assert!(!j.contains("-filter_complex"));
+    assert!(j.contains("-map 0:a:2"));
+    assert!(j.contains("-c:a copy"));
 }
 
 #[test]
@@ -86,7 +113,7 @@ fn crop_plus_volume_combines_filters() {
         |_| {},
     );
     let j = out.join(" ");
-    assert!(j.contains("[0:v:0]crop=640:480:0:0[vout];[0:a:0]volume=2[aout0]"));
+    assert!(j.contains("[0:v:0]crop=640:480:0:0[vout];[0:a:0]volume=2[aout]"));
     assert!(j.contains("-c:v libx264"));
     assert!(j.contains("-c:a aac"));
 }
