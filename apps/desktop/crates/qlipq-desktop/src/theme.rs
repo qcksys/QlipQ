@@ -38,16 +38,15 @@ pub const SM: f32 = 8.0;
 pub const MD: f32 = 12.0;
 pub const LG: f32 = 16.0;
 pub const XL: f32 = 24.0;
-pub const XXL: f32 = 32.0;
 
-// ---- Type scale ----
-pub const DISPLAY: u16 = 22;
-pub const TITLE: u16 = 18;
-pub const HEADING: u16 = 15;
-pub const BODY: u16 = 14;
-pub const LABEL: u16 = 13;
-pub const META: u16 = 12;
-pub const SMALL: u16 = 11;
+// ---- Type scale (f32: `text.size` takes `Into<Pixels>`, which covers f32 but not u16) ----
+pub const DISPLAY: f32 = 22.0;
+pub const TITLE: f32 = 18.0;
+pub const HEADING: f32 = 15.0;
+pub const BODY: f32 = 14.0;
+pub const LABEL: f32 = 13.0;
+pub const META: f32 = 12.0;
+pub const SMALL: f32 = 11.0;
 
 // ---- Fonts (Inter is bundled + registered in main(); weights select along its variable axis) ----
 pub const FONT: Font = Font::with_name("Inter");
@@ -143,10 +142,10 @@ pub fn chip(theme: &Theme) -> container::Style {
     }
 }
 
-/// A small status dot of the given color.
-pub fn dot(color: Color) -> impl Fn(&Theme) -> container::Style {
-    move |_theme| container::Style {
-        background: Some(Background::Color(color)),
+/// A small filled dot colored by queue status (for the queue card).
+pub fn status_dot(status: QueueStatus) -> impl Fn(&Theme) -> container::Style {
+    move |theme| container::Style {
+        background: Some(Background::Color(status_color(theme, status))),
         border: Border { radius: Radius::from(RADIUS_PILL), ..Border::default() },
         ..container::Style::default()
     }

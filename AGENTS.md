@@ -198,8 +198,8 @@ pnpm -C apps/website deploy:prod   # build + wrangler deploy --env production
 - **On Windows PowerShell the `pnpm` shim is flaky** for `exec`/`view`/`run`; run
   raw `pnpm` subcommands via the Bash tool. `vp` itself is fine in PowerShell.
 - **CI** (`.github/workflows/`): `ci.yml` (website — `vp check` + build),
-  `build-desktop.yml` (the Rust app — `cargo test` + `cargo build` on Windows + Linux;
-  `.cargo/config.toml` is gitignored, so CI builds the default no-libav path),
+  `build-desktop.yml` (the Rust app — `cargo test` + `cargo build --no-default-features` on
+  Windows + Linux; `.cargo/config.toml` is gitignored, so CI builds the no-libav CLI path),
   `deploy-website.yml` (Cloudflare Workers), `release-plz.yml` (versions/changelogs the
   crates and tags the app `vX.Y.Z`), and `qlipq-desktop-release.yml` (on a `v*` tag,
   builds + attaches the Windows/Linux binaries to a GitHub Release).

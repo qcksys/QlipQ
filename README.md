@@ -57,9 +57,10 @@ The desktop app is a separate Cargo workspace under `apps/desktop/` (Rust).
 Needs a Rust toolchain; `ffmpeg`/`ffprobe` on your `PATH` (or set in Settings → FFmpeg).
 
 ```bash
-cargo run -p qlipq-desktop                # launch the app (from apps/desktop/)
-cargo test -p qlipq-core -p qlipq-ffmpeg  # the crate tests
-cargo build --release                     # produce the `qlipq` binary
+cargo run -p qlipq-desktop                       # launch the app (from apps/desktop/; in-process libav preview by default)
+cargo run -p qlipq-desktop --no-default-features  # launch with the dependency-light CLI preview
+cargo test -p qlipq-core -p qlipq-ffmpeg         # the crate tests
+cargo build --release --no-default-features       # produce the shippable `qlipq` binary
 ```
 
 ### Run the website

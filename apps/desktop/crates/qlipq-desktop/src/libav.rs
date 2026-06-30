@@ -50,8 +50,10 @@ struct Clock {
     use_audio: AtomicBool,
     /// Position (seconds) the current segment started at; the clock is relative to this.
     base: Mutex<f64>,
-    /// Samples-per-channel the cpal callback has played since the segment (re)started.
-    played: AtomicU64,
+    /// Samples-per-channel the cpal callback has played since the segment (re)started. This is the
+    /// *same* atomic the cpal callback increments (handed to `build_audio_out`), so the clock
+    /// actually advances with audio — otherwise it stays at `base` and video freezes while audio plays.
+    played: Arc<AtomicU64>,
     /// Output sample rate (Hz) as f64 bits, set when the audio output is built.
     rate: AtomicU64,
     /// `(anchor_instant, anchor_pts)` for the wall clock (no-audio clips, or after audio ends).
@@ -210,7 +212,7 @@ pub fn start_player(
         clock: Clock {
             use_audio: AtomicBool::new(has_audio),
             base: Mutex::new(start_sec),
-            played: AtomicU64::new(0),
+            played: Arc::new(AtomicU64::new(0)),
             rate: AtomicU64::new(0.0f64.to_bits()),
             wall: Mutex::new(None),
         },
@@ -671,7 +673,11 @@ fn audio_segment(
         t.seeking = true;
     }
 
-    let mut audio = device.and_then(build_audio_out);
+    // Reset the played counter *before* building the stream — the cpal callback shares this exact
+    // atomic and starts incrementing it as soon as the stream plays, so resetting after would wipe
+    // its first samples and stall the clock.
+    shared.clock.played.store(0, Ordering::Relaxed);
+    let mut audio = device.and_then(|d| build_audio_out(d, Arc::clone(&shared.clock.played)));
     let use_audio = audio.is_some();
     let out_ch = audio.as_ref().map(|a| a.out_channels).unwrap_or(0);
     let out_rate = audio.as_ref().map(|a| a.out_rate as i32).unwrap_or(48_000);
@@ -679,7 +685,6 @@ fn audio_segment(
     // Reset the master clock for this segment (the audio thread owns it when audio is playing).
     shared.clock.use_audio.store(use_audio, Ordering::Relaxed);
     *shared.clock.base.lock().unwrap() = start;
-    shared.clock.played.store(0, Ordering::Relaxed);
     shared.clock.rate.store((out_rate as f64).to_bits(), Ordering::Relaxed);
     let played = audio.as_ref().map(|a| Arc::clone(&a.played));
 
@@ -866,9 +871,11 @@ struct AudioOut {
 }
 
 /// Build an f32 output stream on the default device, draining a fresh ring buffer. The callback
-/// counts only the samples it actually plays (silence-filled underruns don't count), which keeps the
-/// master clock honest through pre-roll and seeks.
-fn build_audio_out(device: &cpal::Device) -> Option<AudioOut> {
+/// increments `played` — the **clock's** counter, passed in by the caller — counting only the samples
+/// it actually plays (silence-filled underruns don't count), which is what advances the master clock
+/// through pre-roll and seeks. Sharing the clock's atomic (rather than a private one) is essential:
+/// otherwise the clock never moves and video freezes while audio plays.
+fn build_audio_out(device: &cpal::Device, played: Arc<AtomicU64>) -> Option<AudioOut> {
     let supported = device.default_output_config().ok()?;
     let out_rate = supported.sample_rate();
     let out_ch = supported.channels() as usize;
@@ -878,7 +885,6 @@ fn build_audio_out(device: &cpal::Device) -> Option<AudioOut> {
     let config = supported.config();
     let cap = (out_rate as usize * out_ch / 2).max(out_ch * 2048); // ~0.5 s of audio
     let (producer, mut consumer) = HeapRb::<f32>::new(cap).split();
-    let played = Arc::new(AtomicU64::new(0));
     let played_cb = Arc::clone(&played);
     let stream = device
         .build_output_stream::<f32, _, _>(
@@ -989,11 +995,11 @@ fn build_video_filter<'g>(
     let outputs = AVFilterInOut::new(c"in", &mut src, 0);
     let inputs = AVFilterInOut::new(c"out", &mut sink, 0);
     let descr = if is_hdr {
-        // HDR→BT.709 SDR tonemap (full-range RGB out for the GPU upload). If the result still reads a
-        // touch dark after correct input signaling, nudge `brightness` (-1..1, the midtone lift the
-        // CLI path approximates with `eq=gamma=1.3`) or `contrast` (default 1) here.
+        // HDR→BT.709 SDR tonemap (full-range RGB out for the GPU upload). `brightness` (-1..1) is a
+        // small midtone lift — libplacebo's dynamic tonemap reads a touch dark for game capture, the
+        // same reason the CLI path applies `eq=gamma=1.3`. Tune it (or add `contrast`, default 1) here.
         CString::new(format!(
-            "libplacebo=w={w}:h={h}:tonemapping=auto:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc,format=rgba"
+            "libplacebo=w={w}:h={h}:tonemapping=auto:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc:brightness=0.07,format=rgba"
         ))
     } else {
         CString::new(format!("scale={w}:{h}:flags=bilinear,format=rgba"))

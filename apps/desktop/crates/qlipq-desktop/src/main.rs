@@ -31,10 +31,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iced::widget::{
-    button, checkbox, column, container, pick_list, progress_bar, row, scrollable, shader, slider,
-    text, text_input, Space,
+    button, center, checkbox, column, container, mouse_area, opaque, pick_list, progress_bar, row,
+    rule, scrollable, shader, slider, stack, text, text_input, tooltip, Space,
 };
-use iced::{Element, Length, Subscription, Task, Theme};
+use iced::{Element, Font, Length, Size, Subscription, Task, Theme};
 
 use qlipq_core::config::*;
 use qlipq_core::edit_spec::{AudioTrackSpec, CropSpec, EditSpec, TrimSpec};
@@ -45,6 +45,7 @@ use qlipq_ffmpeg::estimate::estimate_export_size;
 
 const DISMISSED_TAG: &str = "dismissed";
 const TICK: Duration = Duration::from_millis(250);
+const SIDEBAR_WIDTH: f32 = 360.0;
 
 /// Caps concurrent background duration probes so the editor's on-demand probe (and the system)
 /// are never starved by a folder full of recordings. Mirrors the web app's PROBE_CONCURRENCY=3.
@@ -55,6 +56,14 @@ fn main() -> iced::Result {
         .title("QlipQ")
         .subscription(App::subscription)
         .theme(App::theme)
+        .font(include_bytes!("../assets/Inter-Variable.ttf").as_slice())
+        .default_font(theme::FONT)
+        .antialiasing(true)
+        .window(iced::window::Settings {
+            size: Size::new(1200.0, 800.0),
+            min_size: Some(Size::new(960.0, 660.0)),
+            ..Default::default()
+        })
         .run()
 }
 
@@ -274,6 +283,8 @@ enum Message {
     RequestDelete(String),
     DeleteConfirm,
     DeleteCancel,
+    /// Escape / backdrop click — dismiss whichever modal is open.
+    DismissModal,
     Deleted(String, Result<(), String>),
     Dismiss(String),
     SetTagFilter(Option<String>),
@@ -365,6 +376,10 @@ impl App {
             || self.editor.as_ref().map(|e| e.overwrite_target.is_some() || e.after_prompt).unwrap_or(false);
         if self.editor.is_some() && !modal {
             subs.push(iced::event::listen_with(editor_key_event));
+        }
+        // While a modal is open, Escape dismisses it.
+        if modal {
+            subs.push(iced::event::listen_with(modal_escape_event));
         }
         // While playing, add a fast tick at the preview frame rate to pull streamed frames.
         if let Some(player) = self.editor.as_ref().filter(|e| e.playing).and_then(|e| e.player.as_ref()) {
@@ -838,6 +853,19 @@ impl App {
                 }
             }
             Message::DeleteCancel => self.delete_confirm = None,
+            Message::DismissModal => {
+                if self.rename.is_some() {
+                    self.rename = None;
+                } else if self.delete_confirm.is_some() {
+                    self.delete_confirm = None;
+                } else if let Some(ed) = &mut self.editor {
+                    if ed.overwrite_target.is_some() {
+                        ed.overwrite_target = None;
+                    } else {
+                        ed.after_prompt = false;
+                    }
+                }
+            }
             Message::Deleted(id, result) => {
                 if result.is_ok() {
                     self.remove_item(&id);
@@ -1466,31 +1494,46 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        if let Some(r) = &self.rename {
-            return self.rename_modal(r);
-        }
-        if let Some(id) = &self.delete_confirm {
-            return self.delete_modal(id);
-        }
-        if let Some(ed) = &self.editor {
-            if let Some(target) = &ed.overwrite_target {
-                return self.overwrite_modal(target);
-            }
-            if ed.after_prompt {
-                return self.after_modal();
-            }
-        }
-
         let content: Element<Message> = match self.view {
             View::Settings => self.settings_view(),
             View::Queue => row![
-                container(self.queue_sidebar()).width(Length::Fixed(360.0)),
-                container(self.editor_view()).width(Length::Fill),
+                container(self.queue_sidebar())
+                    .width(Length::Fixed(SIDEBAR_WIDTH))
+                    .height(Length::Fill)
+                    .style(theme::sidebar),
+                rule::vertical(1),
+                container(self.editor_view()).width(Length::Fill).height(Length::Fill),
             ]
             .into(),
         };
 
-        column![self.top_bar(), content].into()
+        let base: Element<Message> = container(column![self.top_bar(), content])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::canvas)
+            .into();
+
+        // A modal layers over the dimmed app rather than replacing it.
+        let overlay: Option<Element<Message>> = if let Some(r) = &self.rename {
+            Some(self.rename_modal(r))
+        } else if let Some(id) = &self.delete_confirm {
+            Some(self.delete_modal(id))
+        } else if let Some(ed) = &self.editor {
+            if let Some(target) = &ed.overwrite_target {
+                Some(self.overwrite_modal(target))
+            } else if ed.after_prompt {
+                Some(self.after_modal())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match overlay {
+            Some(m) => stack![base, m].into(),
+            None => base,
+        }
     }
 
     // ---- view helpers are defined in the `views` impl block below ----
@@ -1604,6 +1647,16 @@ fn editor_key_event(event: iced::Event, status: iced::event::Status, _id: iced::
     }
     if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) = event {
         Some(Message::EditorKey(key, modifiers))
+    } else {
+        None
+    }
+}
+
+/// Escape key (from anywhere) → dismiss the open modal. A plain `fn` for `listen_with`.
+fn modal_escape_event(event: iced::Event, _status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+    use iced::keyboard::{key::Named, Event::KeyPressed, Key};
+    if let iced::Event::Keyboard(KeyPressed { key: Key::Named(Named::Escape), .. }) = event {
+        Some(Message::DismissModal)
     } else {
         None
     }

@@ -7,23 +7,29 @@ impl App {
             .iter()
             .filter(|i| i.status != QueueStatus::Done && !item_dismissed(i))
             .count();
-        row![
-            text("QlipQ").size(18),
-            button(text("Powered by FFmpeg").size(12)).on_press(Message::OpenFfmpeg),
+        let brand = text("QlipQ")
+            .size(theme::DISPLAY)
+            .font(theme::FONT_BOLD)
+            .style(|t: &Theme| text::Style { color: Some(t.extended_palette().primary.base.color) });
+        let bar = row![
+            brand,
+            button(text("Powered by FFmpeg").size(theme::SMALL)).style(theme::btn_link).on_press(Message::OpenFfmpeg),
             Space::new().width(Length::Fill),
-            button(text(format!("Queue ({pending})"))).on_press(Message::ShowQueue),
-            button("Settings").on_press(Message::ShowSettings),
-            button("GitHub").on_press(Message::OpenRepo),
+            button(text(format!("Queue ({pending})")).size(theme::LABEL)).style(theme::nav(matches!(self.view, View::Queue))).on_press(Message::ShowQueue),
+            button(text("Settings").size(theme::LABEL)).style(theme::nav(matches!(self.view, View::Settings))).on_press(Message::ShowSettings),
+            button(text("GitHub").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::OpenRepo),
         ]
-        .spacing(8)
-        .padding(10)
-        .into()
+        .spacing(theme::SM)
+        .align_y(iced::Alignment::Center)
+        .padding([theme::SM, theme::LG]);
+        container(bar).width(Length::Fill).style(theme::top_bar).into()
     }
 
     fn queue_sidebar(&self) -> Element<'_, Message> {
         let mut all_tags: Vec<String> = self.items.iter().flat_map(|i| i.tags.clone().unwrap_or_default()).collect();
         all_tags.sort();
         all_tags.dedup();
+        all_tags.retain(|t| t != DISMISSED_TAG);
 
         let visible: Vec<&QueueItem> = self
             .items
@@ -34,32 +40,37 @@ impl App {
             })
             .collect();
 
-        let mut col = column![].spacing(8).padding(10);
+        let mut col = column![].spacing(theme::SM).padding(theme::MD);
 
         if !self.config.watched_folders.is_empty() {
-            col = col.push(button("Rescan all folders").on_press(Message::RescanAll));
+            col = col.push(button(text("Rescan all folders").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::RescanAll));
         }
 
         if !all_tags.is_empty() {
-            let mut filters = row![button("All").on_press(Message::SetTagFilter(None))].spacing(6);
+            let mut filters = row![button(text("All").size(theme::SMALL)).style(theme::nav(self.tag_filter.is_none())).on_press(Message::SetTagFilter(None))].spacing(theme::XS);
             for t in &all_tags {
-                filters = filters.push(button(text(t.clone())).on_press(Message::SetTagFilter(Some(t.clone()))));
+                let active = self.tag_filter.as_deref() == Some(t.as_str());
+                filters = filters.push(button(text(format!("#{t}")).size(theme::SMALL)).style(theme::nav(active)).on_press(Message::SetTagFilter(Some(t.clone()))));
             }
             col = col.push(filters);
         }
 
         if visible.is_empty() {
-            col = col.push(text("Queue is empty. Add a watched folder to populate it.").size(13));
-        }
-
-        let mut list = column![].spacing(8);
-        for item in visible {
-            list = list.push(self.queue_card(item));
-        }
-        col = col.push(scrollable(list).height(Length::Fill));
-
-        if self.items.is_empty() && self.config.watched_folders.is_empty() {
-            col = col.push(button("Add a watched folder →").on_press(Message::ShowSettings));
+            let no_folders = self.config.watched_folders.is_empty();
+            let msg = if no_folders { "No watched folders yet." } else { "Queue is empty. New recordings show up here automatically." };
+            let mut empty = column![text(msg).size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) })]
+                .spacing(theme::MD)
+                .align_x(iced::Alignment::Center);
+            if no_folders {
+                empty = empty.push(button(text("Add a watched folder").size(theme::LABEL)).style(theme::btn_primary).on_press(Message::ShowSettings));
+            }
+            col = col.push(container(empty).width(Length::Fill).height(Length::Fill).padding(theme::XL).center_x(Length::Fill).center_y(Length::Fill));
+        } else {
+            let mut list = column![].spacing(theme::SM);
+            for item in visible {
+                list = list.push(self.queue_card(item));
+            }
+            col = col.push(scrollable(list).height(Length::Fill));
         }
 
         container(col).into()
@@ -68,56 +79,73 @@ impl App {
     fn queue_card(&self, item: &QueueItem) -> Element<'_, Message> {
         let selected = self.selected_id.as_deref() == Some(&item.id);
         let status = item.status;
+        let header = row![
+            container(Space::new().width(Length::Fixed(8.0)).height(Length::Fixed(8.0))).style(theme::status_dot(status)),
+            text(item.file_name.clone()).size(theme::BODY).font(theme::FONT_MEDIUM).width(Length::Fill),
+        ]
+        .spacing(theme::SM)
+        .align_y(iced::Alignment::Center);
         let open = button(
             column![
-                text(item.file_name.clone()).size(14),
-                text(meta_line(item)).size(11).style(|t| text::Style { color: Some(theme::muted(t)) }),
-                text(status_label(status)).size(11).style(move |t| text::Style { color: Some(theme::status_color(t, status)) }),
+                header,
+                text(meta_line(item)).size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                text(status_label(status)).size(theme::SMALL).font(theme::FONT_MEDIUM).style(move |t| text::Style { color: Some(theme::status_color(t, status)) }),
             ]
-            .spacing(2),
+            .spacing(theme::XS),
         )
         .width(Length::Fill)
-        .style(button::text)
+        .padding(theme::SM)
+        .style(theme::btn_ghost)
         .on_press(Message::SelectItem(item.id.clone()));
 
-        let mut tags_row = row![].spacing(4);
-        for t in item.tags.clone().unwrap_or_default() {
-            tags_row = tags_row.push(text(format!("#{t}")).size(11).style(|t| text::Style { color: Some(theme::muted(t)) }));
+        let mut card = column![open].spacing(theme::SM);
+
+        let tags: Vec<String> = item.tags.clone().unwrap_or_default().into_iter().filter(|t| t != DISMISSED_TAG).collect();
+        if !tags.is_empty() {
+            let mut tags_row = row![].spacing(theme::XS);
+            for t in tags {
+                tags_row = tags_row.push(chip(format!("#{t}")));
+            }
+            card = card.push(tags_row);
         }
 
         let actions = row![
-            button(text("Rename").size(12)).style(button::secondary).on_press(Message::RenameOpen(item.id.clone())),
-            button(text(if item_dismissed(item) { "Restore" } else { "Dismiss" }).size(12)).style(button::secondary).on_press(Message::Dismiss(item.id.clone())),
-            button(text("Delete").size(12)).style(button::danger).on_press(Message::RequestDelete(item.id.clone())),
+            button(text("Rename").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::RenameOpen(item.id.clone())),
+            button(text(if item_dismissed(item) { "Restore" } else { "Dismiss" }).size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::Dismiss(item.id.clone())),
+            Space::new().width(Length::Fill),
+            button(text("Delete").size(theme::SMALL)).style(theme::btn_danger).on_press(Message::RequestDelete(item.id.clone())),
         ]
-        .spacing(8);
+        .spacing(theme::XS);
+        card = card.push(actions);
 
-        container(column![open, tags_row, actions].spacing(4)).padding(8).style(theme::queue_card(selected)).into()
+        container(card).padding(theme::SM).style(theme::queue_card(selected)).into()
     }
 
     fn editor_view(&self) -> Element<'_, Message> {
         let Some(ed) = &self.editor else {
-            return container(text("Select a clip from the queue to start editing."))
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .into();
+            return empty_state("Select a clip from the queue to start editing.");
         };
         if let Some(err) = &ed.load_error {
-            return container(column![text("Could not read this clip."), text(err.clone()).size(12)].spacing(8))
-                .padding(24)
-                .into();
+            return container(
+                column![
+                    text("Could not read this clip.").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
+                    text(err.clone()).size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                ]
+                .spacing(theme::SM),
+            )
+            .padding(theme::XL)
+            .into();
         }
         let Some(media) = &ed.media else {
-            return container(text("Reading clip…")).center_x(Length::Fill).center_y(Length::Fill).into();
+            return empty_state("Reading clip…");
         };
         let Some(item) = self.items.iter().find(|i| i.id == ed.item_id) else {
             return container(text("…")).into();
         };
 
-        // Preview frame — rendered via a custom `shader` widget backed by a persistent wgpu
-        // texture (avoids the per-frame `image::Handle` atlas churn that caused flicker). Sized to
-        // the source aspect ratio so the fit-to-bounds shader draw doesn't distort.
-        let preview: Element<Message> = if ed.has_frame {
+        // Preview frame — a custom `shader` widget backed by a persistent wgpu texture, framed in a
+        // panel so the letterbox reads as intentional. Sized to the source aspect ratio.
+        let preview_inner: Element<Message> = if ed.has_frame {
             let aspect = if media.height > 0 { media.width as f32 / media.height as f32 } else { 16.0 / 9.0 };
             container(
                 shader(video::VideoProgram::new(ed.shared_frame.clone()))
@@ -125,59 +153,67 @@ impl App {
                     .height(Length::Fixed(360.0)),
             )
             .center_x(Length::Fill)
-            .height(Length::Fixed(360.0))
+            .center_y(Length::Fill)
             .into()
         } else {
-            container(text("Preparing preview…")).center_x(Length::Fill).height(Length::Fixed(360.0)).into()
+            container(text("Preparing preview…").size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
         };
+        let preview = container(preview_inner).width(Length::Fill).height(Length::Fixed(360.0)).style(theme::panel);
 
-        // Transport.
-        let transport = row![
-            button("−60s").style(button::secondary).on_press(Message::Skip(-60.0)),
-            button("−5s").style(button::secondary).on_press(Message::Skip(-5.0)),
-            button("−1s").style(button::secondary).on_press(Message::Skip(-1.0)),
-            button(if ed.playing { "Pause" } else { "Play" }).style(button::primary).on_press(Message::TogglePlay),
-            button("+1s").style(button::secondary).on_press(Message::Skip(1.0)),
-            button("+5s").style(button::secondary).on_press(Message::Skip(5.0)),
-            button("+60s").style(button::secondary).on_press(Message::Skip(60.0)),
-        ]
-        .spacing(4);
+        // Transport (centered).
+        let transport = container(
+            row![
+                button(text("−60s").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::Skip(-60.0)),
+                button(text("−5s").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::Skip(-5.0)),
+                button(text("−1s").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::Skip(-1.0)),
+                button(text(if ed.playing { "Pause" } else { "Play" }).size(theme::LABEL).font(theme::FONT_MEDIUM)).style(theme::btn_primary).on_press(Message::TogglePlay),
+                button(text("+1s").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::Skip(1.0)),
+                button(text("+5s").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::Skip(5.0)),
+                button(text("+60s").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::Skip(60.0)),
+            ]
+            .spacing(theme::XS)
+            .align_y(iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .center_x(Length::Fill);
 
         // Timeline.
         let dur = media.duration_sec.max(0.001);
-        let scrub = slider(0.0..=dur, ed.current_time.min(dur), Message::Seek).step(0.05);
+        let scrub = slider(0.0..=dur, ed.current_time.min(dur), Message::Seek).step(0.05).style(theme::slider_style);
         let time_row = row![
             text_input("0:00.000", &ed.time_input)
                 .on_input(Message::TimestampEdited)
                 .on_submit(Message::TimestampSubmit)
+                .font(Font::MONOSPACE)
+                .style(theme::input)
                 .width(Length::Fixed(110.0)),
-            text(format!("/ {}", format_timestamp(dur))).size(12),
+            text(format!("/ {}", format_timestamp(dur))).size(theme::META).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
         ]
-        .spacing(8)
+        .spacing(theme::SM)
         .align_y(iced::Alignment::Center);
-        let timeline = column![
-            scrub,
-            time_row,
-            row![
-                text(format!("In {:.2}", ed.trim_start)).size(12),
-                button("Set in at playhead").on_press(Message::SetIn),
-                text(datetimes::format_duration(ed.trim_end - ed.trim_start)),
-                button("Set out at playhead").on_press(Message::SetOut),
-                text(format!("Out {:.2}", ed.trim_end)).size(12),
-            ]
-            .spacing(8),
+        let inout_row = row![
+            text(format!("In {}", format_timestamp(ed.trim_start))).size(theme::META).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
+            button(text("Set in").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::SetIn),
+            text(datetimes::format_duration(ed.trim_end - ed.trim_start)).size(theme::LABEL).font(theme::FONT_MEDIUM),
+            button(text("Set out").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::SetOut),
+            text(format!("Out {}", format_timestamp(ed.trim_end))).size(theme::META).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
         ]
-        .spacing(8);
+        .spacing(theme::SM)
+        .align_y(iced::Alignment::Center);
+        let timeline = column![scrub, time_row, inout_row].spacing(theme::SM);
 
         // Crop + audio.
-        let crop = self.crop_section(ed, media);
-        let audio = self.audio_section(ed);
-        let panels = row![container(crop).width(Length::Fill), container(audio).width(Length::Fill)].spacing(12);
+        let panels = row![
+            container(self.crop_section(ed, media)).width(Length::Fill),
+            container(self.audio_section(ed)).width(Length::Fill),
+        ]
+        .spacing(theme::MD);
 
-        // Quality override.
+        // Quality override + tags.
         let override_section = self.override_section(item);
-
-        // Tags.
         let tags = self.editor_tags(item);
 
         // Export bar.
@@ -190,51 +226,64 @@ impl App {
         } else {
             format!("{}×{}", media.width, media.height)
         };
-        let summary = format!(
-            "{} output · {} · {}{}",
-            datetimes::format_duration(qlipq_core::edit_spec::effective_duration(&spec, media)),
-            dims,
-            if estimate.approximate { "≈" } else { "" },
-            format_bytes(estimate.bytes),
-        );
-
-        let mut export_bar = row![text(summary).size(13)].spacing(8);
+        let mut stats = row![
+            stat("Duration", datetimes::format_duration(qlipq_core::edit_spec::effective_duration(&spec, media))),
+            stat("Resolution", dims),
+            stat("Est. size", format!("{}{}", if estimate.approximate { "≈" } else { "" }, format_bytes(estimate.bytes))),
+        ]
+        .spacing(theme::XL)
+        .align_y(iced::Alignment::Center);
         if let Some(err) = &validation {
-            export_bar = export_bar.push(text(err.clone()).size(13));
+            stats = stats.push(text(err.clone()).size(theme::LABEL).style(|t: &Theme| text::Style { color: Some(t.extended_palette().danger.base.color) }));
         }
         if ed.exporting {
-            export_bar = export_bar.push(container(progress_bar(0.0..=1.0, ed.progress_display)).width(Length::Fixed(160.0)));
-            export_bar = export_bar.push(button(text("Cancel").size(13)).style(button::danger).on_press(Message::CancelExport));
+            stats = stats.push(container(progress_bar(0.0..=1.0, ed.progress_display).style(theme::progress_style)).width(Length::Fixed(160.0)));
+            stats = stats.push(button(text("Cancel").size(theme::LABEL)).style(theme::btn_danger).on_press(Message::CancelExport));
         }
-        export_bar = export_bar.push(Space::new().width(Length::Fill));
+
+        let mut export_bar = row![stats, Space::new().width(Length::Fill)].align_y(iced::Alignment::Center).spacing(theme::SM);
         if item.export_path.is_some() && !ed.exporting {
-            export_bar = export_bar.push(button("Show file").on_press(Message::ShowExported));
+            export_bar = export_bar.push(button(text("Show file").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::ShowExported));
         }
         let can_export = validation.is_none() && !ed.exporting && !self.config.output_folder.is_empty();
-        let export_btn = button(text(if ed.exporting {
-            format!("Exporting {}%", (ed.progress_display * 100.0) as i32)
+        let export_btn = button(
+            text(if ed.exporting { format!("Exporting {}%", (ed.progress_display * 100.0) as i32) } else { "Export clip".to_string() })
+                .size(theme::BODY)
+                .font(theme::FONT_MEDIUM),
+        )
+        .style(theme::btn_primary);
+        let export_el: Element<Message> = if can_export {
+            export_btn.on_press(Message::Export).into()
+        } else if self.config.output_folder.is_empty() {
+            with_tip(export_btn.into(), "Set an output folder in Settings".to_string())
+        } else if let Some(err) = &validation {
+            with_tip(export_btn.into(), err.clone())
         } else {
-            "Export clip".to_string()
-        }))
-        .style(button::primary);
-        export_bar = export_bar.push(if can_export { export_btn.on_press(Message::Export) } else { export_btn });
+            export_btn.into()
+        };
+        export_bar = export_bar.push(export_el);
+
+        let player_zone = column![preview, transport, timeline].spacing(theme::MD);
+        let settings_zone = column![panels, override_section, tags].spacing(theme::MD);
 
         scrollable(
-            column![preview, transport, timeline, panels, override_section, tags, export_bar]
-                .spacing(16)
-                .padding(16),
+            column![player_zone, rule::horizontal(1), settings_zone, rule::horizontal(1), export_bar]
+                .spacing(theme::LG)
+                .padding(theme::LG),
         )
         .into()
     }
 
     fn crop_section<'a>(&self, ed: &'a Editor, media: &MediaInfo) -> Element<'a, Message> {
         let mut col = column![
-            text("Crop"),
+            text("Crop").size(theme::HEADING).font(theme::FONT_SEMIBOLD),
             checkbox(ed.crop_enabled)
                 .label(format!("Enable crop ({}×{} source)", media.width, media.height))
+                .text_size(theme::LABEL)
+                .style(theme::checkbox_style)
                 .on_toggle(Message::ToggleCrop),
         ]
-        .spacing(8);
+        .spacing(theme::SM);
         if ed.crop_enabled {
             col = col.push(
                 row![
@@ -243,48 +292,50 @@ impl App {
                     num_field("W", ed.crop.width, |s| Message::CropEdited(2, s)),
                     num_field("H", ed.crop.height, |s| Message::CropEdited(3, s)),
                 ]
-                .spacing(8),
+                .spacing(theme::SM),
             );
         }
-        container(col).padding(12).style(theme::card).into()
+        container(col).padding(theme::MD).style(theme::card).into()
     }
 
     fn audio_section<'a>(&self, ed: &'a Editor) -> Element<'a, Message> {
-        let mut col = column![text("Audio tracks")].spacing(8);
+        let mut col = column![text("Audio tracks").size(theme::HEADING).font(theme::FONT_SEMIBOLD)].spacing(theme::SM);
         if ed.audio.is_empty() {
-            col = col.push(text("No audio tracks in this clip.").size(12));
+            col = col.push(text("No audio tracks in this clip.").size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }));
         }
         for r in &ed.audio {
             let idx = r.index;
             col = col.push(
                 column![
                     row![
-                        checkbox(r.enabled).label(r.label.clone()).on_toggle(move |on| Message::AudioToggle(idx, on)),
-                        text(r.detail.clone()).size(11),
+                        checkbox(r.enabled).label(r.label.clone()).text_size(theme::LABEL).style(theme::checkbox_style).on_toggle(move |on| Message::AudioToggle(idx, on)),
+                        text(r.detail.clone()).size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
                     ]
-                    .spacing(8),
+                    .spacing(theme::SM)
+                    .align_y(iced::Alignment::Center),
                     row![
-                        container(slider(0.0..=2.0, r.volume, move |v| Message::AudioVolume(idx, v)).step(0.05))
+                        container(slider(0.0..=2.0, r.volume, move |v| Message::AudioVolume(idx, v)).step(0.05).style(theme::slider_style))
                             .width(Length::Fixed(180.0)),
-                        text(format!("{}%", (r.volume * 100.0) as i32)).size(11),
+                        text(format!("{}%", (r.volume * 100.0) as i32)).size(theme::SMALL).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
                     ]
-                    .spacing(8),
+                    .spacing(theme::SM)
+                    .align_y(iced::Alignment::Center),
                 ]
-                .spacing(4),
+                .spacing(theme::XS),
             );
         }
-        container(col).padding(12).style(theme::card).into()
+        container(col).padding(theme::MD).style(theme::card).into()
     }
 
     fn override_section(&self, item: &QueueItem) -> Element<'_, Message> {
         let enabled = item.output_override.is_some();
-        let mut col = column![checkbox(enabled).label("Override quality for this clip").on_toggle(Message::ToggleOverride)].spacing(8);
+        let mut col = column![checkbox(enabled).label("Override quality for this clip").text_size(theme::LABEL).style(theme::checkbox_style).on_toggle(Message::ToggleOverride)].spacing(theme::SM);
         if enabled {
             let out = self.effective_output(item);
-            let mut fields = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::OverrideQm)].spacing(8);
+            let mut fields = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::OverrideQm).style(theme::pick_list_style)].spacing(theme::SM);
             match out.quality_mode {
                 QualityMode::Preset => {
-                    fields = fields.push(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::OverrideQp));
+                    fields = fields.push(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::OverrideQp).style(theme::pick_list_style));
                 }
                 QualityMode::Crf | QualityMode::Vbr => {
                     fields = fields.push(num_field("CRF", out.crf, Message::OverrideCrf));
@@ -298,60 +349,69 @@ impl App {
             }
             col = col.push(fields);
         }
-        container(col).padding(12).style(theme::card).into()
+        container(col).padding(theme::MD).style(theme::card).into()
     }
 
     fn editor_tags(&self, item: &QueueItem) -> Element<'_, Message> {
-        let mut tags_row = row![].spacing(6);
+        let mut tags_row = row![].spacing(theme::SM);
         for t in item.tags.clone().unwrap_or_default() {
+            if t == DISMISSED_TAG {
+                continue;
+            }
             let tag = t.clone();
-            tags_row = tags_row.push(
-                row![text(t).size(12), button(text("✕").size(11)).style(button::secondary).on_press(Message::RemoveTag(tag))].spacing(2),
-            );
+            tags_row = tags_row.push(removable_chip(t, Message::RemoveTag(tag)));
         }
-        let input = text_input("Add tag…", &self.new_tag).on_input(Message::NewTagChanged).on_submit(Message::AddTag).width(Length::Fixed(160.0));
-        container(column![text("Tags"), row![tags_row, input].spacing(8)].spacing(8)).padding(12).style(theme::card).into()
+        let input = text_input("Add tag…", &self.new_tag).on_input(Message::NewTagChanged).on_submit(Message::AddTag).style(theme::input).width(Length::Fixed(160.0));
+        container(column![
+            text("Tags").size(theme::HEADING).font(theme::FONT_SEMIBOLD),
+            row![tags_row, input].spacing(theme::SM).align_y(iced::Alignment::Center),
+        ]
+        .spacing(theme::SM))
+        .padding(theme::MD)
+        .style(theme::card)
+        .into()
     }
 
     fn settings_view(&self) -> Element<'_, Message> {
         let out = &self.config.output;
 
         // Watched folders.
-        let mut folders = column![text("Watched folders")].spacing(8);
+        let mut folders = column![].spacing(theme::SM);
         for f in &self.config.watched_folders {
             folders = folders.push(
                 row![
-                    text(f.clone()).width(Length::Fill),
-                    button(text("Reprocess").size(12)).on_press(Message::Reprocess(f.clone())),
-                    button(text("Remove").size(12)).on_press(Message::RemoveFolder(f.clone())),
+                    text(f.clone()).size(theme::LABEL).width(Length::Fill),
+                    button(text("Reprocess").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::Reprocess(f.clone())),
+                    button(text("Remove").size(theme::SMALL)).style(theme::btn_ghost).on_press(Message::RemoveFolder(f.clone())),
                 ]
-                .spacing(8),
+                .spacing(theme::SM)
+                .align_y(iced::Alignment::Center),
             );
         }
-        let mut add_row = row![button("Add folder…").on_press(Message::PickFolder(PickPurpose::WatchedFolder))].spacing(8);
+        let mut add_row = row![button(text("Add folder…").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::PickFolder(PickPurpose::WatchedFolder))].spacing(theme::SM);
         if let Some(obs) = &self.presets.obs {
             if !self.config.watched_folders.contains(obs) {
-                add_row = add_row.push(button(text(format!("+ OBS ({obs})")).size(12)).on_press(Message::AddPreset(obs.clone())));
+                add_row = add_row.push(button(text(format!("+ OBS ({obs})")).size(theme::SMALL)).style(theme::btn_ghost).on_press(Message::AddPreset(obs.clone())));
             }
         }
         if let Some(nv) = &self.presets.nvidia_share {
             if !self.config.watched_folders.contains(nv) {
-                add_row = add_row.push(button(text(format!("+ NVIDIA Share ({nv})")).size(12)).on_press(Message::AddPreset(nv.clone())));
+                add_row = add_row.push(button(text(format!("+ NVIDIA Share ({nv})")).size(theme::SMALL)).style(theme::btn_ghost).on_press(Message::AddPreset(nv.clone())));
             }
         }
         folders = folders.push(add_row);
 
         // Output folder.
         let output_folder = row![
-            text_input("Where exported clips are saved", &self.config.output_folder).on_input(Message::OutputFolderChanged).width(Length::Fill),
-            button("Browse…").on_press(Message::PickFolder(PickPurpose::OutputFolder)),
+            text_input("Where exported clips are saved", &self.config.output_folder).on_input(Message::OutputFolderChanged).style(theme::input).width(Length::Fill),
+            button(text("Browse…").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::PickFolder(PickPurpose::OutputFolder)),
         ]
-        .spacing(8);
+        .spacing(theme::SM);
 
         // Output defaults.
-        let mut quality = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::SetQm)].spacing(8);
+        let mut quality = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::SetQm).style(theme::pick_list_style)].spacing(theme::SM);
         match out.quality_mode {
-            QualityMode::Preset => quality = quality.push(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::SetQp)),
+            QualityMode::Preset => quality = quality.push(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::SetQp).style(theme::pick_list_style)),
             QualityMode::Crf | QualityMode::Vbr => {
                 quality = quality.push(num_field("CRF", out.crf, Message::SetCrf));
                 if out.quality_mode == QualityMode::Vbr {
@@ -362,69 +422,75 @@ impl App {
         }
         let encoder_options: Vec<String> = ENCODER_PRESETS.iter().map(|s| s.to_string()).collect();
         let encode_row = row![
-            pick_list(encoder_options, Some(out.encoder_preset.clone()), Message::SetEncoder),
-            pick_list(CodecChoice::ALL.to_vec(), Some(CodecChoice::from_core(out.video_codec)), Message::SetCodec),
-            pick_list(ContainerChoice::ALL.to_vec(), Some(ContainerChoice::from_core(out.container)), Message::SetContainer),
+            pick_list(encoder_options, Some(out.encoder_preset.clone()), Message::SetEncoder).style(theme::pick_list_style),
+            pick_list(CodecChoice::ALL.to_vec(), Some(CodecChoice::from_core(out.video_codec)), Message::SetCodec).style(theme::pick_list_style),
+            pick_list(ContainerChoice::ALL.to_vec(), Some(ContainerChoice::from_core(out.container)), Message::SetContainer).style(theme::pick_list_style),
         ]
-        .spacing(8);
+        .spacing(theme::SM);
         let rate_row = row![
-            pick_list(FpsChoice::ALL.to_vec(), Some(FpsChoice::from_core(out.fps)), Message::SetFps),
-            pick_list(ResChoice::ALL.to_vec(), Some(ResChoice::from_core(out.max_height)), Message::SetRes),
-            pick_list(AudioKbpsChoice::ALL.to_vec(), Some(AudioKbpsChoice::from_core(out.audio_bitrate_kbps)), Message::SetAudioKbps),
+            pick_list(FpsChoice::ALL.to_vec(), Some(FpsChoice::from_core(out.fps)), Message::SetFps).style(theme::pick_list_style),
+            pick_list(ResChoice::ALL.to_vec(), Some(ResChoice::from_core(out.max_height)), Message::SetRes).style(theme::pick_list_style),
+            pick_list(AudioKbpsChoice::ALL.to_vec(), Some(AudioKbpsChoice::from_core(out.audio_bitrate_kbps)), Message::SetAudioKbps).style(theme::pick_list_style),
         ]
-        .spacing(8);
+        .spacing(theme::SM);
 
         // FFmpeg.
         let ffmpeg_row = row![
-            text_input("ffmpeg", &self.config.ffmpeg_path).on_input(Message::FfmpegPathChanged).width(Length::Fill),
-            button("Test").on_press(Message::TestFfmpeg),
+            text_input("ffmpeg", &self.config.ffmpeg_path).on_input(Message::FfmpegPathChanged).style(theme::input).width(Length::Fill),
+            button(text("Test").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::TestFfmpeg),
         ]
-        .spacing(8);
+        .spacing(theme::SM);
         let ffprobe_row = row![
-            text_input("ffprobe", &self.config.ffprobe_path).on_input(Message::FfprobePathChanged).width(Length::Fill),
-            button("Test").on_press(Message::TestFfprobe),
+            text_input("ffprobe", &self.config.ffprobe_path).on_input(Message::FfprobePathChanged).style(theme::input).width(Length::Fill),
+            button(text("Test").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::TestFfprobe),
         ]
-        .spacing(8);
+        .spacing(theme::SM);
         let ffmpeg_status = test_text(&self.ffmpeg_test);
         let ffprobe_status = test_text(&self.ffprobe_test);
 
         // After export.
         let ae = &self.config.after_export;
-        let mut after = column![pick_list(AfterChoice::ALL.to_vec(), Some(AfterChoice::from_core(ae.action)), Message::SetAfter)].spacing(8);
+        let mut after = column![pick_list(AfterChoice::ALL.to_vec(), Some(AfterChoice::from_core(ae.action)), Message::SetAfter).style(theme::pick_list_style)].spacing(theme::SM);
         if ae.action == AfterExportAction::Move {
             after = after.push(
                 row![
-                    text_input("Destination folder", &ae.move_folder).on_input(Message::MoveFolderChanged).width(Length::Fill),
-                    button("Browse…").on_press(Message::PickFolder(PickPurpose::MoveFolder)),
+                    text_input("Destination folder", &ae.move_folder).on_input(Message::MoveFolderChanged).style(theme::input).width(Length::Fill),
+                    button(text("Browse…").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::PickFolder(PickPurpose::MoveFolder)),
                 ]
-                .spacing(8),
+                .spacing(theme::SM),
             );
         }
         if ae.action == AfterExportAction::Rename {
             after = after.push(
                 row![
-                    text_input("Prefix", &ae.rename_prefix).on_input(Message::RenamePrefixChanged),
-                    text_input("Suffix", &ae.rename_suffix).on_input(Message::RenameSuffixChanged),
+                    text_input("Prefix", &ae.rename_prefix).on_input(Message::RenamePrefixChanged).style(theme::input),
+                    text_input("Suffix", &ae.rename_suffix).on_input(Message::RenameSuffixChanged).style(theme::input),
                 ]
-                .spacing(8),
+                .spacing(theme::SM),
             );
         }
 
         let body = column![
+            text("Settings").size(theme::DISPLAY).font(theme::FONT_BOLD),
             section("Watched folders", folders.into()),
             section("Output folder", output_folder.into()),
-            section("Output defaults", column![quality, encode_row, rate_row].spacing(8).into()),
-            section("Naming template", column![
-                text_input("{date}_{source}_{name}", &self.config.naming_template).on_input(Message::NamingChanged),
-                text("Tokens: {date} {time} {datetime} {source} {name} {index}").size(11),
-            ].spacing(6).into()),
-            section("FFmpeg", column![ffmpeg_row, ffmpeg_status, ffprobe_row, ffprobe_status].spacing(8).into()),
+            section("Output defaults", column![quality, encode_row, rate_row].spacing(theme::SM).into()),
+            section(
+                "Naming template",
+                column![
+                    text_input("{date}_{source}_{name}", &self.config.naming_template).on_input(Message::NamingChanged).style(theme::input),
+                    text("Tokens: {date} {time} {datetime} {source} {name} {index}").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                ]
+                .spacing(theme::XS)
+                .into(),
+            ),
+            section("FFmpeg", column![ffmpeg_row, ffmpeg_status, ffprobe_row, ffprobe_status].spacing(theme::SM).into()),
             section("After export", after.into()),
             section("Editor shortcuts (Premiere Pro defaults)", self.keybinds_section()),
-            button("Open config file").on_press(Message::OpenConfigFile),
+            button(text("Open config file").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::OpenConfigFile),
         ]
-        .spacing(16)
-        .padding(20);
+        .spacing(theme::LG)
+        .padding(theme::XL);
 
         scrollable(container(body).max_width(760.0).center_x(Length::Fill)).into()
     }
@@ -443,73 +509,90 @@ impl App {
             kb_row("Go to end", &kb.go_to_end, KbField::GoToEnd),
             kb_row("Export", &kb.export, KbField::Export),
             text("Combos like \"Space\", \"I\", \"Shift+Left\", \"Ctrl+M\" (modifiers Ctrl/Shift/Alt/Cmd). Also editable in config.json.")
-                .size(11)
+                .size(theme::SMALL)
                 .style(|t| text::Style { color: Some(theme::muted(t)) }),
         ]
-        .spacing(6)
+        .spacing(theme::XS)
         .into()
     }
 
     // ---- Modals ----
 
     fn rename_modal<'a>(&'a self, r: &'a RenameState) -> Element<'a, Message> {
-        modal(column![
-            text("Rename recording").size(18),
-            text_input("name", &r.value).on_input(Message::RenameValue).on_submit(Message::RenameConfirm),
-            row![
-                button("Use template").on_press(Message::RenameTemplate),
-                Space::new().width(Length::Fill),
-                button("Cancel").on_press(Message::RenameCancel),
-                button("Rename").on_press(Message::RenameConfirm),
+        modal(
+            column![
+                text("Rename recording").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
+                text_input("name", &r.value).on_input(Message::RenameValue).on_submit(Message::RenameConfirm).style(theme::input),
+                row![
+                    button(text("Use template").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::RenameTemplate),
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::RenameCancel),
+                    button(text("Rename").size(theme::LABEL).font(theme::FONT_MEDIUM)).style(theme::btn_primary).on_press(Message::RenameConfirm),
+                ]
+                .spacing(theme::SM)
+                .align_y(iced::Alignment::Center),
             ]
-            .spacing(8),
-        ]
-        .spacing(12))
+            .spacing(theme::MD),
+            Message::RenameCancel,
+        )
     }
 
     fn delete_modal(&self, id: &str) -> Element<'_, Message> {
         let name = self.items.iter().find(|i| i.id == id).map(|i| i.file_name.clone()).unwrap_or_default();
-        modal(column![
-            text("Delete this file from disk?").size(18),
-            text(format!("{name} will be permanently deleted. This can't be undone.")),
-            row![
-                Space::new().width(Length::Fill),
-                button("Cancel").style(button::secondary).on_press(Message::DeleteCancel),
-                button("Delete").style(button::danger).on_press(Message::DeleteConfirm),
+        modal(
+            column![
+                text("Delete this file from disk?").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
+                text(format!("{name} will be permanently deleted. This can't be undone.")).size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::DeleteCancel),
+                    button(text("Delete").size(theme::LABEL).font(theme::FONT_MEDIUM)).style(theme::btn_danger).on_press(Message::DeleteConfirm),
+                ]
+                .spacing(theme::SM)
+                .align_y(iced::Alignment::Center),
             ]
-            .spacing(8),
-        ]
-        .spacing(12))
+            .spacing(theme::MD),
+            Message::DeleteCancel,
+        )
     }
 
     fn overwrite_modal(&self, target: &str) -> Element<'_, Message> {
-        modal(column![
-            text("Overwrite existing file?").size(18),
-            text(format!("A file already exists at {target}. Exporting will replace it.")),
-            row![
-                button("Cancel").on_press(Message::Overwrite(2)),
-                Space::new().width(Length::Fill),
-                button("Append timestamp").on_press(Message::Overwrite(1)),
-                button("Overwrite").on_press(Message::Overwrite(0)),
+        modal(
+            column![
+                text("Overwrite existing file?").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
+                text(format!("A file already exists at {target}. Exporting will replace it.")).size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                row![
+                    button(text("Cancel").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::Overwrite(2)),
+                    Space::new().width(Length::Fill),
+                    button(text("Append timestamp").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::Overwrite(1)),
+                    button(text("Overwrite").size(theme::LABEL).font(theme::FONT_MEDIUM)).style(theme::btn_primary).on_press(Message::Overwrite(0)),
+                ]
+                .spacing(theme::SM)
+                .align_y(iced::Alignment::Center),
             ]
-            .spacing(8),
-        ]
-        .spacing(12))
+            .spacing(theme::MD),
+            Message::Overwrite(2),
+        )
     }
 
     fn after_modal(&self) -> Element<'_, Message> {
-        modal(column![
-            text("Export complete").size(18),
-            text("What should happen to the original recording?"),
-            row![
-                button("Keep").style(button::secondary).on_press(Message::AfterChoice(AfterExportAction::Nothing)),
-                button("Rename").style(button::secondary).on_press(Message::AfterChoice(AfterExportAction::Rename)),
-                button("Move…").style(button::secondary).on_press(Message::AfterChoice(AfterExportAction::Move)),
-                button("Delete").style(button::danger).on_press(Message::AfterChoice(AfterExportAction::Delete)),
+        modal(
+            column![
+                text("Export complete").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
+                text("What should happen to the original recording?").size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                row![
+                    button(text("Keep").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::AfterChoice(AfterExportAction::Nothing)),
+                    button(text("Rename").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::AfterChoice(AfterExportAction::Rename)),
+                    button(text("Move…").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::AfterChoice(AfterExportAction::Move)),
+                    Space::new().width(Length::Fill),
+                    button(text("Delete").size(theme::LABEL).font(theme::FONT_MEDIUM)).style(theme::btn_danger).on_press(Message::AfterChoice(AfterExportAction::Delete)),
+                ]
+                .spacing(theme::SM)
+                .align_y(iced::Alignment::Center),
             ]
-            .spacing(8),
-        ]
-        .spacing(12))
+            .spacing(theme::MD),
+            Message::DismissModal,
+        )
     }
 }
 
@@ -549,37 +632,96 @@ fn meta_line(item: &QueueItem) -> String {
     parts.join(" · ")
 }
 
-fn num_field<'a>(label: &'a str, value: i64, on_input: impl Fn(String) -> Message + 'a) -> Element<'a, Message> {
-    column![text(label).size(11), text_input("", &value.to_string()).on_input(on_input).width(Length::Fixed(110.0))]
-        .spacing(2)
+/// A label-over-value stat group for the export bar.
+fn stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
+    column![
+        text(label).size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+        text(value).size(theme::LABEL).font(Font::MONOSPACE),
+    ]
+    .spacing(2.0)
+    .into()
+}
+
+/// A tag pill.
+fn chip<'a>(label: String) -> Element<'a, Message> {
+    container(text(label).size(theme::SMALL)).padding([2.0, 8.0]).style(theme::chip).into()
+}
+
+/// A tag pill with a ✕ remove button.
+fn removable_chip<'a>(label: String, on_remove: Message) -> Element<'a, Message> {
+    let remove = with_tip(
+        button(text("✕").size(theme::SMALL)).style(theme::btn_ghost).padding(0.0).on_press(on_remove).into(),
+        "Remove tag".to_string(),
+    );
+    container(row![text(label).size(theme::SMALL), remove].spacing(theme::XS).align_y(iced::Alignment::Center))
+        .padding([2.0, 8.0])
+        .style(theme::chip)
         .into()
+}
+
+/// Wrap a widget in a tooltip with a styled bubble.
+fn with_tip<'a>(content: Element<'a, Message>, label: String) -> Element<'a, Message> {
+    tooltip(
+        content,
+        container(text(label).size(theme::SMALL)).padding([4.0, 8.0]).style(theme::card),
+        tooltip::Position::Top,
+    )
+    .into()
+}
+
+/// A centered, muted placeholder filling the editor pane.
+fn empty_state<'a>(msg: &'a str) -> Element<'a, Message> {
+    container(text(msg).size(theme::HEADING).style(|t| text::Style { color: Some(theme::muted(t)) }))
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+}
+
+fn num_field<'a>(label: &'a str, value: i64, on_input: impl Fn(String) -> Message + 'a) -> Element<'a, Message> {
+    column![
+        text(label).size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+        text_input("", &value.to_string()).on_input(on_input).font(Font::MONOSPACE).style(theme::input).width(Length::Fixed(110.0)),
+    ]
+    .spacing(theme::XS)
+    .into()
 }
 
 fn kb_row<'a>(label: &'a str, value: &'a str, field: KbField) -> Element<'a, Message> {
     row![
-        text(label).size(13).width(Length::Fixed(150.0)),
-        text_input("unbound", value).on_input(move |s| Message::SetKeybind(field, s)).width(Length::Fixed(150.0)),
+        text(label).size(theme::LABEL).width(Length::Fixed(150.0)),
+        text_input("unbound", value).on_input(move |s| Message::SetKeybind(field, s)).style(theme::input).width(Length::Fixed(150.0)),
     ]
-    .spacing(8)
+    .spacing(theme::SM)
     .align_y(iced::Alignment::Center)
     .into()
 }
 
 fn test_text(status: &Option<(bool, String)>) -> Element<'_, Message> {
     match status {
-        Some((ok, msg)) => text(format!("{} {}", if *ok { "✓" } else { "✗" }, msg)).size(11).into(),
+        Some((ok, msg)) => {
+            let ok = *ok;
+            text(format!("{} {}", if ok { "✓" } else { "✗" }, msg))
+                .size(theme::META)
+                .style(move |t: &Theme| {
+                    let p = t.extended_palette();
+                    text::Style { color: Some(if ok { p.success.base.color } else { p.danger.base.color }) }
+                })
+                .into()
+        }
         None => Space::new().into(),
     }
 }
 
 fn section<'a>(title: &'a str, content: Element<'a, Message>) -> Element<'a, Message> {
-    container(column![text(title).size(15), content].spacing(8)).padding(12).style(theme::card).into()
+    container(column![text(title).size(theme::HEADING).font(theme::FONT_SEMIBOLD), content].spacing(theme::SM))
+        .padding(theme::LG)
+        .style(theme::card)
+        .into()
 }
 
-fn modal(content: iced::widget::Column<'_, Message>) -> Element<'_, Message> {
-    container(container(content).padding(20).max_width(520).style(theme::card))
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .padding(40)
-        .into()
+/// A modal dialog: a `dialog`-styled card centered over a dimming scrim. Clicking the backdrop (or
+/// pressing Escape, wired in the subscription) sends `on_dismiss`.
+fn modal<'a>(content: iced::widget::Column<'a, Message>, on_dismiss: Message) -> Element<'a, Message> {
+    let card = container(content).padding(theme::XL).max_width(520).style(theme::dialog);
+    opaque(mouse_area(center(opaque(card)).style(theme::scrim)).on_press(on_dismiss)).into()
 }
