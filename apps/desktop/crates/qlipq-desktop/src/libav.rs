@@ -17,7 +17,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -196,6 +196,9 @@ pub struct Player {
     width: u32,
     height: u32,
     fps: f64,
+    /// Per-track monitor-mix gain (audio-relative index → gain as f32 bits), shared live with the
+    /// audio thread so volume-slider changes take effect during playback without a restart.
+    gains: Vec<(i64, Arc<AtomicU32>)>,
 }
 
 impl Player {
@@ -247,6 +250,14 @@ impl Player {
         match &self.video_cmd {
             Some(tx) => tx.send(Command::Seek(sec)).is_ok(),
             None => false,
+        }
+    }
+
+    /// Live-update an enabled track's monitor-mix gain (audio-relative index `rel`) while playing, so
+    /// the volume slider takes effect immediately instead of only on the next playback restart.
+    pub fn set_gain(&self, rel: i64, vol: f64) {
+        if let Some((_, g)) = self.gains.iter().find(|(i, _)| *i == rel) {
+            g.store((vol as f32).to_bits(), Ordering::Relaxed);
         }
     }
 }
@@ -313,12 +324,19 @@ pub fn start_player(
         video_loop(input, vdec, vid_idx, tb_v, sar, dims, is_hdr, !has_audio, start_sec, shared_v, video_rx);
     });
 
+    // Per-track gains live in shared atomics so the UI can adjust them mid-playback (see `set_gain`).
+    let gains: Vec<(i64, Arc<AtomicU32>)> = audio_tracks
+        .iter()
+        .map(|(rel, vol)| (*rel, Arc::new(AtomicU32::new((*vol as f32).to_bits()))))
+        .collect();
+
     let (audio_cmd, audio_thread) = if has_audio {
         let (tx, rx) = channel::<Command>();
         let shared_a = Arc::clone(&shared);
         let path = path.to_string();
+        let track_gains = gains.clone();
         let handle = std::thread::spawn(move || {
-            audio_loop(path, start_sec, shared_a, rx, audio_tracks);
+            audio_loop(path, start_sec, shared_a, rx, track_gains);
         });
         (Some(tx), Some(handle))
     } else {
@@ -334,6 +352,7 @@ pub fn start_player(
         width: dims.0,
         height: dims.1,
         fps,
+        gains,
     })
 }
 
@@ -678,7 +697,8 @@ struct MixTrack {
     abs_idx: i32,
     dec: AVCodecContext,
     tb_secs: f64,
-    gain: f32,
+    /// Gain as f32 bits, shared live with the UI (`Player::set_gain`) so slider moves apply immediately.
+    gain: Arc<AtomicU32>,
     swr: Option<SwrContext>,
     pending: Vec<f32>,
     seeking: bool,
@@ -694,7 +714,7 @@ fn audio_loop(
     start_sec: f64,
     shared: Arc<Shared>,
     cmd_rx: Receiver<Command>,
-    audio_tracks: Vec<(i64, f64)>,
+    audio_tracks: Vec<(i64, Arc<AtomicU32>)>,
 ) {
     let Ok(cpath) = CString::new(path) else { return };
     let Ok(mut input) = AVFormatContextInput::open(&cpath) else { return };
@@ -709,14 +729,14 @@ fn audio_loop(
         .collect();
 
     let mut tracks: Vec<MixTrack> = Vec::new();
-    for (rel, vol) in audio_tracks {
+    for (rel, gain) in audio_tracks {
         let Some(&abs_idx) = abs.get(rel.max(0) as usize) else { continue };
         if let Some((dec, tb)) = build_audio_decoder(&input, abs_idx as usize) {
             tracks.push(MixTrack {
                 abs_idx,
                 dec,
                 tb_secs: rational_secs(tb),
-                gain: vol as f32,
+                gain,
                 swr: None,
                 pending: Vec::new(),
                 seeking: true,
@@ -731,6 +751,18 @@ fn audio_loop(
         *shared.clock.base.lock().unwrap() = start_sec;
         *shared.clock.wall.lock().unwrap() = Some((Instant::now(), start_sec));
         return;
+    }
+
+    // The audio thread only needs the enabled audio streams. Tell the demuxer to drop everything else
+    // (video, subtitles, disabled tracks) so it doesn't read/parse the whole — often much larger —
+    // video stream just to discard it, and doesn't log decode errors for corrupt video it never uses.
+    unsafe {
+        let ctx = input.as_ptr();
+        for i in 0..(*ctx).nb_streams as i32 {
+            let keep = tracks.iter().any(|t| t.abs_idx == i);
+            let s = *(*ctx).streams.offset(i as isize);
+            (*s).discard = if keep { ffi::AVDISCARD_DEFAULT } else { ffi::AVDISCARD_ALL };
+        }
     }
 
     let host = cpal::default_host();
@@ -921,7 +953,7 @@ fn mix_and_push(
         }
         let mut mix = vec![0f32; n];
         for t in tracks.iter() {
-            let g = t.gain;
+            let g = f32::from_bits(t.gain.load(Ordering::Relaxed)); // live gain (UI can change it mid-play)
             for (m, &s) in mix.iter_mut().zip(t.pending.iter()) {
                 *m += s * g;
             }
@@ -1100,7 +1132,14 @@ fn build_video_decoder(
     let par = stream.codecpar();
     let sar = par.sample_aspect_ratio;
     let src_fmt = par.format; // bitstream sw pixel format
-    let codec = AVCodec::find_decoder(par.codec_id)?;
+    // FFmpeg's default AV1 decoder is software-only `libdav1d` (no hwaccel); the native `av1` decoder
+    // supports D3D11VA, so prefer it for AV1 — the GPU decodes when it can (RTX 40 / RX 7000 / Arc),
+    // else it just software-decodes. hevc/h264 already default to their hw-capable native decoders.
+    let codec = if par.codec_id == ffi::AV_CODEC_ID_AV1 {
+        AVCodec::find_decoder_by_name(c"av1").or_else(|| AVCodec::find_decoder(par.codec_id))?
+    } else {
+        AVCodec::find_decoder(par.codec_id)?
+    };
     let mut dec = AVCodecContext::new(&codec);
     dec.apply_codecpar(&par).ok()?;
     dec.set_pkt_timebase(tb);
@@ -1113,6 +1152,7 @@ fn build_video_decoder(
     // Try D3D11VA. If the device is created, frames come back as hw surfaces and `to_sw_frame`
     // downloads them to NV12 (8-bit) / P010 (10-bit) — which is what the buffer source must declare.
     let mut buffersrc_fmt = src_fmt;
+    let mut hw_engaged = false;
     if let Some(hw_pix_fmt) = d3d11va_hw_pix_fmt(&codec) {
         let mut hw_device: *mut ffi::AVBufferRef = std::ptr::null_mut();
         let created = unsafe {
@@ -1131,10 +1171,20 @@ fn build_video_decoder(
                 (*dec.as_mut_ptr()).get_format = Some(get_hw_format);
             }
             buffersrc_fmt = if pix_fmt_is_10bit(src_fmt) { ffi::AV_PIX_FMT_P010LE } else { ffi::AV_PIX_FMT_NV12 };
+            hw_engaged = true;
         }
     }
 
     dec.open(None).ok()?;
+    // One line per decoder open so it's clear whether the GPU is doing the work. Software decode of
+    // heavy 1440p AV1/HEVC runs below realtime and is the usual cause of preview audio stutter — if a
+    // clip logs "software" here (e.g. AV1 on a GPU without hw AV1 decode), that's why.
+    let codec = codec_name(par.codec_id);
+    if hw_engaged {
+        eprintln!("qlipq: {codec} video → D3D11VA hardware decode");
+    } else {
+        eprintln!("qlipq: {codec} video → software decode (no D3D11VA for this codec/GPU)");
+    }
     let sar = if sar.num == 0 { ffi::AVRational { num: 1, den: 1 } } else { sar };
     Some((dec, tb, sar, buffersrc_fmt))
 }

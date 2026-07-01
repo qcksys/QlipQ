@@ -743,6 +743,10 @@ impl App {
                     if let Some(r) = ed.audio.iter_mut().find(|r| r.index == index) {
                         r.volume = vol;
                     }
+                    // Apply to the running monitor mix so the change is audible immediately.
+                    if let Some(p) = &ed.player {
+                        p.set_gain(index, vol);
+                    }
                     self.audio_defaults = editor_audio_specs(ed);
                 }
                 self.commit_spec();
