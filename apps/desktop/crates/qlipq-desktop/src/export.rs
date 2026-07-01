@@ -57,17 +57,24 @@ pub fn run_export(
     // downscale / fps change) — a lossless, fast trim. Audio is still mixed/encoded. Otherwise
     // decode → filter → hardware-encode.
     let resolved = output_settings_to_encode(settings, media);
-    let video_reencode =
-        spec.crop.is_some() || resolved.video.scale_height.is_some() || resolved.video.fps.is_some() || resolved.reencode;
+    let video_reencode = spec.crop.is_some()
+        || resolved.video.scale_height.is_some()
+        || resolved.video.fps.is_some()
+        || resolved.reencode;
     let result = if video_reencode {
-        export_transcode(input_path, &temp_path, spec, settings, media, is_hdr, metadata, &progress, &cancel)
+        export_transcode(
+            input_path, &temp_path, spec, settings, media, is_hdr, metadata, &progress, &cancel,
+        )
     } else {
-        export_remux(input_path, &temp_path, spec, settings, media, metadata, &progress, &cancel)
+        export_remux(
+            input_path, &temp_path, spec, settings, media, metadata, &progress, &cancel,
+        )
     };
     match result {
         Ok(()) => {
             let _ = std::fs::remove_file(output_path); // overwrite target if present
-            std::fs::rename(&temp_path, output_path).map_err(|e| format!("rename temp → output: {e}"))?;
+            std::fs::rename(&temp_path, output_path)
+                .map_err(|e| format!("rename temp → output: {e}"))?;
             if let Ok(mut p) = progress.lock() {
                 *p = 1.0;
             }
@@ -100,8 +107,18 @@ fn export_transcode(
     progress: &Arc<Mutex<f32>>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let start = spec.trim.as_ref().map(|t| t.start_sec).unwrap_or(0.0).max(0.0);
-    let end = spec.trim.as_ref().map(|t| t.end_sec).unwrap_or(media.duration_sec).max(start);
+    let start = spec
+        .trim
+        .as_ref()
+        .map(|t| t.start_sec)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let end = spec
+        .trim
+        .as_ref()
+        .map(|t| t.end_sec)
+        .unwrap_or(media.duration_sec)
+        .max(start);
     let dur = (end - start).max(0.001);
 
     let resolved = output_settings_to_encode(settings, media);
@@ -122,19 +139,31 @@ fn export_transcode(
         let tb = st.time_base;
         let par = st.codecpar();
         let sar0 = par.sample_aspect_ratio;
-        let sar = if sar0.num == 0 { ffi::AVRational { num: 1, den: 1 } } else { sar0 };
-        let color = (par.color_primaries, par.color_trc, par.color_space, par.color_range);
+        let sar = if sar0.num == 0 {
+            ffi::AVRational { num: 1, den: 1 }
+        } else {
+            sar0
+        };
+        let color = (
+            par.color_primaries,
+            par.color_trc,
+            par.color_space,
+            par.color_range,
+        );
         let codec = AVCodec::find_decoder(par.codec_id).ok_or("no video decoder")?;
         let mut dec = AVCodecContext::new(&codec);
-        dec.apply_codecpar(&par).map_err(|e| format!("apply_codecpar: {e:?}"))?;
+        dec.apply_codecpar(&par)
+            .map_err(|e| format!("apply_codecpar: {e:?}"))?;
         dec.set_pkt_timebase(tb);
         unsafe { (*dec.as_mut_ptr()).thread_count = 0 };
-        dec.open(None).map_err(|e| format!("open video decoder: {e:?}"))?;
+        dec.open(None)
+            .map_err(|e| format!("open video decoder: {e:?}"))?;
         (dec, tb, sar, color)
     };
 
     let ten_bit = is_hdr || pix_depth(vdec.pix_fmt) > 8;
-    let plan = plan_hw_video(settings, ten_bit, encoder_usable).ok_or("no usable hardware encoder")?;
+    let plan =
+        plan_hw_video(settings, ten_bit, encoder_usable).ok_or("no usable hardware encoder")?;
 
     // ---- enabled audio tracks ----
     let audio_abs: Vec<i32> = ictx
@@ -148,7 +177,11 @@ fn export_transcode(
         .audio_tracks
         .iter()
         .filter(|t| t.enabled)
-        .filter_map(|t| audio_abs.get(t.index.max(0) as usize).map(|&abs| (abs, t.volume)))
+        .filter_map(|t| {
+            audio_abs
+                .get(t.index.max(0) as usize)
+                .map(|&abs| (abs, t.volume))
+        })
         .collect();
     let has_audio = !enabled.is_empty();
 
@@ -171,11 +204,20 @@ fn export_transcode(
     // The encoder time base is the buffersink's (the frame's own `time_base` field isn't populated).
     let venc_tb = {
         let tb = vsink.get_time_base();
-        if tb.num > 0 && tb.den > 0 { tb } else { ffi::AVRational { num: 1, den: 90_000 } }
+        if tb.num > 0 && tb.den > 0 {
+            tb
+        } else {
+            ffi::AVRational {
+                num: 1,
+                den: 90_000,
+            }
+        }
     };
 
     // ---- video encoder ----
-    let mut venc = build_video_encoder(&plan, out_w, out_h, sar, venc_tb, fps, ten_bit, is_hdr, src_color)?;
+    let mut venc = build_video_encoder(
+        &plan, out_w, out_h, sar, venc_tb, fps, ten_bit, is_hdr, src_color,
+    )?;
 
     // ---- audio: decoders + amix graph + AAC encoder ----
     let agraph = AVFilterGraph::new();
@@ -184,19 +226,27 @@ fn export_transcode(
     let mut asink_opt: Option<AVFilterContextMut> = None;
     if has_audio {
         let mut aencoder = build_audio_encoder(settings)?;
-        let frame_size = if aencoder.frame_size > 0 { aencoder.frame_size as u32 } else { 1024 };
+        let frame_size = if aencoder.frame_size > 0 {
+            aencoder.frame_size as u32
+        } else {
+            1024
+        };
         let (decs, asink) = build_audio_graph(&agraph, &ictx, &enabled, start, end, frame_size)?;
         tracks = decs;
         asink_opt = Some(asink);
         // The encoder's time base is the sample clock.
-        aencoder.set_time_base(ffi::AVRational { num: 1, den: aencoder.sample_rate });
+        aencoder.set_time_base(ffi::AVRational {
+            num: 1,
+            den: aencoder.sample_rate,
+        });
         let _ = &mut aencoder; // (already opened in build_audio_encoder)
         aenc = Some(aencoder);
     }
 
     // ---- muxer: add streams, then write the header ----
     let cout = CString::new(temp_path).map_err(|e| e.to_string())?;
-    let mut octx = AVFormatContextOutput::create(&cout).map_err(|e| format!("create output: {e:?}"))?;
+    let mut octx =
+        AVFormatContextOutput::create(&cout).map_err(|e| format!("create output: {e:?}"))?;
     let v_stream = {
         let mut s = octx.new_stream();
         s.set_codecpar(venc.extract_codecpar());
@@ -223,7 +273,8 @@ fn export_transcode(
         }
     }
     let mut header_opts = Some(AVDictionary::new(c"movflags", c"+faststart", 0));
-    octx.write_header(&mut header_opts).map_err(|e| format!("write_header: {e:?}"))?;
+    octx.write_header(&mut header_opts)
+        .map_err(|e| format!("write_header: {e:?}"))?;
     let v_out_tb = octx.streams()[v_stream].time_base;
     let a_out_tb = a_stream.map(|i| octx.streams()[i].time_base);
 
@@ -242,11 +293,22 @@ fn export_transcode(
                 let si = pkt.stream_index;
                 if si == vid_idx {
                     let _ = vdec.send_packet(Some(&pkt));
-                    drain_video(&mut vdec, &mut vsrc, &mut vsink, &mut venc, &mut octx, venc_tb, v_out_tb, &mut last_v_secs)?;
+                    drain_video(
+                        &mut vdec,
+                        &mut vsrc,
+                        &mut vsink,
+                        &mut venc,
+                        &mut octx,
+                        venc_tb,
+                        v_out_tb,
+                        &mut last_v_secs,
+                    )?;
                 } else if let Some(t) = tracks.iter_mut().find(|t| t.abs_idx == si) {
                     let _ = t.dec.send_packet(Some(&pkt));
                     feed_audio_decoder(t);
-                    if let (Some(ae), Some(asink), Some(ao)) = (aenc.as_mut(), asink_opt.as_mut(), a_out_tb) {
+                    if let (Some(ae), Some(asink), Some(ao)) =
+                        (aenc.as_mut(), asink_opt.as_mut(), a_out_tb)
+                    {
                         drain_audio(asink, ae, &mut octx, a_stream.unwrap(), ao)?;
                     }
                 }
@@ -266,9 +328,25 @@ fn export_transcode(
 
     // ---- flush video: filter EOF → drain → encoder flush ----
     let _ = vdec.send_packet(None);
-    drain_video(&mut vdec, &mut vsrc, &mut vsink, &mut venc, &mut octx, venc_tb, v_out_tb, &mut last_v_secs)?;
+    drain_video(
+        &mut vdec,
+        &mut vsrc,
+        &mut vsink,
+        &mut venc,
+        &mut octx,
+        venc_tb,
+        v_out_tb,
+        &mut last_v_secs,
+    )?;
     let _ = vsrc.buffersrc_add_frame(None, None);
-    drain_filtered_video(&mut vsink, &mut venc, &mut octx, venc_tb, v_out_tb, &mut last_v_secs)?;
+    drain_filtered_video(
+        &mut vsink,
+        &mut venc,
+        &mut octx,
+        venc_tb,
+        v_out_tb,
+        &mut last_v_secs,
+    )?;
     encode_video_frame(&mut venc, None, &mut octx, venc_tb, v_out_tb, 0)?;
 
     // ---- flush audio: decoders → abuffer EOF → drain → encoder flush ----
@@ -286,7 +364,8 @@ fn export_transcode(
     }
     let _ = flushed_audio_srcs;
 
-    octx.write_trailer().map_err(|e| format!("write_trailer: {e:?}"))?;
+    octx.write_trailer()
+        .map_err(|e| format!("write_trailer: {e:?}"))?;
     Ok(())
 }
 
@@ -304,8 +383,18 @@ fn export_remux(
     progress: &Arc<Mutex<f32>>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let start = spec.trim.as_ref().map(|t| t.start_sec).unwrap_or(0.0).max(0.0);
-    let end = spec.trim.as_ref().map(|t| t.end_sec).unwrap_or(media.duration_sec).max(start);
+    let start = spec
+        .trim
+        .as_ref()
+        .map(|t| t.start_sec)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let end = spec
+        .trim
+        .as_ref()
+        .map(|t| t.end_sec)
+        .unwrap_or(media.duration_sec)
+        .max(start);
     let dur = (end - start).max(0.001);
 
     let cin = CString::new(input_path).map_err(|e| e.to_string())?;
@@ -330,7 +419,11 @@ fn export_remux(
         .audio_tracks
         .iter()
         .filter(|t| t.enabled)
-        .filter_map(|t| audio_abs.get(t.index.max(0) as usize).map(|&abs| (abs, t.volume)))
+        .filter_map(|t| {
+            audio_abs
+                .get(t.index.max(0) as usize)
+                .map(|&abs| (abs, t.volume))
+        })
         .collect();
     let has_audio = !enabled.is_empty();
 
@@ -346,7 +439,11 @@ fn export_remux(
     let mut asink_opt: Option<AVFilterContextMut> = None;
     if has_audio {
         let aencoder = build_audio_encoder(settings)?;
-        let frame_size = if aencoder.frame_size > 0 { aencoder.frame_size as u32 } else { 1024 };
+        let frame_size = if aencoder.frame_size > 0 {
+            aencoder.frame_size as u32
+        } else {
+            1024
+        };
         let (decs, asink) = build_audio_graph(&agraph, &ictx, &enabled, start, end, frame_size)?;
         tracks = decs;
         asink_opt = Some(asink);
@@ -356,11 +453,15 @@ fn export_remux(
     // Copy the source video stream's parameters onto a new output stream (no encoder).
     let mut vpar = AVCodecParameters::new();
     unsafe {
-        ffi::avcodec_parameters_copy(vpar.as_mut_ptr(), ictx.streams()[vid_idx as usize].codecpar().as_ptr());
+        ffi::avcodec_parameters_copy(
+            vpar.as_mut_ptr(),
+            ictx.streams()[vid_idx as usize].codecpar().as_ptr(),
+        );
     }
 
     let cout = CString::new(temp_path).map_err(|e| e.to_string())?;
-    let mut octx = AVFormatContextOutput::create(&cout).map_err(|e| format!("create output: {e:?}"))?;
+    let mut octx =
+        AVFormatContextOutput::create(&cout).map_err(|e| format!("create output: {e:?}"))?;
     {
         let mut s = octx.new_stream();
         s.set_codecpar(vpar);
@@ -390,7 +491,8 @@ fn export_remux(
         }
     }
     let mut header_opts = Some(AVDictionary::new(c"movflags", c"+faststart", 0));
-    octx.write_header(&mut header_opts).map_err(|e| format!("write_header: {e:?}"))?;
+    octx.write_header(&mut header_opts)
+        .map_err(|e| format!("write_header: {e:?}"))?;
     let v_out_tb = octx.streams()[0].time_base;
     let a_out_tb = a_stream.map(|i| octx.streams()[i].time_base);
 
@@ -403,7 +505,11 @@ fn export_remux(
         match ictx.read_packet() {
             Ok(Some(mut pkt)) => {
                 if pkt.stream_index == vid_idx {
-                    let pos_secs = if pkt.pts != ffi::AV_NOPTS_VALUE { pkt.pts as f64 * in_tb_secs } else { start };
+                    let pos_secs = if pkt.pts != ffi::AV_NOPTS_VALUE {
+                        pkt.pts as f64 * in_tb_secs
+                    } else {
+                        start
+                    };
                     // Copy only video within the out-point; keep reading a little past it so the audio
                     // (capped by `atrim`) is complete before we stop.
                     if pos_secs <= end {
@@ -415,7 +521,8 @@ fn export_remux(
                         }
                         pkt.set_stream_index(0);
                         pkt.rescale_ts(in_tb, v_out_tb);
-                        octx.interleaved_write_frame(&mut pkt).map_err(|e| format!("write video: {e:?}"))?;
+                        octx.interleaved_write_frame(&mut pkt)
+                            .map_err(|e| format!("write video: {e:?}"))?;
                     }
                     if let Ok(mut p) = progress.lock() {
                         *p = ((pos_secs - start) / dur).clamp(0.0, 0.999) as f32;
@@ -426,7 +533,9 @@ fn export_remux(
                 } else if let Some(t) = tracks.iter_mut().find(|t| t.abs_idx == pkt.stream_index) {
                     let _ = t.dec.send_packet(Some(&pkt));
                     feed_audio_decoder(t);
-                    if let (Some(ae), Some(asink), Some(ao)) = (aenc.as_mut(), asink_opt.as_mut(), a_out_tb) {
+                    if let (Some(ae), Some(asink), Some(ao)) =
+                        (aenc.as_mut(), asink_opt.as_mut(), a_out_tb)
+                    {
                         drain_audio(asink, ae, &mut octx, a_stream.unwrap(), ao)?;
                     }
                 }
@@ -447,14 +556,25 @@ fn export_remux(
         encode_audio_frame(ae, None, &mut octx, a_stream.unwrap(), ao)?;
     }
 
-    octx.write_trailer().map_err(|e| format!("write_trailer: {e:?}"))?;
+    octx.write_trailer()
+        .map_err(|e| format!("write_trailer: {e:?}"))?;
     Ok(())
 }
 
 // ---- video ----
 
-fn video_filter_descr(spec: &EditSpec, scale_height: Option<i64>, fps: Option<i64>, ten_bit: bool, start: f64, end: f64) -> String {
-    let mut steps: Vec<String> = vec![format!("trim=start={start:.4}:end={end:.4}"), "setpts=PTS-STARTPTS".to_string()];
+fn video_filter_descr(
+    spec: &EditSpec,
+    scale_height: Option<i64>,
+    fps: Option<i64>,
+    ten_bit: bool,
+    start: f64,
+    end: f64,
+) -> String {
+    let mut steps: Vec<String> = vec![
+        format!("trim=start={start:.4}:end={end:.4}"),
+        "setpts=PTS-STARTPTS".to_string(),
+    ];
     if let Some(c) = &spec.crop {
         steps.push(format!("crop={}:{}:{}:{}", c.width, c.height, c.x, c.y));
     }
@@ -464,7 +584,10 @@ fn video_filter_descr(spec: &EditSpec, scale_height: Option<i64>, fps: Option<i6
     if let Some(r) = fps {
         steps.push(format!("fps={r}"));
     }
-    steps.push(format!("format={}", if ten_bit { "p010le" } else { "nv12" }));
+    steps.push(format!(
+        "format={}",
+        if ten_bit { "p010le" } else { "nv12" }
+    ));
     steps.join(",")
 }
 
@@ -482,7 +605,11 @@ fn build_video_filter<'g>(
     ))
     .map_err(|e| e.to_string())?;
     let mut src = graph
-        .create_filter_context(&AVFilter::get_by_name(c"buffer").unwrap(), c"in", Some(&args))
+        .create_filter_context(
+            &AVFilter::get_by_name(c"buffer").unwrap(),
+            c"in",
+            Some(&args),
+        )
         .map_err(|e| format!("buffer: {e:?}"))?;
     let mut sink = graph
         .create_filter_context(&AVFilter::get_by_name(c"buffersink").unwrap(), c"out", None)
@@ -490,8 +617,12 @@ fn build_video_filter<'g>(
     let outputs = AVFilterInOut::new(c"in", &mut src, 0);
     let inputs = AVFilterInOut::new(c"out", &mut sink, 0);
     let cdescr = CString::new(descr).map_err(|e| e.to_string())?;
-    graph.parse_ptr(&cdescr, Some(inputs), Some(outputs)).map_err(|e| format!("parse video: {e:?}"))?;
-    graph.config().map_err(|e| format!("video graph config: {e:?}"))?;
+    graph
+        .parse_ptr(&cdescr, Some(inputs), Some(outputs))
+        .map_err(|e| format!("parse video: {e:?}"))?;
+    graph
+        .config()
+        .map_err(|e| format!("video graph config: {e:?}"))?;
     Ok((src, sink))
 }
 
@@ -545,25 +676,50 @@ fn build_video_encoder(
     fps: Option<i64>,
     ten_bit: bool,
     is_hdr: bool,
-    src_color: (ffi::AVColorPrimaries, ffi::AVColorTransferCharacteristic, ffi::AVColorSpace, ffi::AVColorRange),
+    src_color: (
+        ffi::AVColorPrimaries,
+        ffi::AVColorTransferCharacteristic,
+        ffi::AVColorSpace,
+        ffi::AVColorRange,
+    ),
 ) -> Result<AVCodecContext, String> {
     let cenc = CString::new(plan.encoder.as_str()).map_err(|e| e.to_string())?;
-    let codec = AVCodec::find_encoder_by_name(&cenc).ok_or_else(|| format!("encoder '{}' not found", plan.encoder))?;
+    let codec = AVCodec::find_encoder_by_name(&cenc)
+        .ok_or_else(|| format!("encoder '{}' not found", plan.encoder))?;
     let mut enc = AVCodecContext::new(&codec);
     enc.set_width(w);
     enc.set_height(h);
-    enc.set_pix_fmt(if ten_bit { ffi::AV_PIX_FMT_P010LE } else { ffi::AV_PIX_FMT_NV12 });
+    enc.set_pix_fmt(if ten_bit {
+        ffi::AV_PIX_FMT_P010LE
+    } else {
+        ffi::AV_PIX_FMT_NV12
+    });
     enc.set_sample_aspect_ratio(sar);
     enc.set_time_base(time_base);
     if let Some(r) = fps {
-        enc.set_framerate(ffi::AVRational { num: r as i32, den: 1 });
+        enc.set_framerate(ffi::AVRational {
+            num: r as i32,
+            den: 1,
+        });
     }
     enc.set_gop_size(120);
     unsafe {
         let p = enc.as_mut_ptr();
-        (*p).color_primaries = if is_hdr { ffi::AVCOL_PRI_BT2020 } else { src_color.0 };
-        (*p).color_trc = if is_hdr { ffi::AVCOL_TRC_SMPTE2084 } else { src_color.1 };
-        (*p).colorspace = if is_hdr { ffi::AVCOL_SPC_BT2020_NCL } else { src_color.2 };
+        (*p).color_primaries = if is_hdr {
+            ffi::AVCOL_PRI_BT2020
+        } else {
+            src_color.0
+        };
+        (*p).color_trc = if is_hdr {
+            ffi::AVCOL_TRC_SMPTE2084
+        } else {
+            src_color.1
+        };
+        (*p).colorspace = if is_hdr {
+            ffi::AVCOL_SPC_BT2020_NCL
+        } else {
+            src_color.2
+        };
         (*p).color_range = src_color.3;
     }
     enc.set_flags(enc.flags | ffi::AV_CODEC_FLAG_GLOBAL_HEADER as i32);
@@ -573,7 +729,8 @@ fn build_video_encoder(
     if let Some(m) = plan.maxrate_kbps {
         unsafe { (*enc.as_mut_ptr()).rc_max_rate = m * 1000 };
     }
-    enc.open(dict_from(&plan.opts)).map_err(|e| format!("open video encoder '{}': {e:?}", plan.encoder))?;
+    enc.open(dict_from(&plan.opts))
+        .map_err(|e| format!("open video encoder '{}': {e:?}", plan.encoder))?;
     Ok(enc)
 }
 
@@ -623,13 +780,15 @@ fn encode_video_frame(
     out_tb: ffi::AVRational,
     stream_index: i32,
 ) -> Result<(), String> {
-    venc.send_frame(frame).map_err(|e| format!("video send_frame: {e:?}"))?;
+    venc.send_frame(frame)
+        .map_err(|e| format!("video send_frame: {e:?}"))?;
     loop {
         match venc.receive_packet() {
             Ok(mut pkt) => {
                 pkt.set_stream_index(stream_index);
                 pkt.rescale_ts(enc_tb, out_tb);
-                octx.interleaved_write_frame(&mut pkt).map_err(|e| format!("write video: {e:?}"))?;
+                octx.interleaved_write_frame(&mut pkt)
+                    .map_err(|e| format!("write video: {e:?}"))?;
             }
             Err(RsmpegError::EncoderDrainError) | Err(RsmpegError::EncoderFlushedError) => break,
             Err(e) => return Err(format!("video receive_packet: {e:?}")),
@@ -647,9 +806,13 @@ fn build_audio_encoder(settings: &OutputSettings) -> Result<AVCodecContext, Stri
     enc.set_sample_rate(48_000);
     enc.set_ch_layout(stereo_layout());
     enc.set_bit_rate(settings.audio_bitrate_kbps.max(64) * 1000);
-    enc.set_time_base(ffi::AVRational { num: 1, den: 48_000 });
+    enc.set_time_base(ffi::AVRational {
+        num: 1,
+        den: 48_000,
+    });
     enc.set_flags(enc.flags | ffi::AV_CODEC_FLAG_GLOBAL_HEADER as i32);
-    enc.open(None).map_err(|e| format!("open AAC encoder: {e:?}"))?;
+    enc.open(None)
+        .map_err(|e| format!("open AAC encoder: {e:?}"))?;
     Ok(enc)
 }
 
@@ -680,9 +843,11 @@ fn build_audio_graph<'g>(
         let par = st.codecpar();
         let codec = AVCodec::find_decoder(par.codec_id).ok_or("no audio decoder")?;
         let mut dec = AVCodecContext::new(&codec);
-        dec.apply_codecpar(&par).map_err(|e| format!("audio apply_codecpar: {e:?}"))?;
+        dec.apply_codecpar(&par)
+            .map_err(|e| format!("audio apply_codecpar: {e:?}"))?;
         dec.set_pkt_timebase(tb);
-        dec.open(None).map_err(|e| format!("open audio decoder: {e:?}"))?;
+        dec.open(None)
+            .map_err(|e| format!("open audio decoder: {e:?}"))?;
 
         let args = CString::new(format!(
             "sample_rate={}:sample_fmt={}:channel_layout={}:time_base={}/{}",
@@ -694,7 +859,11 @@ fn build_audio_graph<'g>(
         ))
         .unwrap();
         let mut src = graph
-            .create_filter_context(&AVFilter::get_by_name(c"abuffer").unwrap(), &CString::new(format!("ain{i}")).unwrap(), Some(&args))
+            .create_filter_context(
+                &AVFilter::get_by_name(c"abuffer").unwrap(),
+                &CString::new(format!("ain{i}")).unwrap(),
+                Some(&args),
+            )
             .map_err(|e| format!("abuffer {i}: {e:?}"))?;
 
         let mut atrim = graph
@@ -711,8 +880,11 @@ fn build_audio_graph<'g>(
                 Some(c"PTS-STARTPTS"),
             )
             .map_err(|e| format!("asetpts {i}: {e:?}"))?;
-        src.link(0, &mut atrim, 0).map_err(|e| format!("link abuffer→atrim: {e:?}"))?;
-        atrim.link(0, &mut aset, 0).map_err(|e| format!("link atrim→asetpts: {e:?}"))?;
+        src.link(0, &mut atrim, 0)
+            .map_err(|e| format!("link abuffer→atrim: {e:?}"))?;
+        atrim
+            .link(0, &mut aset, 0)
+            .map_err(|e| format!("link atrim→asetpts: {e:?}"))?;
 
         if (vol - 1.0).abs() > f64::EPSILON {
             let mut vol_ctx = graph
@@ -722,10 +894,14 @@ fn build_audio_graph<'g>(
                     Some(&CString::new(format!("{vol}")).unwrap()),
                 )
                 .map_err(|e| format!("volume {i}: {e:?}"))?;
-            aset.link(0, &mut vol_ctx, 0).map_err(|e| format!("link asetpts→volume: {e:?}"))?;
-            vol_ctx.link(0, &mut amix, i as u32).map_err(|e| format!("link volume→amix: {e:?}"))?;
+            aset.link(0, &mut vol_ctx, 0)
+                .map_err(|e| format!("link asetpts→volume: {e:?}"))?;
+            vol_ctx
+                .link(0, &mut amix, i as u32)
+                .map_err(|e| format!("link volume→amix: {e:?}"))?;
         } else {
-            aset.link(0, &mut amix, i as u32).map_err(|e| format!("link asetpts→amix: {e:?}"))?;
+            aset.link(0, &mut amix, i as u32)
+                .map_err(|e| format!("link asetpts→amix: {e:?}"))?;
         }
 
         tracks.push(TrackDec { abs_idx, dec, src });
@@ -739,12 +915,21 @@ fn build_audio_graph<'g>(
         )
         .map_err(|e| format!("aformat: {e:?}"))?;
     let mut asink = graph
-        .create_filter_context(&AVFilter::get_by_name(c"abuffersink").unwrap(), c"aout", None)
+        .create_filter_context(
+            &AVFilter::get_by_name(c"abuffersink").unwrap(),
+            c"aout",
+            None,
+        )
         .map_err(|e| format!("abuffersink: {e:?}"))?;
-    amix.link(0, &mut aformat, 0).map_err(|e| format!("link amix→aformat: {e:?}"))?;
-    aformat.link(0, &mut asink, 0).map_err(|e| format!("link aformat→abuffersink: {e:?}"))?;
+    amix.link(0, &mut aformat, 0)
+        .map_err(|e| format!("link amix→aformat: {e:?}"))?;
+    aformat
+        .link(0, &mut asink, 0)
+        .map_err(|e| format!("link aformat→abuffersink: {e:?}"))?;
 
-    graph.config().map_err(|e| format!("audio graph config: {e:?}"))?;
+    graph
+        .config()
+        .map_err(|e| format!("audio graph config: {e:?}"))?;
     asink.buffersink_set_frame_size(frame_size);
     Ok((tracks, asink))
 }
@@ -779,13 +964,15 @@ fn encode_audio_frame(
     out_tb: ffi::AVRational,
 ) -> Result<(), String> {
     let enc_tb = aenc.time_base;
-    aenc.send_frame(frame).map_err(|e| format!("audio send_frame: {e:?}"))?;
+    aenc.send_frame(frame)
+        .map_err(|e| format!("audio send_frame: {e:?}"))?;
     loop {
         match aenc.receive_packet() {
             Ok(mut pkt) => {
                 pkt.set_stream_index(stream_index as i32);
                 pkt.rescale_ts(enc_tb, out_tb);
-                octx.interleaved_write_frame(&mut pkt).map_err(|e| format!("write audio: {e:?}"))?;
+                octx.interleaved_write_frame(&mut pkt)
+                    .map_err(|e| format!("write audio: {e:?}"))?;
             }
             Err(RsmpegError::EncoderDrainError) | Err(RsmpegError::EncoderFlushedError) => break,
             Err(e) => return Err(format!("audio receive_packet: {e:?}")),
@@ -824,8 +1011,12 @@ fn pix_depth(pix_fmt: ffi::AVPixelFormat) -> i32 {
 
 /// Runtime usability probe for [`plan_hw_video`]: does this encoder actually open here?
 fn encoder_usable(name: &str) -> bool {
-    let Ok(cname) = CString::new(name) else { return false };
-    let Some(codec) = AVCodec::find_encoder_by_name(&cname) else { return false };
+    let Ok(cname) = CString::new(name) else {
+        return false;
+    };
+    let Some(codec) = AVCodec::find_encoder_by_name(&cname) else {
+        return false;
+    };
     let mut enc = AVCodecContext::new(&codec);
     enc.set_width(320);
     enc.set_height(240);
@@ -856,8 +1047,14 @@ mod tests {
     fn temp_path_keeps_container_extension() {
         // The muxer is chosen from the temp file's extension, so it must match the target container —
         // otherwise an .mkv export is silently muxed as MP4.
-        assert_eq!(temp_export_path("E:/out/clip.mkv", ContainerFormat::Mkv), "E:/out/clip.mkv.part.mkv");
-        assert_eq!(temp_export_path("E:/out/clip.mp4", ContainerFormat::Mp4), "E:/out/clip.mp4.part.mp4");
+        assert_eq!(
+            temp_export_path("E:/out/clip.mkv", ContainerFormat::Mkv),
+            "E:/out/clip.mkv.part.mkv"
+        );
+        assert_eq!(
+            temp_export_path("E:/out/clip.mp4", ContainerFormat::Mp4),
+            "E:/out/clip.mp4.part.mp4"
+        );
     }
 
     /// End-to-end export against a real file. Ignored by default; run with a real clip:
@@ -870,15 +1067,21 @@ mod tests {
             eprintln!("set QLIPQ_TEST_INPUT to run");
             return;
         };
-        let out = std::env::var("QLIPQ_TEST_OUTPUT").unwrap_or_else(|_| format!("{input}.export-test.mp4"));
+        let out = std::env::var("QLIPQ_TEST_OUTPUT")
+            .unwrap_or_else(|_| format!("{input}.export-test.mp4"));
 
         // Probe the source for geometry/duration via libav.
         let cin = CString::new(input.as_str()).unwrap();
         let ictx = AVFormatContextInput::open(&cin).unwrap();
-        let vidx = ictx.find_best_stream(ffi::AVMEDIA_TYPE_VIDEO).unwrap().map(|(i, _)| i).unwrap();
+        let vidx = ictx
+            .find_best_stream(ffi::AVMEDIA_TYPE_VIDEO)
+            .unwrap()
+            .map(|(i, _)| i)
+            .unwrap();
         let (w, h, is_hdr) = {
             let par = ictx.streams()[vidx].codecpar();
-            let hdr = par.color_trc == ffi::AVCOL_TRC_SMPTE2084 || par.color_trc == ffi::AVCOL_TRC_ARIB_STD_B67;
+            let hdr = par.color_trc == ffi::AVCOL_TRC_SMPTE2084
+                || par.color_trc == ffi::AVCOL_TRC_ARIB_STD_B67;
             (par.width as i64, par.height as i64, hdr)
         };
         let audio_n = ictx
@@ -888,11 +1091,29 @@ mod tests {
             .count();
         drop(ictx);
 
-        let media = MediaInfo { duration_sec: 60.0, width: w, height: h, video_codec: "av1".into(), fps: 60.0, audio_streams: vec![], size_bytes: None, encoder: None };
+        let media = MediaInfo {
+            duration_sec: 60.0,
+            width: w,
+            height: h,
+            video_codec: "av1".into(),
+            fps: 60.0,
+            audio_streams: vec![],
+            size_bytes: None,
+            encoder: None,
+        };
         let spec = EditSpec {
-            trim: Some(TrimSpec { start_sec: 1.0, end_sec: 4.0 }),
+            trim: Some(TrimSpec {
+                start_sec: 1.0,
+                end_sec: 4.0,
+            }),
             crop: None,
-            audio_tracks: (0..audio_n).map(|i| AudioTrackSpec { index: i as i64, enabled: true, volume: 1.0 }).collect(),
+            audio_tracks: (0..audio_n)
+                .map(|i| AudioTrackSpec {
+                    index: i as i64,
+                    enabled: true,
+                    volume: 1.0,
+                })
+                .collect(),
         };
         let mut settings = OutputSettings::default();
         if let Ok(s) = std::env::var("QLIPQ_TEST_SCALE") {
@@ -901,17 +1122,42 @@ mod tests {
         let progress = Arc::new(Mutex::new(0.0f32));
         let cancel = Arc::new(AtomicBool::new(false));
 
-        run_export(&input, &out, &spec, &settings, &media, is_hdr, &[("game".into(), "Test".into())], progress.clone(), cancel)
-            .expect("export failed");
+        run_export(
+            &input,
+            &out,
+            &spec,
+            &settings,
+            &media,
+            is_hdr,
+            &[("game".into(), "Test".into())],
+            progress.clone(),
+            cancel,
+        )
+        .expect("export failed");
 
         // Validate the output: it opens, has a video + (if input had audio) an audio stream, ~3 s.
         let cout = CString::new(out.as_str()).unwrap();
         let octx = AVFormatContextInput::open(&cout).unwrap();
-        let v = octx.streams().iter().filter(|s| s.codecpar().codec_type == ffi::AVMEDIA_TYPE_VIDEO).count();
-        let a = octx.streams().iter().filter(|s| s.codecpar().codec_type == ffi::AVMEDIA_TYPE_AUDIO).count();
+        let v = octx
+            .streams()
+            .iter()
+            .filter(|s| s.codecpar().codec_type == ffi::AVMEDIA_TYPE_VIDEO)
+            .count();
+        let a = octx
+            .streams()
+            .iter()
+            .filter(|s| s.codecpar().codec_type == ffi::AVMEDIA_TYPE_AUDIO)
+            .count();
         assert_eq!(v, 1, "expected one video stream");
-        assert_eq!(a, usize::from(audio_n > 0), "expected one mixed audio stream when source had audio");
-        assert!(*progress.lock().unwrap() >= 0.99, "progress should reach ~1.0");
+        assert_eq!(
+            a,
+            usize::from(audio_n > 0),
+            "expected one mixed audio stream when source had audio"
+        );
+        assert!(
+            *progress.lock().unwrap() >= 0.99,
+            "progress should reach ~1.0"
+        );
         eprintln!("export OK: {out}  video={v} audio={a}");
     }
 }

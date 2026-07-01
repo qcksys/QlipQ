@@ -16,9 +16,14 @@ pub fn now() -> String {
 }
 
 pub fn from_unix_ms(ms: i64) -> String {
-    Utc.timestamp_millis_opt(ms).single().map(|d| d.to_rfc3339()).unwrap_or_default()
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_default()
 }
 
 pub fn to_local(iso: &str) -> Option<NaiveDateTime> {
-    DateTime::parse_from_rfc3339(iso).ok().map(|d| d.with_timezone(&Local).naive_local())
+    DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|d| d.with_timezone(&Local).naive_local())
 }

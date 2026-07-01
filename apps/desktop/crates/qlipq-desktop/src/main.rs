@@ -8,14 +8,14 @@
 //! (HDR→SDR tonemap) with synced cpal audio ([`libav`]); export decodes → edits → hardware-encodes →
 //! muxes ([`export`]).
 
+mod export;
 mod host;
 mod iso;
-mod theme;
-mod video;
 mod libav;
-mod export;
 mod log_ctx;
 mod seeker;
+mod theme;
+mod video;
 
 // The in-process libav preview player (libplacebo HDR tonemap + synced cpal audio), exposing
 // `poll`/`dimensions`/`fps`/`position`/`try_seek` for the editor below.
@@ -42,6 +42,9 @@ use qlipq_ffmpeg::estimate::estimate_export_size;
 const DISMISSED_TAG: &str = "dismissed";
 const TICK: Duration = Duration::from_millis(250);
 const SIDEBAR_WIDTH: f32 = 360.0;
+/// Sentinel "no filter" entries for the game/tag `pick_list`s (their reset option).
+const ALL_GAMES: &str = "All games";
+const ALL_TAGS_LABEL: &str = "All tags";
 
 /// Caps concurrent background duration probes so the editor's on-demand probe (and the system)
 /// are never starved by a folder full of recordings. Mirrors the web app's PROBE_CONCURRENCY=3.
@@ -138,8 +141,137 @@ choice!(AfterChoice, AfterExportAction, {
 });
 
 const ENCODER_PRESETS: [&str; 9] = [
-    "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow",
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium",
+    "slow",
+    "slower",
+    "veryslow",
 ];
+
+// ---- queue filter (pinned to the top of the queue sidebar) ----
+
+/// Status facet of the queue filter, as a `pick_list` option (with an "all" reset entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusFilter {
+    All,
+    Only(QueueStatus),
+}
+impl StatusFilter {
+    const ALL: &'static [StatusFilter] = &[
+        StatusFilter::All,
+        StatusFilter::Only(QueueStatus::Pending),
+        StatusFilter::Only(QueueStatus::Ready),
+        StatusFilter::Only(QueueStatus::Editing),
+        StatusFilter::Only(QueueStatus::Exporting),
+        StatusFilter::Only(QueueStatus::Done),
+        StatusFilter::Only(QueueStatus::Error),
+    ];
+    fn from_opt(o: Option<QueueStatus>) -> Self {
+        o.map_or(StatusFilter::All, StatusFilter::Only)
+    }
+    fn to_opt(self) -> Option<QueueStatus> {
+        match self {
+            StatusFilter::All => None,
+            StatusFilter::Only(s) => Some(s),
+        }
+    }
+}
+impl std::fmt::Display for StatusFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StatusFilter::All => write!(f, "All statuses"),
+            StatusFilter::Only(s) => write!(f, "{}", status_label(*s)),
+        }
+    }
+}
+
+/// Highlight facet: show everything, only auto-captured highlights, or hide them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum HighlightFilter {
+    #[default]
+    All,
+    Only,
+    Hide,
+}
+impl HighlightFilter {
+    const ALL: &'static [HighlightFilter] = &[
+        HighlightFilter::All,
+        HighlightFilter::Only,
+        HighlightFilter::Hide,
+    ];
+    fn from_hidden(hidden: bool) -> Self {
+        if hidden {
+            HighlightFilter::Hide
+        } else {
+            HighlightFilter::All
+        }
+    }
+}
+impl std::fmt::Display for HighlightFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            HighlightFilter::All => "All clips",
+            HighlightFilter::Only => "Only highlights",
+            HighlightFilter::Hide => "Hide highlights",
+        };
+        write!(f, "{s}")
+    }
+}
+
+/// The live queue filter, pinned above the queue list. Transient (not persisted); `highlights` is
+/// seeded from `config.hide_highlights` and kept in sync with that persisted default.
+#[derive(Debug, Clone, Default)]
+struct QueueFilter {
+    search: String,
+    status: Option<QueueStatus>,
+    game: Option<String>,
+    tag: Option<String>,
+    highlights: HighlightFilter,
+}
+impl QueueFilter {
+    /// Whether `item` passes every active facet. `is_highlight` is whether the clip is an
+    /// auto-captured highlight (the caller computes it from the media cache).
+    fn matches(&self, item: &QueueItem, is_highlight: bool) -> bool {
+        let tag_hit = || {
+            self.tag
+                .as_ref()
+                .is_some_and(|t| item.tags.as_ref().is_some_and(|ts| ts.contains(t)))
+        };
+        // Dismissed clips stay hidden unless the tag filter targets them (so you can find/restore a
+        // dismissed clip by picking its tag).
+        if item_dismissed(item) && !tag_hit() {
+            return false;
+        }
+        let highlight_ok = match self.highlights {
+            HighlightFilter::All => true,
+            HighlightFilter::Only => is_highlight,
+            HighlightFilter::Hide => !is_highlight,
+        };
+        let search = self.search.trim().to_lowercase();
+        highlight_ok
+            && self.status.is_none_or(|s| item.status == s)
+            && self
+                .game
+                .as_deref()
+                .is_none_or(|g| item.source.as_deref() == Some(g))
+            && self.tag.as_ref().is_none_or(|_| tag_hit())
+            && (search.is_empty() || item.file_name.to_lowercase().contains(&search))
+    }
+
+    /// Whether any facet deviates from the default (empty search + no status/game/tag + the
+    /// config-derived highlight default). Drives the "Clear filters" affordance and empty-state copy.
+    fn is_active(&self, default_highlights: HighlightFilter) -> bool {
+        !self.search.trim().is_empty()
+            || self.status.is_some()
+            || self.game.is_some()
+            || self.tag.is_some()
+            || self.highlights != default_highlights
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum View {
@@ -241,7 +373,7 @@ struct App {
     media_cache_dirty: bool,
     selected_id: Option<String>,
     view: View,
-    tag_filter: Option<String>,
+    filter: QueueFilter,
     presets: host::CapturePresets,
     watcher: Option<host::Watcher>,
     editor: Option<Editor>,
@@ -339,6 +471,11 @@ enum Message {
     Deleted(String, Result<(), String>),
     Dismiss(String),
     SetTagFilter(Option<String>),
+    FilterSearch(String),
+    SetStatusFilter(Option<QueueStatus>),
+    SetGameFilter(Option<String>),
+    SetHighlightFilter(HighlightFilter),
+    ClearFilters,
     PickFolder(PickPurpose),
     FolderPicked(PickPurpose, Option<String>),
     RemoveFolder(String),
@@ -382,7 +519,9 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f).await.expect("blocking task panicked")
+    tokio::task::spawn_blocking(f)
+        .await
+        .expect("blocking task panicked")
 }
 
 impl App {
@@ -394,6 +533,10 @@ impl App {
         let media_cache = host::load_media_cache();
         let watcher = host::start_watch(&config.watched_folders, &config.video_extensions);
 
+        let filter = QueueFilter {
+            highlights: HighlightFilter::from_hidden(config.hide_highlights),
+            ..Default::default()
+        };
         let app = App {
             config,
             items: Vec::new(),
@@ -403,7 +546,7 @@ impl App {
             media_cache_dirty: false,
             selected_id: None,
             view: View::Queue,
-            tag_filter: None,
+            filter,
             presets: host::CapturePresets::default(),
             watcher,
             editor: None,
@@ -421,11 +564,13 @@ impl App {
 
         let folders = app.config.watched_folders.clone();
         let exts = app.config.video_extensions.clone();
-        let scan = Task::perform(blocking(move || host::scan_folders(&folders, &exts)), Message::Scanned);
-        let presets = Task::perform(
-            blocking(host::detect_capture_presets),
-            |p| Message::PresetsDetected(p.obs, p.nvidia_share),
+        let scan = Task::perform(
+            blocking(move || host::scan_folders(&folders, &exts)),
+            Message::Scanned,
         );
+        let presets = Task::perform(blocking(host::detect_capture_presets), |p| {
+            Message::PresetsDetected(p.obs, p.nvidia_share)
+        });
         (app, Task::batch([scan, presets]))
     }
 
@@ -437,7 +582,11 @@ impl App {
         let modal = self.rename.is_some()
             || self.delete_confirm.is_some()
             || self.delete_error.is_some()
-            || self.editor.as_ref().map(|e| e.overwrite_target.is_some() || e.after_prompt).unwrap_or(false);
+            || self
+                .editor
+                .as_ref()
+                .map(|e| e.overwrite_target.is_some() || e.after_prompt)
+                .unwrap_or(false);
         if self.editor.is_some() && !modal {
             subs.push(iced::event::listen_with(editor_key_event));
         }
@@ -452,7 +601,12 @@ impl App {
             subs.push(iced::event::listen_with(fullscreen_escape_event));
         }
         // While playing, add a fast tick at the preview frame rate to pull streamed frames.
-        if let Some(player) = self.editor.as_ref().filter(|e| e.playing).and_then(|e| e.player.as_ref()) {
+        if let Some(player) = self
+            .editor
+            .as_ref()
+            .filter(|e| e.playing)
+            .and_then(|e| e.player.as_ref())
+        {
             let dt = Duration::from_secs_f64(1.0 / player.fps().clamp(1.0, 60.0));
             subs.push(iced::time::every(dt).map(|_| Message::PlaybackTick));
         }
@@ -465,14 +619,23 @@ impl App {
 
     fn save_config_task(&self) -> Task<Message> {
         let cfg = self.config.clone();
-        Task::perform(blocking(move || { let _ = host::save_config(&cfg); }), |_| Message::Ignore)
+        Task::perform(
+            blocking(move || {
+                let _ = host::save_config(&cfg);
+            }),
+            |_| Message::Ignore,
+        )
     }
 
     fn restart_watch_and_scan(&mut self) -> Task<Message> {
-        self.watcher = host::start_watch(&self.config.watched_folders, &self.config.video_extensions);
+        self.watcher =
+            host::start_watch(&self.config.watched_folders, &self.config.video_extensions);
         let folders = self.config.watched_folders.clone();
         let exts = self.config.video_extensions.clone();
-        Task::perform(blocking(move || host::scan_folders(&folders, &exts)), Message::Scanned)
+        Task::perform(
+            blocking(move || host::scan_folders(&folders, &exts)),
+            Message::Scanned,
+        )
     }
 
     fn persist_edit(&mut self, id: &str) {
@@ -520,22 +683,45 @@ impl App {
         // Stat the fresh files and pair each with its cached probe when unchanged; only misses are
         // probed (see `Message::MediaResolved`), so a full backlog isn't re-probed on every launch.
         let cache = self.media_cache.clone();
-        Task::perform(blocking(move || host::resolve_media(&fresh, &cache)), Message::MediaResolved)
+        Task::perform(
+            blocking(move || host::resolve_media(&fresh, &cache)),
+            Message::MediaResolved,
+        )
     }
 
     fn effective_output(&self, item: &QueueItem) -> OutputSettings {
         let mut out = self.config.output.clone();
         if let Some(o) = &item.output_override {
-            if let Some(v) = o.quality_mode { out.quality_mode = v; }
-            if let Some(v) = o.quality_preset { out.quality_preset = v; }
-            if let Some(v) = o.crf { out.crf = v; }
-            if let Some(v) = o.video_bitrate_kbps { out.video_bitrate_kbps = v; }
-            if let Some(v) = &o.encoder_preset { out.encoder_preset = v.clone(); }
-            if let Some(v) = o.video_codec { out.video_codec = v; }
-            if let Some(v) = o.container { out.container = v; }
-            if let Some(v) = o.fps { out.fps = v; }
-            if let Some(v) = o.max_height { out.max_height = v; }
-            if let Some(v) = o.audio_bitrate_kbps { out.audio_bitrate_kbps = v; }
+            if let Some(v) = o.quality_mode {
+                out.quality_mode = v;
+            }
+            if let Some(v) = o.quality_preset {
+                out.quality_preset = v;
+            }
+            if let Some(v) = o.crf {
+                out.crf = v;
+            }
+            if let Some(v) = o.video_bitrate_kbps {
+                out.video_bitrate_kbps = v;
+            }
+            if let Some(v) = &o.encoder_preset {
+                out.encoder_preset = v.clone();
+            }
+            if let Some(v) = o.video_codec {
+                out.video_codec = v;
+            }
+            if let Some(v) = o.container {
+                out.container = v;
+            }
+            if let Some(v) = o.fps {
+                out.fps = v;
+            }
+            if let Some(v) = o.max_height {
+                out.max_height = v;
+            }
+            if let Some(v) = o.audio_bitrate_kbps {
+                out.audio_bitrate_kbps = v;
+            }
         }
         out
     }
@@ -559,7 +745,11 @@ impl App {
             return;
         }
         if let Some(ed) = &mut self.editor {
-            let max = ed.media.as_ref().map(|m| m.duration_sec).unwrap_or(ed.trim_end);
+            let max = ed
+                .media
+                .as_ref()
+                .map(|m| m.duration_sec)
+                .unwrap_or(ed.trim_end);
             ed.trim_end = secs.clamp(ed.trim_start + 0.1, max.max(ed.trim_start + 0.1));
             sync_inout_inputs(ed);
         }
@@ -569,7 +759,9 @@ impl App {
     /// Whether the clip at `path` is an auto-captured highlight, per its cached `encoder` tag (NVIDIA
     /// App tags highlights `"NVIDIA APP (Highlights)"`). Used to hide auto-saves from the queue.
     fn is_highlight(&self, path: &str) -> bool {
-        self.media_cache.get(path).is_some_and(|c| qlipq_core::media::is_auto_highlight(c.media.encoder.as_deref()))
+        self.media_cache
+            .get(path)
+            .is_some_and(|c| qlipq_core::media::is_auto_highlight(c.media.encoder.as_deref()))
     }
 
     fn commit_spec(&mut self) {
@@ -589,17 +781,28 @@ impl App {
             Message::ShowQueue => self.view = View::Queue,
             Message::ShowSettings => self.view = View::Settings,
             Message::ToggleFullscreen => self.fullscreen = !self.fullscreen,
-            Message::PreviewZoom(delta) => self.preview_scale = (self.preview_scale + delta).clamp(0.5, 2.5),
+            Message::PreviewZoom(delta) => {
+                self.preview_scale = (self.preview_scale + delta).clamp(0.5, 2.5)
+            }
             Message::OpenRepo => host::open_external("https://github.com/qcksys/qlipq"),
             Message::RescanAll => {
                 let folders = self.config.watched_folders.clone();
                 let exts = self.config.video_extensions.clone();
-                return Task::perform(blocking(move || host::scan_folders(&folders, &exts)), Message::Scanned);
+                return Task::perform(
+                    blocking(move || host::scan_folders(&folders, &exts)),
+                    Message::Scanned,
+                );
             }
             Message::Scanned(paths) => return self.add_paths(paths),
             Message::MediaResolved(list) => {
                 let mut to_probe: Vec<(String, i64, i64)> = Vec::new();
-                for host::MediaResolution { path, size, modified_ms, cached } in list {
+                for host::MediaResolution {
+                    path,
+                    size,
+                    modified_ms,
+                    cached,
+                } in list
+                {
                     if let Some(item) = self.items.iter_mut().find(|i| i.path == path) {
                         item.file_size_bytes = Some(size);
                         item.file_modified_at = Some(iso::from_unix_ms(modified_ms));
@@ -633,7 +836,12 @@ impl App {
                     )
                 }));
             }
-            Message::MediaProbedBg { path, size, modified_ms, result } => {
+            Message::MediaProbedBg {
+                path,
+                size,
+                modified_ms,
+                result,
+            } => {
                 // Ignore a probe whose recording was deleted while it was in flight (probes queue
                 // behind PROBE_SEM) — caching it would re-persist app data for a file that's gone.
                 if let Ok((media, is_hdr)) = result {
@@ -643,7 +851,12 @@ impl App {
                         }
                         self.media_cache.insert(
                             path,
-                            host::CachedMedia { size_bytes: size, modified_ms, media, is_hdr },
+                            host::CachedMedia {
+                                size_bytes: size,
+                                modified_ms,
+                                media,
+                                is_hdr,
+                            },
                         );
                         // Debounced write on the tick — a first-run backlog probes many files at once.
                         self.media_cache_dirty = true;
@@ -651,7 +864,10 @@ impl App {
                 }
             }
             Message::PresetsDetected(obs, nvidia) => {
-                self.presets = host::CapturePresets { obs, nvidia_share: nvidia };
+                self.presets = host::CapturePresets {
+                    obs,
+                    nvidia_share: nvidia,
+                };
             }
             Message::SelectItem(id) => return self.select_item(id),
             Message::MediaProbed(id, result) => {
@@ -664,7 +880,10 @@ impl App {
                     return Task::none();
                 }
                 // Autoplay the freshly opened clip when enabled; otherwise show a paused first frame.
-                let ready = self.editor.as_ref().map_or(false, |e| e.load_error.is_none() && e.media.is_some());
+                let ready = self
+                    .editor
+                    .as_ref()
+                    .map_or(false, |e| e.load_error.is_none() && e.media.is_some());
                 if self.config.autoplay && ready {
                     return self.play_from_current();
                 }
@@ -704,7 +923,11 @@ impl App {
                     ed.editing_time = false;
                     sync_time_input(ed);
                     if playing {
-                        seeked = ed.player.as_ref().map(|p| p.try_seek(ed.current_time)).unwrap_or(false);
+                        seeked = ed
+                            .player
+                            .as_ref()
+                            .map(|p| p.try_seek(ed.current_time))
+                            .unwrap_or(false);
                     }
                 }
                 if playing && !seeked {
@@ -721,7 +944,10 @@ impl App {
                 }
             }
             Message::TimestampSubmit => {
-                let parsed = self.editor.as_ref().and_then(|ed| parse_timestamp(&ed.time_input, ed_fps(ed)));
+                let parsed = self
+                    .editor
+                    .as_ref()
+                    .and_then(|ed| parse_timestamp(&ed.time_input, ed_fps(ed)));
                 if let Some(ed) = &mut self.editor {
                     ed.editing_time = false;
                 }
@@ -738,16 +964,27 @@ impl App {
                 // Delete the highlighted clip: plain Delete asks first (Enter confirms), Shift+Delete
                 // removes it immediately. A focused text field captures the key first, so this only
                 // fires when the editor itself has focus.
-                if matches!(key, iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete)) {
-                    let Some(id) = self.selected_id.clone() else { return Task::none() };
+                if matches!(
+                    key,
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete)
+                ) {
+                    let Some(id) = self.selected_id.clone() else {
+                        return Task::none();
+                    };
                     if mods.shift() {
                         return self.delete_now(id);
                     }
                     self.delete_confirm = Some(id);
                     return Task::none();
                 }
-                let snap = self.editor.as_ref().and_then(|e| e.media.as_ref()).map(|m| (m.fps.max(1.0), m.duration_sec));
-                let Some((fps, dur)) = snap else { return Task::none() };
+                let snap = self
+                    .editor
+                    .as_ref()
+                    .and_then(|e| e.media.as_ref())
+                    .map(|m| (m.fps.max(1.0), m.duration_sec));
+                let Some((fps, dur)) = snap else {
+                    return Task::none();
+                };
                 let kb = &self.config.keybinds;
                 let action = if binding_matches(&kb.play_pause, &key, mods) {
                     Some(Message::TogglePlay)
@@ -803,7 +1040,11 @@ impl App {
                     if playing {
                         // Seek the warm decoder in-process; if it can't (no live decode thread) it
                         // reports false and we restart below instead.
-                        seeked = ed.player.as_ref().map(|p| p.try_seek(ed.current_time)).unwrap_or(false);
+                        seeked = ed
+                            .player
+                            .as_ref()
+                            .map(|p| p.try_seek(ed.current_time))
+                            .unwrap_or(false);
                     }
                 }
                 if playing && !seeked {
@@ -851,7 +1092,10 @@ impl App {
                 }
             }
             Message::InSubmit => {
-                let parsed = self.editor.as_ref().and_then(|e| parse_timestamp(&e.in_input, ed_fps(e)));
+                let parsed = self
+                    .editor
+                    .as_ref()
+                    .and_then(|e| parse_timestamp(&e.in_input, ed_fps(e)));
                 match parsed {
                     Some(v) => self.apply_trim_in(v),
                     None => {
@@ -867,7 +1111,10 @@ impl App {
                 }
             }
             Message::OutSubmit => {
-                let parsed = self.editor.as_ref().and_then(|e| parse_timestamp(&e.out_input, ed_fps(e)));
+                let parsed = self
+                    .editor
+                    .as_ref()
+                    .and_then(|e| parse_timestamp(&e.out_input, ed_fps(e)));
                 match parsed {
                     Some(v) => self.apply_trim_out(v),
                     None => {
@@ -883,7 +1130,12 @@ impl App {
                     if on {
                         if let Some(m) = &ed.media {
                             if ed.crop.width <= 0 {
-                                ed.crop = CropSpec { x: 0, y: 0, width: m.width, height: m.height };
+                                ed.crop = CropSpec {
+                                    x: 0,
+                                    y: 0,
+                                    width: m.width,
+                                    height: m.height,
+                                };
                             }
                         }
                     }
@@ -933,8 +1185,12 @@ impl App {
             }
             Message::AudioVolumeCommit => self.commit_spec(),
             Message::ToggleOverride(on) => return self.toggle_override(on),
-            Message::OverrideQm(c) => return self.patch_override(|o| o.quality_mode = Some(c.to_core())),
-            Message::OverrideQp(c) => return self.patch_override(|o| o.quality_preset = Some(c.to_core())),
+            Message::OverrideQm(c) => {
+                return self.patch_override(|o| o.quality_mode = Some(c.to_core()))
+            }
+            Message::OverrideQp(c) => {
+                return self.patch_override(|o| o.quality_preset = Some(c.to_core()))
+            }
             Message::OverrideCrf(s) => {
                 if let Ok(v) = s.parse::<i64>() {
                     return self.patch_override(move |o| o.crf = Some(v.clamp(0, 51)));
@@ -1036,7 +1292,8 @@ impl App {
                             source: item.source.clone(),
                             index: None,
                         };
-                        let suggested = rename::build_renamed_file_name(&self.config.naming_template, &vars);
+                        let suggested =
+                            rename::build_renamed_file_name(&self.config.naming_template, &vars);
                         r.value = rename::split_file_name(&suggested).0;
                     }
                 }
@@ -1071,7 +1328,12 @@ impl App {
                     // Deletion failed even after we released our handles — usually another app (OBS
                     // still recording, a media player) holds the file. Tell the user instead of
                     // silently leaving the clip in the queue.
-                    let name = self.items.iter().find(|i| i.id == id).map(|i| i.file_name.clone()).unwrap_or_default();
+                    let name = self
+                        .items
+                        .iter()
+                        .find(|i| i.id == id)
+                        .map(|i| i.file_name.clone())
+                        .unwrap_or_default();
                     self.delete_error = Some(format!("Couldn't delete {name}.\n\n{e}"));
                 }
             },
@@ -1090,7 +1352,17 @@ impl App {
                 }
                 self.persist_edit(&id);
             }
-            Message::SetTagFilter(t) => self.tag_filter = t,
+            Message::SetTagFilter(t) => self.filter.tag = t,
+            Message::FilterSearch(s) => self.filter.search = s,
+            Message::SetStatusFilter(s) => self.filter.status = s,
+            Message::SetGameFilter(g) => self.filter.game = g,
+            Message::SetHighlightFilter(h) => self.filter.highlights = h,
+            Message::ClearFilters => {
+                self.filter = QueueFilter {
+                    highlights: HighlightFilter::from_hidden(self.config.hide_highlights),
+                    ..Default::default()
+                };
+            }
             Message::PickFolder(purpose) => {
                 return Task::perform(
                     async {
@@ -1102,7 +1374,9 @@ impl App {
                     move |opt| Message::FolderPicked(purpose, opt),
                 );
             }
-            Message::FolderPicked(purpose, Some(path)) => return self.on_folder_picked(purpose, path),
+            Message::FolderPicked(purpose, Some(path)) => {
+                return self.on_folder_picked(purpose, path)
+            }
             Message::FolderPicked(_, None) => {}
             Message::RemoveFolder(folder) => {
                 self.config.watched_folders.retain(|f| f != &folder);
@@ -1111,21 +1385,64 @@ impl App {
             Message::Reprocess(folder) => {
                 let exts = self.config.video_extensions.clone();
                 self.view = View::Queue;
-                return Task::perform(blocking(move || host::scan_folders(&[folder], &exts)), Message::Scanned);
+                return Task::perform(
+                    blocking(move || host::scan_folders(&[folder], &exts)),
+                    Message::Scanned,
+                );
             }
             Message::AddPreset(folder) => return self.add_watched_folder(folder),
-            Message::OutputFolderChanged(s) => { self.config.output_folder = s; return self.save_config_task(); }
-            Message::NamingChanged(s) => { self.config.naming_template = s; return self.save_config_task(); }
-            Message::SetQm(c) => { self.config.output.quality_mode = c.to_core(); return self.save_config_task(); }
-            Message::SetQp(c) => { self.config.output.quality_preset = c.to_core(); return self.save_config_task(); }
-            Message::SetCrf(s) => { if let Ok(v) = s.parse::<i64>() { self.config.output.crf = v.clamp(0, 51); return self.save_config_task(); } }
-            Message::SetBitrate(s) => { if let Ok(v) = s.parse::<i64>() { self.config.output.video_bitrate_kbps = v.max(100); return self.save_config_task(); } }
-            Message::SetEncoder(s) => { self.config.output.encoder_preset = s; return self.save_config_task(); }
-            Message::SetCodec(c) => { self.config.output.video_codec = c.to_core(); return self.save_config_task(); }
-            Message::SetContainer(c) => { self.config.output.container = c.to_core(); return self.save_config_task(); }
-            Message::SetFps(c) => { self.config.output.fps = c.to_core(); return self.save_config_task(); }
-            Message::SetRes(c) => { self.config.output.max_height = c.to_core(); return self.save_config_task(); }
-            Message::SetAudioKbps(c) => { self.config.output.audio_bitrate_kbps = c.to_core(); return self.save_config_task(); }
+            Message::OutputFolderChanged(s) => {
+                self.config.output_folder = s;
+                return self.save_config_task();
+            }
+            Message::NamingChanged(s) => {
+                self.config.naming_template = s;
+                return self.save_config_task();
+            }
+            Message::SetQm(c) => {
+                self.config.output.quality_mode = c.to_core();
+                return self.save_config_task();
+            }
+            Message::SetQp(c) => {
+                self.config.output.quality_preset = c.to_core();
+                return self.save_config_task();
+            }
+            Message::SetCrf(s) => {
+                if let Ok(v) = s.parse::<i64>() {
+                    self.config.output.crf = v.clamp(0, 51);
+                    return self.save_config_task();
+                }
+            }
+            Message::SetBitrate(s) => {
+                if let Ok(v) = s.parse::<i64>() {
+                    self.config.output.video_bitrate_kbps = v.max(100);
+                    return self.save_config_task();
+                }
+            }
+            Message::SetEncoder(s) => {
+                self.config.output.encoder_preset = s;
+                return self.save_config_task();
+            }
+            Message::SetCodec(c) => {
+                self.config.output.video_codec = c.to_core();
+                return self.save_config_task();
+            }
+            Message::SetContainer(c) => {
+                self.config.output.container = c.to_core();
+                return self.save_config_task();
+            }
+            Message::SetFps(c) => {
+                self.config.output.fps = c.to_core();
+                return self.save_config_task();
+            }
+            Message::SetRes(c) => {
+                self.config.output.max_height = c.to_core();
+                return self.save_config_task();
+            }
+            Message::SetAudioKbps(c) => {
+                self.config.output.audio_bitrate_kbps = c.to_core();
+                return self.save_config_task();
+            }
             Message::SetHdrPreviewGamma(v) => self.config.hdr_preview_gamma = v.clamp(1.0, 3.0),
             Message::ApplyHdrPreviewGamma => {
                 // Rebuild the scrub graph with the new gamma, persist, and refresh what's on screen
@@ -1163,17 +1480,45 @@ impl App {
                 };
                 return Task::batch([save, refresh]);
             }
-            Message::ToggleAutoplay(on) => { self.config.autoplay = on; return self.save_config_task(); }
-            Message::ToggleDebug(on) => { self.config.debug = on; return self.save_config_task(); }
-            Message::ToggleHideHighlights(on) => { self.config.hide_highlights = on; return self.save_config_task(); }
+            Message::ToggleAutoplay(on) => {
+                self.config.autoplay = on;
+                return self.save_config_task();
+            }
+            Message::ToggleDebug(on) => {
+                self.config.debug = on;
+                return self.save_config_task();
+            }
+            Message::ToggleHideHighlights(on) => {
+                self.config.hide_highlights = on;
+                self.filter.highlights = HighlightFilter::from_hidden(on);
+                return self.save_config_task();
+            }
             Message::CopyText(s) => return iced::clipboard::write(s),
-            Message::SetAfter(c) => { self.config.after_export.action = c.to_core(); return self.save_config_task(); }
-            Message::MoveFolderChanged(s) => { self.config.after_export.move_folder = s; return self.save_config_task(); }
-            Message::RenamePrefixChanged(s) => { self.config.after_export.rename_prefix = s; return self.save_config_task(); }
-            Message::RenameSuffixChanged(s) => { self.config.after_export.rename_suffix = s; return self.save_config_task(); }
+            Message::SetAfter(c) => {
+                self.config.after_export.action = c.to_core();
+                return self.save_config_task();
+            }
+            Message::MoveFolderChanged(s) => {
+                self.config.after_export.move_folder = s;
+                return self.save_config_task();
+            }
+            Message::RenamePrefixChanged(s) => {
+                self.config.after_export.rename_prefix = s;
+                return self.save_config_task();
+            }
+            Message::RenameSuffixChanged(s) => {
+                self.config.after_export.rename_suffix = s;
+                return self.save_config_task();
+            }
             Message::OpenConfigFile => {
                 let cfg = self.config.clone();
-                return Task::perform(blocking(move || { let _ = host::save_config(&cfg); host::reveal(&host::config_path().to_string_lossy()); }), |_| Message::Ignore);
+                return Task::perform(
+                    blocking(move || {
+                        let _ = host::save_config(&cfg);
+                        host::reveal(&host::config_path().to_string_lossy());
+                    }),
+                    |_| Message::Ignore,
+                );
             }
             Message::Ignore => {}
         }
@@ -1211,9 +1556,18 @@ impl App {
     /// from the channel backpressure: the decoder produces at roughly the rate we consume).
     fn on_playback_tick(&mut self) {
         let Some(ed) = &mut self.editor else { return };
-        let polled = ed.player.as_ref().map(|p| (p.poll(), p.dimensions(), p.fps(), p.position()));
-        let Some((frame, (w, h), fps, position)) = polled else { return };
-        let dur = ed.media.as_ref().map(|m| m.duration_sec).filter(|d| *d > 0.0);
+        let polled = ed
+            .player
+            .as_ref()
+            .map(|p| (p.poll(), p.dimensions(), p.fps(), p.position()));
+        let Some((frame, (w, h), fps, position)) = polled else {
+            return;
+        };
+        let dur = ed
+            .media
+            .as_ref()
+            .map(|m| m.duration_sec)
+            .filter(|d| *d > 0.0);
 
         let advance = match frame {
             host::FramePoll::Frame(bytes) => {
@@ -1262,7 +1616,11 @@ impl App {
                 ed.playing = false;
                 ed.player = None;
             } else if !ed.awaiting_loop {
-                let looped = ed.player.as_ref().map(|p| p.try_seek(ed.trim_start)).unwrap_or(false);
+                let looped = ed
+                    .player
+                    .as_ref()
+                    .map(|p| p.try_seek(ed.trim_start))
+                    .unwrap_or(false);
                 if looped {
                     ed.awaiting_loop = true;
                 } else {
@@ -1282,10 +1640,18 @@ impl App {
     /// (`hdr_preview_gamma`, `preview_max_height`). Used when a preview-affecting setting changes so
     /// the next extracted frame reflects it.
     fn reopen_scrubber(&mut self) {
-        let Some(ed) = self.editor.as_ref() else { return };
-        let Some(media) = ed.media.as_ref() else { return };
+        let Some(ed) = self.editor.as_ref() else {
+            return;
+        };
+        let Some(media) = ed.media.as_ref() else {
+            return;
+        };
         let (mw, mh, is_hdr, id) = (media.width, media.height, ed.is_hdr, ed.item_id.clone());
-        let path = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone());
+        let path = self
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.path.clone());
         let gamma = self.config.hdr_preview_gamma;
         let max_h = self.config.preview_max_height;
         let scrubber = path
@@ -1304,19 +1670,26 @@ impl App {
     /// extraction is already in flight, just mark the frame dirty and re-request on completion.
     fn request_frame(&mut self) -> Task<Message> {
         let snap = match self.editor.as_ref() {
-            Some(ed) if !ed.playing && ed.media.is_some() => {
-                Some((ed.extracting, ed.current_time, ed.item_id.clone(), ed.scrubber.clone()))
-            }
+            Some(ed) if !ed.playing && ed.media.is_some() => Some((
+                ed.extracting,
+                ed.current_time,
+                ed.item_id.clone(),
+                ed.scrubber.clone(),
+            )),
             _ => None,
         };
-        let Some((extracting, sec, id, scrubber)) = snap else { return Task::none() };
+        let Some((extracting, sec, id, scrubber)) = snap else {
+            return Task::none();
+        };
         if extracting {
             if let Some(ed) = &mut self.editor {
                 ed.frame_dirty = true;
             }
             return Task::none();
         }
-        let Some(scrubber) = scrubber else { return Task::none() };
+        let Some(scrubber) = scrubber else {
+            return Task::none();
+        };
         if let Some(ed) = &mut self.editor {
             ed.extracting = true;
             ed.frame_dirty = false;
@@ -1336,23 +1709,60 @@ impl App {
             Some(ed) if ed.media.is_some() => {
                 let m = ed.media.as_ref().unwrap();
                 // Enabled tracks (audio-relative index + gain) drive the preview's monitor mixdown.
-                let audio_tracks: Vec<(i64, f64)> =
-                    ed.audio.iter().filter(|r| r.enabled).map(|r| (r.index, r.volume)).collect();
-                Some((ed.item_id.clone(), ed.current_time, m.width, m.height, m.fps, m.duration_sec, ed.is_hdr, audio_tracks, ed.trim_start, ed.trim_end))
+                let audio_tracks: Vec<(i64, f64)> = ed
+                    .audio
+                    .iter()
+                    .filter(|r| r.enabled)
+                    .map(|r| (r.index, r.volume))
+                    .collect();
+                Some((
+                    ed.item_id.clone(),
+                    ed.current_time,
+                    m.width,
+                    m.height,
+                    m.fps,
+                    m.duration_sec,
+                    ed.is_hdr,
+                    audio_tracks,
+                    ed.trim_start,
+                    ed.trim_end,
+                ))
             }
             _ => None,
         };
-        let Some((id, cur, mw, mh, mfps, _dur, is_hdr, audio_tracks, trim_start, trim_end)) = snap else { return Task::none() };
+        let Some((id, cur, mw, mh, mfps, _dur, is_hdr, audio_tracks, trim_start, trim_end)) = snap
+        else {
+            return Task::none();
+        };
         // Play only within the in/out window: (re)start at the in-point whenever the playhead sits
         // outside it (before the in-point, or at/after the out-point). `trim_end` is 0 until the media
         // loads, so guard on a real out-point before snapping.
-        let start = if trim_end > 0.0 && (cur < trim_start || cur >= trim_end) { trim_start } else { cur };
-        let Some(path) = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone()) else {
+        let start = if trim_end > 0.0 && (cur < trim_start || cur >= trim_end) {
+            trim_start
+        } else {
+            cur
+        };
+        let Some(path) = self
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.path.clone())
+        else {
             return Task::none();
         };
         let gamma = self.config.hdr_preview_gamma;
         let max_h = self.config.preview_max_height;
-        let player = start_player(&path, start, mw, mh, mfps, is_hdr, audio_tracks, gamma, max_h);
+        let player = start_player(
+            &path,
+            start,
+            mw,
+            mh,
+            mfps,
+            is_hdr,
+            audio_tracks,
+            gamma,
+            max_h,
+        );
         let started = player.is_some();
         if let Some(ed) = &mut self.editor {
             ed.current_time = start;
@@ -1361,7 +1771,11 @@ impl App {
             ed.frame_dirty = false;
             ed.awaiting_loop = false;
         }
-        if started { Task::none() } else { self.request_frame() }
+        if started {
+            Task::none()
+        } else {
+            self.request_frame()
+        }
     }
 
     fn select_item(&mut self, id: String) -> Task<Message> {
@@ -1376,7 +1790,12 @@ impl App {
             trim_start: 0.0,
             trim_end: 0.0,
             crop_enabled: false,
-            crop: CropSpec { x: 0, y: 0, width: 0, height: 0 },
+            crop: CropSpec {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             audio: Vec::new(),
             current_time: 0.0,
             time_input: format_timestamp(0.0, 30.0),
@@ -1402,7 +1821,9 @@ impl App {
             after_prompt: false,
         });
         let path = item.path.clone();
-        Task::perform(blocking(move || libav::probe(&path)), move |r| Message::MediaProbed(id.clone(), r))
+        Task::perform(blocking(move || libav::probe(&path)), move |r| {
+            Message::MediaProbed(id.clone(), r)
+        })
     }
 
     fn on_media_probed(&mut self, id: String, result: Result<(MediaInfo, bool), String>) {
@@ -1414,26 +1835,49 @@ impl App {
             Err(e) => ed.load_error = Some(e),
             Ok((media, is_hdr)) => {
                 ed.is_hdr = is_hdr;
-                let stored_edit = self.items.iter().find(|i| i.id == id).and_then(|i| i.edit.clone());
+                let stored_edit = self
+                    .items
+                    .iter()
+                    .find(|i| i.id == id)
+                    .and_then(|i| i.edit.clone());
                 if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
                     item.duration_sec = Some(media.duration_sec);
                 }
                 let spec = stored_edit.unwrap_or_else(|| EditSpec {
-                    trim: Some(TrimSpec { start_sec: 0.0, end_sec: media.duration_sec }),
+                    trim: Some(TrimSpec {
+                        start_sec: 0.0,
+                        end_sec: media.duration_sec,
+                    }),
                     crop: None,
-                    audio_tracks: qlipq_core::edit_spec::default_edit_spec(Some(&media)).audio_tracks,
+                    audio_tracks: qlipq_core::edit_spec::default_edit_spec(Some(&media))
+                        .audio_tracks,
                 });
                 // Clamp a persisted trim to the real duration (a stale edits.json or a shrunk file can
                 // hold end_sec > duration), so the out-point stays ≤ duration like the SetOut handler
                 // enforces — the playback stop/restart logic relies on that invariant.
                 let dur = media.duration_sec.max(0.0);
-                ed.trim_start = spec.trim.as_ref().map(|t| t.start_sec).unwrap_or(0.0).clamp(0.0, dur);
-                ed.trim_end = spec.trim.as_ref().map(|t| t.end_sec).unwrap_or(dur).clamp(ed.trim_start, dur);
+                ed.trim_start = spec
+                    .trim
+                    .as_ref()
+                    .map(|t| t.start_sec)
+                    .unwrap_or(0.0)
+                    .clamp(0.0, dur);
+                ed.trim_end = spec
+                    .trim
+                    .as_ref()
+                    .map(|t| t.end_sec)
+                    .unwrap_or(dur)
+                    .clamp(ed.trim_start, dur);
                 if let Some(c) = &spec.crop {
                     ed.crop_enabled = true;
                     ed.crop = c.clone();
                 } else {
-                    ed.crop = CropSpec { x: 0, y: 0, width: media.width, height: media.height };
+                    ed.crop = CropSpec {
+                        x: 0,
+                        y: 0,
+                        width: media.width,
+                        height: media.height,
+                    };
                 }
                 ed.audio = media
                     .audio_streams
@@ -1445,8 +1889,14 @@ impl App {
                             index: s.index,
                             label: audio_stream_label(s),
                             detail: format!("{} · {}ch", s.codec, s.channels),
-                            enabled: ts.map(|t| t.enabled).or(carried.map(|c| c.enabled)).unwrap_or(true),
-                            volume: ts.map(|t| t.volume).or(carried.map(|c| c.volume)).unwrap_or(1.0),
+                            enabled: ts
+                                .map(|t| t.enabled)
+                                .or(carried.map(|c| c.enabled))
+                                .unwrap_or(true),
+                            volume: ts
+                                .map(|t| t.volume)
+                                .or(carried.map(|c| c.volume))
+                                .unwrap_or(1.0),
                         }
                     })
                     .collect();
@@ -1457,7 +1907,11 @@ impl App {
                 ed.frame_dirty = true;
                 // Open the warm scrub decoder for this clip (synchronous, like `start_player`); it
                 // lives until the next selection drops this Editor.
-                let path = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone());
+                let path = self
+                    .items
+                    .iter()
+                    .find(|i| i.id == id)
+                    .map(|i| i.path.clone());
                 let gamma = self.config.hdr_preview_gamma;
                 let max_h = self.config.preview_max_height;
                 ed.scrubber = path
@@ -1474,7 +1928,9 @@ impl App {
     }
 
     fn toggle_override(&mut self, on: bool) -> Task<Message> {
-        let Some(id) = self.selected_id.clone() else { return Task::none() };
+        let Some(id) = self.selected_id.clone() else {
+            return Task::none();
+        };
         let base = self.config.output.clone();
         if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
             item.output_override = on.then(|| OutputOverride {
@@ -1490,9 +1946,13 @@ impl App {
     }
 
     fn patch_override(&mut self, patch: impl FnOnce(&mut OutputOverride)) -> Task<Message> {
-        let Some(id) = self.selected_id.clone() else { return Task::none() };
+        let Some(id) = self.selected_id.clone() else {
+            return Task::none();
+        };
         if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
-            let o = item.output_override.get_or_insert_with(OutputOverride::default);
+            let o = item
+                .output_override
+                .get_or_insert_with(OutputOverride::default);
             patch(o);
         }
         self.persist_edit(&id);
@@ -1500,11 +1960,21 @@ impl App {
     }
 
     fn start_export(&mut self, _force: bool) -> Task<Message> {
-        let Some(id) = self.selected_id.clone() else { return Task::none() };
-        let Some(item) = self.items.iter().find(|i| i.id == id) else { return Task::none() };
-        let Some(ed) = &self.editor else { return Task::none() };
-        let Some(media) = &ed.media else { return Task::none() };
-        if qlipq_core::edit_spec::validate_edit_spec(&editor_spec(ed), media).is_some() || self.config.output_folder.is_empty() {
+        let Some(id) = self.selected_id.clone() else {
+            return Task::none();
+        };
+        let Some(item) = self.items.iter().find(|i| i.id == id) else {
+            return Task::none();
+        };
+        let Some(ed) = &self.editor else {
+            return Task::none();
+        };
+        let Some(media) = &ed.media else {
+            return Task::none();
+        };
+        if qlipq_core::edit_spec::validate_edit_spec(&editor_spec(ed), media).is_some()
+            || self.config.output_folder.is_empty()
+        {
             return Task::none();
         }
         let output = self.effective_output(item);
@@ -1523,16 +1993,28 @@ impl App {
     }
 
     fn run_export_to(&mut self, output_path: String) -> Task<Message> {
-        let Some(id) = self.selected_id.clone() else { return Task::none() };
-        let Some(ed) = &self.editor else { return Task::none() };
-        let Some(media) = ed.media.clone() else { return Task::none() };
+        let Some(id) = self.selected_id.clone() else {
+            return Task::none();
+        };
+        let Some(ed) = &self.editor else {
+            return Task::none();
+        };
+        let Some(media) = ed.media.clone() else {
+            return Task::none();
+        };
         let is_hdr = ed.is_hdr;
-        let Some(item) = self.items.iter().find(|i| i.id == id).cloned() else { return Task::none() };
+        let Some(item) = self.items.iter().find(|i| i.id == id).cloned() else {
+            return Task::none();
+        };
 
         let output = self.effective_output(&item);
         let spec = editor_spec(ed);
         let total = qlipq_core::edit_spec::effective_duration(&spec, &media);
-        let metadata = item.source.clone().map(|s| vec![("game".to_string(), s)]).unwrap_or_default();
+        let metadata = item
+            .source
+            .clone()
+            .map(|s| vec![("game".to_string(), s)])
+            .unwrap_or_default();
 
         self.export_target = Some(output_path.clone());
 
@@ -1552,7 +2034,19 @@ impl App {
             item.error = None;
         }
 
-        self.spawn_export(id, item.path.clone(), output_path, spec, output, media, total, metadata, is_hdr, progress, cancel)
+        self.spawn_export(
+            id,
+            item.path.clone(),
+            output_path,
+            spec,
+            output,
+            media,
+            total,
+            metadata,
+            is_hdr,
+            progress,
+            cancel,
+        )
     }
 
     /// In-process export: decode → edits → hardware encode → mux ([`export::run_export`]). No CLI.
@@ -1573,7 +2067,17 @@ impl App {
     ) -> Task<Message> {
         Task::perform(
             blocking(move || {
-                export::run_export(&input, &output_path, &spec, &output, &media, is_hdr, &metadata, progress, cancel)
+                export::run_export(
+                    &input,
+                    &output_path,
+                    &spec,
+                    &output,
+                    &media,
+                    is_hdr,
+                    &metadata,
+                    progress,
+                    cancel,
+                )
             }),
             move |result| Message::ExportFinished(id.clone(), result),
         )
@@ -1584,7 +2088,11 @@ impl App {
             if ed.item_id == id {
                 ed.exporting = false;
                 ed.export_cancel = None;
-                ed.progress_display = if result.is_ok() { 1.0 } else { ed.progress_display };
+                ed.progress_display = if result.is_ok() {
+                    1.0
+                } else {
+                    ed.progress_display
+                };
             }
         }
         let export_path = self.export_target.take();
@@ -1624,12 +2132,21 @@ impl App {
     }
 
     fn run_after_action(&mut self, action: AfterExportAction) -> Task<Message> {
-        let Some(id) = self.selected_id.clone() else { return Task::none() };
-        let Some(item) = self.items.iter().find(|i| i.id == id).cloned() else { return Task::none() };
+        let Some(id) = self.selected_id.clone() else {
+            return Task::none();
+        };
+        let Some(item) = self.items.iter().find(|i| i.id == id).cloned() else {
+            return Task::none();
+        };
         match action {
             AfterExportAction::Delete => {
                 let path = item.path.clone();
-                Task::perform(blocking(move || { let _ = host::delete_file(&path); }), |_| Message::Ignore)
+                Task::perform(
+                    blocking(move || {
+                        let _ = host::delete_file(&path);
+                    }),
+                    |_| Message::Ignore,
+                )
             }
             AfterExportAction::Move => {
                 let folder = self.config.after_export.move_folder.clone();
@@ -1637,16 +2154,27 @@ impl App {
                 if folder.is_empty() {
                     Task::perform(
                         async move {
-                            rfd::AsyncFileDialog::new().pick_folder().await.map(|h| host::to_posix(&h.path().to_string_lossy()))
+                            rfd::AsyncFileDialog::new()
+                                .pick_folder()
+                                .await
+                                .map(|h| host::to_posix(&h.path().to_string_lossy()))
                         },
                         move |opt| match opt {
-                            Some(folder) => Message::FolderPicked(PickPurpose::MoveFolder, Some(format!("move::{path}::{folder}"))),
+                            Some(folder) => Message::FolderPicked(
+                                PickPurpose::MoveFolder,
+                                Some(format!("move::{path}::{folder}")),
+                            ),
                             None => Message::Ignore,
                         },
                     )
                 } else {
                     let dest = host::join_path(&folder, &host::base_name(&path));
-                    Task::perform(blocking(move || { let _ = host::rename_file(&path, &dest); }), |_| Message::Ignore)
+                    Task::perform(
+                        blocking(move || {
+                            let _ = host::rename_file(&path, &dest);
+                        }),
+                        |_| Message::Ignore,
+                    )
                 }
             }
             AfterExportAction::Rename => {
@@ -1656,31 +2184,54 @@ impl App {
                     self.config.after_export.rename_prefix,
                     name,
                     self.config.after_export.rename_suffix,
-                    if ext.is_empty() { String::new() } else { format!(".{ext}") }
+                    if ext.is_empty() {
+                        String::new()
+                    } else {
+                        format!(".{ext}")
+                    }
                 );
                 let from = item.path.clone();
                 let to = host::join_path(&host::dir_name(&item.path), &renamed);
-                Task::perform(blocking(move || { let _ = host::rename_file(&from, &to); }), |_| Message::Ignore)
+                Task::perform(
+                    blocking(move || {
+                        let _ = host::rename_file(&from, &to);
+                    }),
+                    |_| Message::Ignore,
+                )
             }
             AfterExportAction::Nothing | AfterExportAction::Prompt => Task::none(),
         }
     }
 
     fn confirm_rename(&mut self) -> Task<Message> {
-        let Some(r) = self.rename.take() else { return Task::none() };
-        let Some(item) = self.items.iter().find(|i| i.id == r.id) else { return Task::none() };
+        let Some(r) = self.rename.take() else {
+            return Task::none();
+        };
+        let Some(item) = self.items.iter().find(|i| i.id == r.id) else {
+            return Task::none();
+        };
         let (_, ext) = rename::split_file_name(&item.file_name);
         let trimmed = r.value.trim().to_string();
         if trimmed.is_empty() {
             return Task::none();
         }
-        let new_name = if ext.is_empty() { trimmed } else { format!("{trimmed}.{ext}") };
+        let new_name = if ext.is_empty() {
+            trimmed
+        } else {
+            format!("{trimmed}.{ext}")
+        };
         let new_path = host::join_path(&host::dir_name(&item.path), &new_name);
         let from = item.path.clone();
         let id = r.id.clone();
-        Task::perform(blocking(move || host::rename_file(&from, &new_path)), move |res| {
-            Message::FolderPicked(PickPurpose::WatchedFolder, res.ok().map(|p| format!("renamed::{id}::{p}")))
-        })
+        Task::perform(
+            blocking(move || host::rename_file(&from, &new_path)),
+            move |res| {
+                Message::FolderPicked(
+                    PickPurpose::WatchedFolder,
+                    res.ok().map(|p| format!("renamed::{id}::{p}")),
+                )
+            },
+        )
     }
 
     fn on_folder_picked(&mut self, purpose: PickPurpose, path: String) -> Task<Message> {
@@ -1696,7 +2247,12 @@ impl App {
             if parts.len() == 2 {
                 let (from, folder) = (parts[0].to_string(), parts[1].to_string());
                 let dest = host::join_path(&folder, &host::base_name(&from));
-                return Task::perform(blocking(move || { let _ = host::rename_file(&from, &dest); }), |_| Message::Ignore);
+                return Task::perform(
+                    blocking(move || {
+                        let _ = host::rename_file(&from, &dest);
+                    }),
+                    |_| Message::Ignore,
+                );
             }
             return Task::none();
         }
@@ -1716,7 +2272,11 @@ impl App {
     fn apply_rename(&mut self, id: &str, new_path: &str) {
         let new_name = host::base_name(new_path);
         let parsed = qlipq_core::obs::parse_obs_filename(&new_name);
-        let old_path = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone());
+        let old_path = self
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.path.clone());
         if let Some(old) = &old_path {
             self.known_paths.remove(old);
             if let Some(stored) = self.edit_store.remove(old) {
@@ -1753,7 +2313,12 @@ impl App {
     /// Delete a clip's file from disk (dropping the queue item follows on [`Message::Deleted`]). Used
     /// by both the confirm dialog and the immediate Shift+Delete shortcut.
     fn delete_now(&mut self, id: String) -> Task<Message> {
-        let Some(path) = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone()) else {
+        let Some(path) = self
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.path.clone())
+        else {
             return Task::none();
         };
         // The preview player + scrub decoder keep the file open, and Windows refuses to delete an open
@@ -1763,7 +2328,9 @@ impl App {
             self.selected_id = None;
             self.editor = None;
         }
-        Task::perform(blocking(move || host::delete_file(&path)), move |r| Message::Deleted(id.clone(), r))
+        Task::perform(blocking(move || host::delete_file(&path)), move |r| {
+            Message::Deleted(id.clone(), r)
+        })
     }
 
     fn remove_item(&mut self, id: &str) {
@@ -1803,7 +2370,9 @@ impl App {
                         .height(Length::Fill)
                         .style(theme::sidebar),
                     rule::vertical(1),
-                    container(self.editor_view()).width(Length::Fill).height(Length::Fill),
+                    container(self.editor_view())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
                 ]
                 .into(),
             };
@@ -1853,7 +2422,9 @@ include!("views.rs");
 fn build_item(path: &str, roots: &[String]) -> QueueItem {
     let file_name = host::base_name(path);
     let parsed = qlipq_core::obs::parse_obs_filename(&file_name);
-    let game = roots.iter().find_map(|r| qlipq_core::obs::infer_game_from_path(r, path));
+    let game = roots
+        .iter()
+        .find_map(|r| qlipq_core::obs::infer_game_from_path(r, path));
     QueueItem {
         id: qlipq_core::ids::create_id(),
         path: path.to_string(),
@@ -1875,13 +2446,27 @@ fn build_item(path: &str, roots: &[String]) -> QueueItem {
 }
 
 fn editor_audio_specs(ed: &Editor) -> Vec<AudioTrackSpec> {
-    ed.audio.iter().map(|r| AudioTrackSpec { index: r.index, enabled: r.enabled, volume: r.volume }).collect()
+    ed.audio
+        .iter()
+        .map(|r| AudioTrackSpec {
+            index: r.index,
+            enabled: r.enabled,
+            volume: r.volume,
+        })
+        .collect()
 }
 
 fn editor_spec(ed: &Editor) -> EditSpec {
     EditSpec {
-        trim: Some(TrimSpec { start_sec: ed.trim_start, end_sec: ed.trim_end }),
-        crop: if ed.crop_enabled { Some(ed.crop.clone()) } else { None },
+        trim: Some(TrimSpec {
+            start_sec: ed.trim_start,
+            end_sec: ed.trim_end,
+        }),
+        crop: if ed.crop_enabled {
+            Some(ed.crop.clone())
+        } else {
+            None
+        },
         audio_tracks: editor_audio_specs(ed),
     }
 }
@@ -1893,7 +2478,11 @@ fn append_timestamp(path: &str) -> String {
         "{}_{}{}",
         name,
         datetimes::format_datetime(&now),
-        if ext.is_empty() { String::new() } else { format!(".{ext}") }
+        if ext.is_empty() {
+            String::new()
+        } else {
+            format!(".{ext}")
+        }
     );
     host::join_path(&host::dir_name(path), &stamped)
 }
@@ -1911,7 +2500,11 @@ fn build_export_name(config: &AppConfig, item: &QueueItem, name: &str, ext: &str
 
 /// A usable frame rate for timecode math — the clip's fps, or 30 as a fallback before media loads.
 fn ed_fps(ed: &Editor) -> f64 {
-    ed.media.as_ref().map(|m| m.fps).filter(|f| *f >= 1.0).unwrap_or(30.0)
+    ed.media
+        .as_ref()
+        .map(|m| m.fps)
+        .filter(|f| *f >= 1.0)
+        .unwrap_or(30.0)
 }
 
 /// Format seconds as a frame-accurate timecode `M:SS.FF` (or `H:MM:SS.FF` past an hour), where `FF` is
@@ -1986,7 +2579,11 @@ fn sync_inout_inputs(ed: &mut Editor) {
 /// Raw key event → [`Message::EditorKey`], but only when no widget captured it (a focused text field
 /// reports `Status::Captured`, so its keystrokes are left alone). Must be a plain `fn` —
 /// `iced::event::listen_with` takes a function pointer, not a closure.
-fn editor_key_event(event: iced::Event, status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+fn editor_key_event(
+    event: iced::Event,
+    status: iced::event::Status,
+    _id: iced::window::Id,
+) -> Option<Message> {
     if status != iced::event::Status::Ignored {
         return None;
     }
@@ -1998,9 +2595,17 @@ fn editor_key_event(event: iced::Event, status: iced::event::Status, _id: iced::
 }
 
 /// Escape key (from anywhere) → dismiss the open modal. A plain `fn` for `listen_with`.
-fn modal_escape_event(event: iced::Event, _status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+fn modal_escape_event(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _id: iced::window::Id,
+) -> Option<Message> {
     use iced::keyboard::{key::Named, Event::KeyPressed, Key};
-    if let iced::Event::Keyboard(KeyPressed { key: Key::Named(Named::Escape), .. }) = event {
+    if let iced::Event::Keyboard(KeyPressed {
+        key: Key::Named(Named::Escape),
+        ..
+    }) = event
+    {
         Some(Message::DismissModal)
     } else {
         None
@@ -2008,9 +2613,17 @@ fn modal_escape_event(event: iced::Event, _status: iced::event::Status, _id: ice
 }
 
 /// Enter key → confirm the open delete prompt. A plain `fn` for `listen_with`.
-fn delete_confirm_enter_event(event: iced::Event, _status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+fn delete_confirm_enter_event(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _id: iced::window::Id,
+) -> Option<Message> {
     use iced::keyboard::{key::Named, Event::KeyPressed, Key};
-    if let iced::Event::Keyboard(KeyPressed { key: Key::Named(Named::Enter), .. }) = event {
+    if let iced::Event::Keyboard(KeyPressed {
+        key: Key::Named(Named::Enter),
+        ..
+    }) = event
+    {
         Some(Message::DeleteConfirm)
     } else {
         None
@@ -2018,9 +2631,17 @@ fn delete_confirm_enter_event(event: iced::Event, _status: iced::event::Status, 
 }
 
 /// Escape key → exit fullscreen preview. A plain `fn` for `listen_with`.
-fn fullscreen_escape_event(event: iced::Event, _status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+fn fullscreen_escape_event(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _id: iced::window::Id,
+) -> Option<Message> {
     use iced::keyboard::{key::Named, Event::KeyPressed, Key};
-    if let iced::Event::Keyboard(KeyPressed { key: Key::Named(Named::Escape), .. }) = event {
+    if let iced::Event::Keyboard(KeyPressed {
+        key: Key::Named(Named::Escape),
+        ..
+    }) = event
+    {
         Some(Message::ToggleFullscreen)
     } else {
         None
@@ -2028,7 +2649,11 @@ fn fullscreen_escape_event(event: iced::Event, _status: iced::event::Status, _id
 }
 
 /// True if `binding` (e.g. `"Shift+Left"`, `"Ctrl+M"`, `"I"`) matches the pressed key + modifiers.
-fn binding_matches(binding: &str, key: &iced::keyboard::Key, mods: iced::keyboard::Modifiers) -> bool {
+fn binding_matches(
+    binding: &str,
+    key: &iced::keyboard::Key,
+    mods: iced::keyboard::Modifiers,
+) -> bool {
     let binding = binding.trim();
     if binding.is_empty() {
         return false;
@@ -2047,7 +2672,11 @@ fn binding_matches(binding: &str, key: &iced::keyboard::Key, mods: iced::keyboar
             _ => return false,
         }
     }
-    if mods.control() != need_ctrl || mods.shift() != need_shift || mods.alt() != need_alt || mods.logo() != need_logo {
+    if mods.control() != need_ctrl
+        || mods.shift() != need_shift
+        || mods.alt() != need_alt
+        || mods.logo() != need_logo
+    {
         return false;
     }
     key_token_matches(token, key)
@@ -2097,9 +2726,19 @@ mod tests {
     fn timecode_round_trips() {
         // Includes fractional (NTSC) rates: format + parse must use the same rounded fps so a produced
         // timecode parses back to the same time (within a frame's quantization).
-        for &(secs, fps) in &[(5.5, 60.0), (2.5, 30.0), (61.25, 60.0), (0.0, 60.0), (5.5, 59.94), (10.0, 29.97)] {
+        for &(secs, fps) in &[
+            (5.5, 60.0),
+            (2.5, 30.0),
+            (61.25, 60.0),
+            (0.0, 60.0),
+            (5.5, 59.94),
+            (10.0, 29.97),
+        ] {
             let parsed = parse_timestamp(&format_timestamp(secs, fps), fps).unwrap();
-            assert!((parsed - secs).abs() < 1.0 / fps.round(), "{secs} @ {fps} -> {parsed}");
+            assert!(
+                (parsed - secs).abs() < 1.0 / fps.round(),
+                "{secs} @ {fps} -> {parsed}"
+            );
         }
     }
 
@@ -2113,7 +2752,9 @@ mod tests {
     #[test]
     fn parse_rejects_non_finite_and_negative() {
         // A stray nan/inf must never reach a trim clamp (it would panic).
-        for bad in ["nan", "NaN", "-nan", "inf", "infinity", "1e400", "1:nan", "5.nan", "-1"] {
+        for bad in [
+            "nan", "NaN", "-nan", "inf", "infinity", "1e400", "1:nan", "5.nan", "-1",
+        ] {
             assert_eq!(parse_timestamp(bad, 60.0), None, "{bad} should be rejected");
         }
     }
@@ -2134,11 +2775,147 @@ mod tests {
         assert!(binding_matches("Space", &Key::Named(Named::Space), none));
         assert!(binding_matches("i", &Key::Character("i".into()), none));
         assert!(binding_matches("I", &Key::Character("i".into()), none)); // case-insensitive
-        assert!(!binding_matches("I", &Key::Character("i".into()), Modifiers::SHIFT)); // bare I, not Shift+I
-        assert!(binding_matches("Shift+Left", &Key::Named(Named::ArrowLeft), Modifiers::SHIFT));
-        assert!(!binding_matches("Shift+Left", &Key::Named(Named::ArrowLeft), none)); // shift is required
-        assert!(binding_matches("Ctrl+M", &Key::Character("m".into()), Modifiers::CTRL));
-        assert!(!binding_matches("Left", &Key::Named(Named::ArrowRight), none)); // wrong key
+        assert!(!binding_matches(
+            "I",
+            &Key::Character("i".into()),
+            Modifiers::SHIFT
+        )); // bare I, not Shift+I
+        assert!(binding_matches(
+            "Shift+Left",
+            &Key::Named(Named::ArrowLeft),
+            Modifiers::SHIFT
+        ));
+        assert!(!binding_matches(
+            "Shift+Left",
+            &Key::Named(Named::ArrowLeft),
+            none
+        )); // shift is required
+        assert!(binding_matches(
+            "Ctrl+M",
+            &Key::Character("m".into()),
+            Modifiers::CTRL
+        ));
+        assert!(!binding_matches(
+            "Left",
+            &Key::Named(Named::ArrowRight),
+            none
+        )); // wrong key
         assert!(!binding_matches("", &Key::Named(Named::Space), none)); // unbound never matches
+    }
+
+    fn qi(file_name: &str, status: QueueStatus, source: Option<&str>, tags: &[&str]) -> QueueItem {
+        QueueItem {
+            id: file_name.to_string(),
+            path: format!("C:/clips/{file_name}"),
+            file_name: file_name.to_string(),
+            added_at: String::new(),
+            status,
+            recorded_at: None,
+            source: source.map(str::to_string),
+            media: None,
+            file_size_bytes: None,
+            file_modified_at: None,
+            duration_sec: None,
+            edit: None,
+            output_override: None,
+            tags: (!tags.is_empty()).then(|| tags.iter().map(|t| t.to_string()).collect()),
+            export_path: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn empty_filter_hides_dismissed_only() {
+        let f = QueueFilter::default();
+        assert!(f.matches(&qi("a.mp4", QueueStatus::Ready, None, &[]), false));
+        assert!(!f.matches(
+            &qi("b.mp4", QueueStatus::Ready, None, &[DISMISSED_TAG]),
+            false
+        ));
+    }
+
+    #[test]
+    fn search_is_case_insensitive_substring_of_name() {
+        let f = QueueFilter {
+            search: "  APEX ".to_string(),
+            ..Default::default()
+        };
+        assert!(f.matches(&qi("apex-clutch.mp4", QueueStatus::Ready, None, &[]), false));
+        assert!(!f.matches(&qi("cs2-ace.mp4", QueueStatus::Ready, None, &[]), false));
+    }
+
+    #[test]
+    fn status_and_game_facets() {
+        let status = QueueFilter {
+            status: Some(QueueStatus::Done),
+            ..Default::default()
+        };
+        assert!(status.matches(&qi("a.mp4", QueueStatus::Done, None, &[]), false));
+        assert!(!status.matches(&qi("a.mp4", QueueStatus::Ready, None, &[]), false));
+
+        let game = QueueFilter {
+            game: Some("Apex Legends".to_string()),
+            ..Default::default()
+        };
+        assert!(game.matches(
+            &qi("a.mp4", QueueStatus::Ready, Some("Apex Legends"), &[]),
+            false
+        ));
+        assert!(!game.matches(&qi("a.mp4", QueueStatus::Ready, Some("CS2"), &[]), false));
+        assert!(!game.matches(&qi("a.mp4", QueueStatus::Ready, None, &[]), false));
+    }
+
+    #[test]
+    fn tag_filter_reveals_dismissed_clip_with_that_tag() {
+        let f = QueueFilter {
+            tag: Some("keep".to_string()),
+            ..Default::default()
+        };
+        // A dismissed clip is normally hidden, but selecting its tag surfaces it (for restore).
+        assert!(f.matches(
+            &qi("a.mp4", QueueStatus::Ready, None, &["keep", DISMISSED_TAG]),
+            false
+        ));
+        // A dismissed clip without the tag stays hidden.
+        assert!(!f.matches(
+            &qi("b.mp4", QueueStatus::Ready, None, &[DISMISSED_TAG]),
+            false
+        ));
+        // A live clip without the tag is filtered out.
+        assert!(!f.matches(&qi("c.mp4", QueueStatus::Ready, None, &["other"]), false));
+    }
+
+    #[test]
+    fn highlight_facet_only_and_hide() {
+        let only = QueueFilter {
+            highlights: HighlightFilter::Only,
+            ..Default::default()
+        };
+        assert!(only.matches(&qi("a.mp4", QueueStatus::Ready, None, &[]), true));
+        assert!(!only.matches(&qi("a.mp4", QueueStatus::Ready, None, &[]), false));
+
+        let hide = QueueFilter {
+            highlights: HighlightFilter::Hide,
+            ..Default::default()
+        };
+        assert!(!hide.matches(&qi("a.mp4", QueueStatus::Ready, None, &[]), true));
+        assert!(hide.matches(&qi("a.mp4", QueueStatus::Ready, None, &[]), false));
+    }
+
+    #[test]
+    fn is_active_measured_against_highlight_default() {
+        // With highlights hidden by default (config), an untouched filter reads as inactive.
+        let seeded = QueueFilter {
+            highlights: HighlightFilter::Hide,
+            ..Default::default()
+        };
+        assert!(!seeded.is_active(HighlightFilter::Hide));
+        assert!(seeded.is_active(HighlightFilter::All));
+        // Any other facet marks it active regardless of the highlight default.
+        let searching = QueueFilter {
+            search: "x".to_string(),
+            ..Default::default()
+        };
+        assert!(searching.is_active(HighlightFilter::All));
     }
 }

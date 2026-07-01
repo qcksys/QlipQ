@@ -34,13 +34,21 @@ struct Decoder {
 fn open(path: &str) -> Decoder {
     let cpath = CString::new(path).unwrap();
     let input = AVFormatContextInput::open(&cpath).expect("open");
-    let vid_idx = input.find_best_stream(ffi::AVMEDIA_TYPE_VIDEO).unwrap().map(|(i, _)| i).expect("no video");
+    let vid_idx = input
+        .find_best_stream(ffi::AVMEDIA_TYPE_VIDEO)
+        .unwrap()
+        .map(|(i, _)| i)
+        .expect("no video");
     let (vdec, tb, sar) = {
         let st = &input.streams()[vid_idx];
         let tb = st.time_base;
         let par = st.codecpar();
         let sar0 = par.sample_aspect_ratio;
-        let sar = if sar0.num == 0 { ffi::AVRational { num: 1, den: 1 } } else { sar0 };
+        let sar = if sar0.num == 0 {
+            ffi::AVRational { num: 1, den: 1 }
+        } else {
+            sar0
+        };
         let codec = AVCodec::find_decoder(par.codec_id).unwrap();
         let mut d = AVCodecContext::new(&codec);
         d.apply_codecpar(&par).unwrap();
@@ -49,27 +57,54 @@ fn open(path: &str) -> Decoder {
         d.open(None).unwrap();
         (d, tb, sar)
     };
-    Decoder { input, vdec, vid_idx: vid_idx as i32, tb, sar }
+    Decoder {
+        input,
+        vdec,
+        vid_idx: vid_idx as i32,
+        tb,
+        sar,
+    }
 }
 
 /// Seek + decode + filter to `target`. Returns `(rgba_bytes, graph_ms, decode_ms)` so the caller can
 /// see where the time goes: graph build (libplacebo/Vulkan init for HDR) vs keyframe→target decode.
-fn decode_at(d: &mut Decoder, dims: (u32, u32), is_hdr: bool, target: f64) -> Option<(usize, f64, f64)> {
+fn decode_at(
+    d: &mut Decoder,
+    dims: (u32, u32),
+    is_hdr: bool,
+    target: f64,
+) -> Option<(usize, f64, f64)> {
     let (w, h) = dims;
     if d.tb.num != 0 {
         let ts = (target * d.tb.den as f64 / d.tb.num as f64) as i64;
-        let _ = d.input.seek(d.vid_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
+        let _ = d
+            .input
+            .seek(d.vid_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
         d.vdec.flush_buffers();
     }
     let graph_start = Instant::now();
     let graph = AVFilterGraph::new();
     let args = CString::new(format!(
         "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}",
-        d.vdec.width, d.vdec.height, d.vdec.pix_fmt as i32, d.tb.num, d.tb.den, d.sar.num, d.sar.den
+        d.vdec.width,
+        d.vdec.height,
+        d.vdec.pix_fmt as i32,
+        d.tb.num,
+        d.tb.den,
+        d.sar.num,
+        d.sar.den
     ))
     .unwrap();
-    let mut src = graph.create_filter_context(&AVFilter::get_by_name(c"buffer").unwrap(), c"in", Some(&args)).ok()?;
-    let mut sink = graph.create_filter_context(&AVFilter::get_by_name(c"buffersink").unwrap(), c"out", None).ok()?;
+    let mut src = graph
+        .create_filter_context(
+            &AVFilter::get_by_name(c"buffer").unwrap(),
+            c"in",
+            Some(&args),
+        )
+        .ok()?;
+    let mut sink = graph
+        .create_filter_context(&AVFilter::get_by_name(c"buffersink").unwrap(), c"out", None)
+        .ok()?;
     let outputs = AVFilterInOut::new(c"in", &mut src, 0);
     let inputs = AVFilterInOut::new(c"out", &mut sink, 0);
     let descr = if is_hdr {
@@ -94,7 +129,11 @@ fn decode_at(d: &mut Decoder, dims: (u32, u32), is_hdr: bool, target: f64) -> Op
                 if pts + 1e-3 < target && !flushed {
                     continue;
                 }
-                return Some((pack_rgba(&out), graph_ms, decode_start.elapsed().as_secs_f64() * 1e3));
+                return Some((
+                    pack_rgba(&out),
+                    graph_ms,
+                    decode_start.elapsed().as_secs_f64() * 1e3,
+                ));
             }
             Err(RsmpegError::BufferSinkDrainError) => {}
             Err(_) => return None,
@@ -132,7 +171,11 @@ fn pack_rgba(frame: &AVFrame) -> usize {
     let sptr = frame.data[0];
     unsafe {
         for y in 0..h {
-            std::ptr::copy_nonoverlapping(sptr.add(y * stride), out.as_mut_ptr().add(y * tight), tight);
+            std::ptr::copy_nonoverlapping(
+                sptr.add(y * stride),
+                out.as_mut_ptr().add(y * tight),
+                tight,
+            );
         }
     }
     out.len()
@@ -147,7 +190,9 @@ fn placebo_dims(src_w: i64, src_h: i64) -> (u32, u32) {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: scrub_probe <media path>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: scrub_probe <media path>");
 
     // Detect HDR + source dimensions from the first decoder.
     let probe = open(&path);
@@ -158,7 +203,16 @@ fn main() {
         trc == ffi::AVCOL_TRC_SMPTE2084 || trc == ffi::AVCOL_TRC_ARIB_STD_B67
     };
     let dims = placebo_dims(src_w, src_h);
-    println!("clip: {src_w}x{src_h} -> {}x{} preview, {}\n", dims.0, dims.1, if is_hdr { "HDR (libplacebo)" } else { "SDR (scale)" });
+    println!(
+        "clip: {src_w}x{src_h} -> {}x{} preview, {}\n",
+        dims.0,
+        dims.1,
+        if is_hdr {
+            "HDR (libplacebo)"
+        } else {
+            "SDR (scale)"
+        }
+    );
     drop(probe);
 
     // --- WARM: open once, seek+decode each target reusing the decoder ---
@@ -186,7 +240,10 @@ fn main() {
         let ok = decode_at(&mut d, dims, is_hdr, t).is_some();
         let ms = started.elapsed().as_secs_f64() * 1e3;
         cold_total += ms;
-        println!("  seek {t:>4.1}s  {ms:7.1} ms  {}", if ok { "ok" } else { "MISS" });
+        println!(
+            "  seek {t:>4.1}s  {ms:7.1} ms  {}",
+            if ok { "ok" } else { "MISS" }
+        );
     }
 
     let n = TARGETS.len() as f64;

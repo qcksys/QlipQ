@@ -8,7 +8,7 @@ order: 1
 
 In **Settings → Watched folders**, add the folder(s) where your recordings land (for OBS this is your recording or replay-buffer output path). QlipQ can auto-detect the **OBS** and **NVIDIA Share** output folders and offer them as one-click presets. It scans these folders — including subfolders — on launch and watches for new files while it runs.
 
-Tick **Hide auto-captured highlights** to keep NVIDIA App's automatic **Highlights** out of the queue (they're tagged `NVIDIA APP (Highlights)` in the file, versus `NVIDIA APP` for a manual recording; a clip's encoder is shown in the editor's debug panel). Highlights that aren't hidden are marked with a **Highlight** badge in the queue.
+Tick **Hide auto-captured highlights** to keep NVIDIA App's automatic **Highlights** out of the queue (they're tagged `NVIDIA APP (Highlights)` in the file, versus `NVIDIA APP` for a manual recording; a clip's encoder is shown in the editor's debug panel). Highlights that aren't hidden are marked with a **Highlight** badge in the queue. This sets the default; the queue's [filter bar](#4-edit-and-export) can override it per session (show all clips, only highlights, or hide them).
 
 ## 2. Choose an output folder and naming template
 
@@ -25,7 +25,7 @@ The editor shows an estimated file size for the current clip, and you can overri
 
 ## 4. Edit and export
 
-1. Pick a clip from the **Queue** (each shows its date, length, and size). By default it **starts playing** as soon as it's selected — turn this off with **Settings → Playback → Play clips automatically when selected** to open clips paused.
+1. Pick a clip from the **Queue** (each shows its date, length, and size). A **filter bar** is pinned to the top of the queue: search by filename and narrow the list by **status**, **game** (the `{source}` label), **tag**, or **highlights** (all clips / only highlights / hide them). When any filter is active it shows how many clips match and offers **Clear filters** to reset. By default a clip **starts playing** as soon as it's selected — turn this off with **Settings → Playback → Play clips automatically when selected** to open clips paused.
 2. Set the **in/out** points on the timeline — the scrubber highlights the in/out window and marks each endpoint, and **playback loops within it** (pressing play jumps to the in-point and loops back when it reaches the out-point). Each point has an editable timestamp with **±0.5 / ±1 / ±5 s** nudge buttons, or press **Set** (or the **I**/**O** keys) to capture the current playhead. Type a timestamp in the playhead field to jump, drag the scrubber (playback keeps going if it was already playing), or use the −60/−5/−1 / +1/+5/+60 second jump buttons. Timestamps read as frame-accurate timecode — **`h:mm:ss.ff`**, where `ff` is the frame within the second — so a single **←**/**→** step changes the last digits by one.
 3. **Keyboard shortcuts** default to Adobe Premiere Pro — **Space** play/pause, **I**/**O** set in/out, **←**/**→** step a frame, **Shift+←**/**→** jump 5 s, **Home**/**End** go to start/end, **Ctrl+M** export — and are rebindable in **Settings → Editor shortcuts**. With a clip selected, **Delete** removes its file from disk after a confirmation (**Enter** confirms the prompt) and **Shift+Delete** removes it immediately without asking.
 4. Optionally enable **crop** and adjust the rectangle.

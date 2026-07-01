@@ -36,7 +36,9 @@ struct Probe {
 }
 
 fn main() {
-    let arg = std::env::args().nth(1).expect("usage: play_probe <media path>");
+    let arg = std::env::args()
+        .nth(1)
+        .expect("usage: play_probe <media path>");
     let probe = Arc::new(Probe {
         stop: AtomicBool::new(false),
         frames: AtomicU64::new(0),
@@ -45,15 +47,24 @@ fn main() {
         out_rate: AtomicU64::new(48_000.0f64.to_bits()),
     });
 
-    let v = { let p = Arc::clone(&probe); let path = arg.clone(); std::thread::spawn(move || video_thread(path, p)) };
-    let a = { let p = Arc::clone(&probe); let path = arg.clone(); std::thread::spawn(move || audio_thread(path, p)) };
+    let v = {
+        let p = Arc::clone(&probe);
+        let path = arg.clone();
+        std::thread::spawn(move || video_thread(path, p))
+    };
+    let a = {
+        let p = Arc::clone(&probe);
+        let path = arg.clone();
+        std::thread::spawn(move || audio_thread(path, p))
+    };
 
     let started = Instant::now();
     let mut next = 0.5;
     while started.elapsed().as_secs_f64() < RUN_SECS {
         let elapsed = started.elapsed().as_secs_f64();
         if elapsed >= next {
-            let aclock = probe.played.load(Ordering::Relaxed) as f64 / f64::from_bits(probe.out_rate.load(Ordering::Relaxed));
+            let aclock = probe.played.load(Ordering::Relaxed) as f64
+                / f64::from_bits(probe.out_rate.load(Ordering::Relaxed));
             let vpts = f64::from_bits(probe.last_vpts.load(Ordering::Relaxed));
             let frames = probe.frames.load(Ordering::Relaxed);
             println!("  t={elapsed:5.2}s  audio_clock={aclock:5.2}s  video_pts={vpts:5.2}s  frames={frames}");
@@ -65,7 +76,8 @@ fn main() {
     let _ = v.join();
     let _ = a.join();
 
-    let aclock = probe.played.load(Ordering::Relaxed) as f64 / f64::from_bits(probe.out_rate.load(Ordering::Relaxed));
+    let aclock = probe.played.load(Ordering::Relaxed) as f64
+        / f64::from_bits(probe.out_rate.load(Ordering::Relaxed));
     let vpts = f64::from_bits(probe.last_vpts.load(Ordering::Relaxed));
     println!(
         "done: wall={:.2}s  audio_clock={:.2}s  video_pts={:.2}s  frames={}  ({:.1} fps decoded)",
@@ -80,13 +92,21 @@ fn main() {
 fn video_thread(path: String, probe: Arc<Probe>) {
     let cpath = CString::new(path).unwrap();
     let mut input = AVFormatContextInput::open(&cpath).expect("open");
-    let vid_idx = input.find_best_stream(ffi::AVMEDIA_TYPE_VIDEO).unwrap().map(|(i, _)| i).expect("no video");
+    let vid_idx = input
+        .find_best_stream(ffi::AVMEDIA_TYPE_VIDEO)
+        .unwrap()
+        .map(|(i, _)| i)
+        .expect("no video");
     let (mut vdec, tb_v, sar) = {
         let st = &input.streams()[vid_idx];
         let tb = st.time_base;
         let par = st.codecpar();
         let sar = par.sample_aspect_ratio;
-        let sar = if sar.num == 0 { ffi::AVRational { num: 1, den: 1 } } else { sar };
+        let sar = if sar.num == 0 {
+            ffi::AVRational { num: 1, den: 1 }
+        } else {
+            sar
+        };
         let codec = AVCodec::find_decoder(par.codec_id).unwrap();
         let mut d = AVCodecContext::new(&codec);
         d.apply_codecpar(&par).unwrap();
@@ -109,15 +129,25 @@ fn video_thread(path: String, probe: Arc<Probe>) {
         vdec.width, vdec.height, vdec.pix_fmt as i32, tb_v.num, tb_v.den, sar.num, sar.den
     ))
     .unwrap();
-    let mut src = graph.create_filter_context(&AVFilter::get_by_name(c"buffer").unwrap(), c"in", Some(&args)).unwrap();
-    let mut sink = graph.create_filter_context(&AVFilter::get_by_name(c"buffersink").unwrap(), c"out", None).unwrap();
+    let mut src = graph
+        .create_filter_context(
+            &AVFilter::get_by_name(c"buffer").unwrap(),
+            c"in",
+            Some(&args),
+        )
+        .unwrap();
+    let mut sink = graph
+        .create_filter_context(&AVFilter::get_by_name(c"buffersink").unwrap(), c"out", None)
+        .unwrap();
     let outputs = AVFilterInOut::new(c"in", &mut src, 0);
     let inputs = AVFilterInOut::new(c"out", &mut sink, 0);
     let descr = CString::new(format!(
         "libplacebo=w={w}:h={h}:tonemapping=auto:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc,format=rgba"
     ))
     .unwrap();
-    graph.parse_ptr(&descr, Some(inputs), Some(outputs)).unwrap();
+    graph
+        .parse_ptr(&descr, Some(inputs), Some(outputs))
+        .unwrap();
     graph.config().expect("graph config (libplacebo/Vulkan?)");
 
     // QLIPQ_NO_FILTER=1 measures pure decode throughput (skip libplacebo) to locate the bottleneck.
@@ -127,7 +157,9 @@ fn video_thread(path: String, probe: Arc<Probe>) {
         if !no_filter {
             while let Ok(out) = sink.buffersink_get_frame(None) {
                 probe.frames.fetch_add(1, Ordering::Relaxed);
-                probe.last_vpts.store((out.pts as f64 * tb_v_secs).to_bits(), Ordering::Relaxed);
+                probe
+                    .last_vpts
+                    .store((out.pts as f64 * tb_v_secs).to_bits(), Ordering::Relaxed);
             }
         }
         if eof {
@@ -140,7 +172,9 @@ fn video_thread(path: String, probe: Arc<Probe>) {
                     while let Ok(f) = vdec.receive_frame() {
                         if no_filter {
                             probe.frames.fetch_add(1, Ordering::Relaxed);
-                            probe.last_vpts.store((f.pts as f64 * tb_v_secs).to_bits(), Ordering::Relaxed);
+                            probe
+                                .last_vpts
+                                .store((f.pts as f64 * tb_v_secs).to_bits(), Ordering::Relaxed);
                         } else {
                             let _ = src.buffersrc_add_frame(Some(f), None);
                         }
@@ -167,7 +201,12 @@ fn video_thread(path: String, probe: Arc<Probe>) {
 fn audio_thread(path: String, probe: Arc<Probe>) {
     let cpath = CString::new(path).unwrap();
     let mut input = AVFormatContextInput::open(&cpath).expect("open");
-    let Some(aud_idx) = input.find_best_stream(ffi::AVMEDIA_TYPE_AUDIO).ok().flatten().map(|(i, _)| i) else {
+    let Some(aud_idx) = input
+        .find_best_stream(ffi::AVMEDIA_TYPE_AUDIO)
+        .ok()
+        .flatten()
+        .map(|(i, _)| i)
+    else {
         println!("(no audio stream)");
         return;
     };
@@ -188,7 +227,9 @@ fn audio_thread(path: String, probe: Arc<Probe>) {
     let supported = device.default_output_config().expect("default config");
     let out_rate = supported.sample_rate();
     let out_ch = supported.channels() as usize;
-    probe.out_rate.store((out_rate as f64).to_bits(), Ordering::Relaxed);
+    probe
+        .out_rate
+        .store((out_rate as f64).to_bits(), Ordering::Relaxed);
     let cap = (out_rate as usize * out_ch / 2).max(out_ch * 2048);
     let (mut producer, mut consumer) = HeapRb::<f32>::new(cap).split();
     let played_cb = Arc::clone(&probe);
@@ -200,7 +241,9 @@ fn audio_thread(path: String, probe: Arc<Probe>) {
                 for s in data[got..].iter_mut() {
                     *s = 0.0;
                 }
-                played_cb.played.fetch_add((got / out_ch) as u64, Ordering::Relaxed);
+                played_cb
+                    .played
+                    .fetch_add((got / out_ch) as u64, Ordering::Relaxed);
             },
             move |e| eprintln!("cpal error: {e}"),
             None,
@@ -216,7 +259,14 @@ fn audio_thread(path: String, probe: Arc<Probe>) {
                 if pkt.stream_index == aud_idx as i32 {
                     let _ = adec.send_packet(Some(&pkt));
                     while let Ok(frame) = adec.receive_frame() {
-                        push_audio(&mut swr, &frame, out_ch, out_rate as i32, &mut producer, &probe);
+                        push_audio(
+                            &mut swr,
+                            &frame,
+                            out_ch,
+                            out_rate as i32,
+                            &mut producer,
+                            &probe,
+                        );
                     }
                 }
             }
@@ -237,8 +287,15 @@ fn push_audio(
     if swr.is_none() {
         let in_layout = AVChannelLayout::from_nb_channels(frame.ch_layout().nb_channels.max(1));
         let out_layout = AVChannelLayout::from_nb_channels(out_ch as i32);
-        let mut s = SwrContext::new(&out_layout, ffi::AV_SAMPLE_FMT_FLT, out_rate, &in_layout, frame.format, frame.sample_rate)
-            .expect("swr");
+        let mut s = SwrContext::new(
+            &out_layout,
+            ffi::AV_SAMPLE_FMT_FLT,
+            out_rate,
+            &in_layout,
+            frame.format,
+            frame.sample_rate,
+        )
+        .expect("swr");
         s.init().expect("swr init");
         *swr = Some(s);
     }

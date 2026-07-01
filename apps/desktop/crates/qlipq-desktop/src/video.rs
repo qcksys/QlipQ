@@ -60,7 +60,9 @@ impl<Message> shader::Program<Message> for VideoProgram {
     type Primitive = VideoPrimitive;
 
     fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> VideoPrimitive {
-        VideoPrimitive { frame: self.frame.clone() }
+        VideoPrimitive {
+            frame: self.frame.clone(),
+        }
     }
 }
 
@@ -130,7 +132,11 @@ impl VideoPipeline {
         if self.texture.is_none() || self.size != (width, height) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("qlipq video frame"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -176,7 +182,11 @@ impl VideoPipeline {
                         bytes_per_row: Some(width * 4),
                         rows_per_image: Some(height),
                     },
-                    wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
                 );
                 self.uploaded = Some(generation);
             }

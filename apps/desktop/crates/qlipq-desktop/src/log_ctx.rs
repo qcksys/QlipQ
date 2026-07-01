@@ -53,7 +53,12 @@ pub fn install() {
 /// libav log sink: format the line like the default callback, then prefix the active file. `vl` is
 /// forwarded straight into `av_log_format_line2` (no `va_arg` on our side); on Windows x86_64
 /// `va_list` is a plain pointer, so this hand-off is a by-value copy.
-unsafe extern "C" fn log_callback(avcl: *mut c_void, level: c_int, fmt: *const c_char, vl: ffi::va_list) {
+unsafe extern "C" fn log_callback(
+    avcl: *mut c_void,
+    level: c_int,
+    fmt: *const c_char,
+    vl: ffi::va_list,
+) {
     // Mirror the default callback's level gate — coloring/print flags live above the low byte.
     let severity = if level >= 0 { level & 0xff } else { level };
     if severity > ffi::av_log_get_level() {
@@ -61,7 +66,15 @@ unsafe extern "C" fn log_callback(avcl: *mut c_void, level: c_int, fmt: *const c
     }
     let mut line = [0 as c_char; 1024];
     let mut print_prefix: c_int = 1;
-    ffi::av_log_format_line2(avcl, level, fmt, vl, line.as_mut_ptr(), line.len() as c_int, &mut print_prefix);
+    ffi::av_log_format_line2(
+        avcl,
+        level,
+        fmt,
+        vl,
+        line.as_mut_ptr(),
+        line.len() as c_int,
+        &mut print_prefix,
+    );
     let msg = CStr::from_ptr(line.as_ptr()).to_string_lossy();
     match current() {
         Some(path) => eprint!("qlipq[{path}]: {msg}"),

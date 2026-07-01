@@ -67,7 +67,10 @@ pub fn save_config(cfg: &AppConfig) -> std::io::Result<()> {
 pub fn write_config_schema() -> std::io::Result<()> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(config_json::SCHEMA_FILE), config_json::schema_json())
+    std::fs::write(
+        dir.join(config_json::SCHEMA_FILE),
+        config_json::schema_json(),
+    )
 }
 
 fn is_valid_name(name: &str) -> bool {
@@ -83,7 +86,10 @@ pub fn read_app_file(name: &str) -> Option<String> {
 
 pub fn write_app_file(name: &str, contents: &str) -> std::io::Result<()> {
     if !is_valid_name(name) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid file name"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid file name",
+        ));
     }
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
@@ -164,7 +170,12 @@ pub fn resolve_media(paths: &[String], cache: &MediaCache) -> Vec<MediaResolutio
             .get(path)
             .filter(|c| c.size_bytes == size && c.modified_ms == modified_ms)
             .cloned();
-        out.push(MediaResolution { path: path.clone(), size, modified_ms, cached });
+        out.push(MediaResolution {
+            path: path.clone(),
+            size,
+            modified_ms,
+            cached,
+        });
     }
     out
 }
@@ -285,7 +296,10 @@ pub struct Watcher {
 impl Watcher {
     /// Drain and return the paths discovered since the last call.
     pub fn drain(&self) -> Vec<String> {
-        self.buffer.lock().map(|mut b| std::mem::take(&mut *b)).unwrap_or_default()
+        self.buffer
+            .lock()
+            .map(|mut b| std::mem::take(&mut *b))
+            .unwrap_or_default()
     }
 }
 
@@ -317,7 +331,10 @@ pub fn start_watch(folders: &[String], extensions: &[String]) -> Option<Watcher>
         let _ = watcher.watch(Path::new(folder), RecursiveMode::Recursive);
     }
 
-    Some(Watcher { _watcher: watcher, buffer })
+    Some(Watcher {
+        _watcher: watcher,
+        buffer,
+    })
 }
 
 /// Open a file/URL in its default handler.
@@ -334,7 +351,9 @@ pub fn reveal(path: &str) {
         // Use `raw_arg` and quote only the path so explorer gets `/select,"C:\dir\file name.mp4"`.
         use std::os::windows::process::CommandExt;
         let win = path.replace('/', "\\");
-        let _ = Command::new("explorer.exe").raw_arg(format!("/select,\"{win}\"")).spawn();
+        let _ = Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{win}\""))
+            .spawn();
     }
     #[cfg(target_os = "macos")]
     {
@@ -440,7 +459,10 @@ pub fn load_media_cache() -> MediaCache {
 }
 
 pub fn save_media_cache(cache: &MediaCache) {
-    let file = MediaCacheFileRef { version: MEDIA_CACHE_VERSION, entries: cache };
+    let file = MediaCacheFileRef {
+        version: MEDIA_CACHE_VERSION,
+        entries: cache,
+    };
     if let Ok(json) = serde_json::to_string(&file) {
         let _ = write_app_file("media-cache.json", &json);
     }

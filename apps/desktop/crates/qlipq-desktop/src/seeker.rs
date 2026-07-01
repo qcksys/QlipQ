@@ -34,7 +34,13 @@ pub fn seeker<'a, Message>(
     trim_end: f64,
     on_seek: impl Fn(f64) -> Message + 'a,
 ) -> Seeker<'a, Message> {
-    Seeker { duration: duration.max(0.0), position, trim_start, trim_end, on_seek: Box::new(on_seek) }
+    Seeker {
+        duration: duration.max(0.0),
+        position,
+        trim_start,
+        trim_end,
+        on_seek: Box::new(on_seek),
+    }
 }
 
 #[derive(Default)]
@@ -60,7 +66,12 @@ where
         Size::new(Length::Fill, Length::Fixed(HEIGHT))
     }
 
-    fn layout(&mut self, _tree: &mut Tree, _renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
         layout::atomic(limits, Length::Fill, Length::Fixed(HEIGHT))
     }
 
@@ -145,8 +156,16 @@ where
         let bar = |r: &mut Renderer, x: f32, w: f32, y: f32, h: f32, radius: f32, color: Color| {
             r.fill_quad(
                 renderer::Quad {
-                    bounds: Rectangle { x, y, width: w, height: h },
-                    border: Border { radius: Radius::from(radius), ..Border::default() },
+                    bounds: Rectangle {
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                    },
+                    border: Border {
+                        radius: Radius::from(radius),
+                        ..Border::default()
+                    },
                     ..renderer::Quad::default()
                 },
                 color,
@@ -154,22 +173,62 @@ where
         };
 
         // Full rail (muted), then the kept in/out window filled with the accent on top of it.
-        bar(renderer, bounds.x, bounds.width, cy - RAIL / 2.0, RAIL, RAIL / 2.0, rail_bg);
+        bar(
+            renderer,
+            bounds.x,
+            bounds.width,
+            cy - RAIL / 2.0,
+            RAIL,
+            RAIL / 2.0,
+            rail_bg,
+        );
         let x_in = x_of(self.trim_start);
         let x_out = x_of(self.trim_end.max(self.trim_start));
         if x_out > x_in {
-            bar(renderer, x_in, x_out - x_in, cy - RAIL / 2.0, RAIL, RAIL / 2.0, accent);
+            bar(
+                renderer,
+                x_in,
+                x_out - x_in,
+                cy - RAIL / 2.0,
+                RAIL,
+                RAIL / 2.0,
+                accent,
+            );
         }
 
         // In/out marker handles: full-height accent ticks at each endpoint.
         for x in [x_in, x_out] {
-            bar(renderer, x - MARKER_W / 2.0, MARKER_W, bounds.y, bounds.height, 1.0, accent);
+            bar(
+                renderer,
+                x - MARKER_W / 2.0,
+                MARKER_W,
+                bounds.y,
+                bounds.height,
+                1.0,
+                accent,
+            );
         }
 
         // Playhead: full-height bar + a round knob at the rail.
         let px = x_of(self.position);
-        bar(renderer, px - PLAYHEAD_W / 2.0, PLAYHEAD_W, bounds.y, bounds.height, 1.0, playhead);
-        bar(renderer, px - KNOB_R, KNOB_R * 2.0, cy - KNOB_R, KNOB_R * 2.0, KNOB_R, playhead);
+        bar(
+            renderer,
+            px - PLAYHEAD_W / 2.0,
+            PLAYHEAD_W,
+            bounds.y,
+            bounds.height,
+            1.0,
+            playhead,
+        );
+        bar(
+            renderer,
+            px - KNOB_R,
+            KNOB_R * 2.0,
+            cy - KNOB_R,
+            KNOB_R * 2.0,
+            KNOB_R,
+            playhead,
+        );
     }
 }
 
