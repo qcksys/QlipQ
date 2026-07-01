@@ -41,18 +41,24 @@ impl App {
 
         let mut col = column![].spacing(theme::SM).padding(theme::MD);
 
+        // Keep the rescan button + tag filters in one always-present header child so the queue
+        // scrollable below stays at a fixed index in `col`. iced tracks a scrollable's offset by its
+        // position in the widget tree; if a conditional sibling above it vanished (e.g. deleting the
+        // last tagged clip drops the filter row), the scrollable would shift index and reset to the
+        // top — the exact scroll jump we're avoiding on delete.
+        let mut header = column![].spacing(theme::SM);
         if !self.config.watched_folders.is_empty() {
-            col = col.push(button(text("Rescan all folders").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::RescanAll));
+            header = header.push(button(text("Rescan all folders").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::RescanAll));
         }
-
         if !all_tags.is_empty() {
             let mut filters = row![button(text("All").size(theme::SMALL)).style(theme::nav(self.tag_filter.is_none())).on_press(Message::SetTagFilter(None))].spacing(theme::XS);
             for t in &all_tags {
                 let active = self.tag_filter.as_deref() == Some(t.as_str());
                 filters = filters.push(button(text(format!("#{t}")).size(theme::SMALL)).style(theme::nav(active)).on_press(Message::SetTagFilter(Some(t.clone()))));
             }
-            col = col.push(filters);
+            header = header.push(filters);
         }
+        col = col.push(header);
 
         if visible.is_empty() {
             let no_folders = self.config.watched_folders.is_empty();

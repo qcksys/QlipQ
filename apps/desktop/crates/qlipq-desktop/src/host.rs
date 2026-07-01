@@ -87,7 +87,19 @@ pub fn write_app_file(name: &str, contents: &str) -> std::io::Result<()> {
     }
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(name), contents)
+    // Atomic write: stage into a unique temp file, then rename over the target. Several fire-and-
+    // forget savers can hit the same JSON at once (e.g. edits.json from both persist_edit and
+    // remove_item) and the process can exit mid-write; a plain truncating `write` would leave a torn
+    // file, and since load parses with `unwrap_or_default` that silently wipes the whole store.
+    // `rename` replaces atomically (on Windows too), so every reader sees the old or the new complete
+    // file — never a partial one. Last writer wins, which is fine: each map is a full recent snapshot.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!("{name}.{}.{seq}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, dir.join(name)).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 fn has_video_ext(path: &Path, extensions: &[String]) -> bool {

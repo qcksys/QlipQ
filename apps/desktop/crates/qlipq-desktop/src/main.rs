@@ -574,16 +574,20 @@ impl App {
                 }));
             }
             Message::MediaProbedBg { path, size, modified_ms, result } => {
+                // Ignore a probe whose recording was deleted while it was in flight (probes queue
+                // behind PROBE_SEM) — caching it would re-persist app data for a file that's gone.
                 if let Ok((media, is_hdr)) = result {
-                    if let Some(item) = self.items.iter_mut().find(|i| i.path == path) {
-                        item.duration_sec = Some(media.duration_sec);
+                    if self.known_paths.contains(&path) {
+                        if let Some(item) = self.items.iter_mut().find(|i| i.path == path) {
+                            item.duration_sec = Some(media.duration_sec);
+                        }
+                        self.media_cache.insert(
+                            path,
+                            host::CachedMedia { size_bytes: size, modified_ms, media, is_hdr },
+                        );
+                        // Debounced write on the tick — a first-run backlog probes many files at once.
+                        self.media_cache_dirty = true;
                     }
-                    self.media_cache.insert(
-                        path,
-                        host::CachedMedia { size_bytes: size, modified_ms, media, is_hdr },
-                    );
-                    // Debounced write on the tick — a first-run backlog probes many files at once.
-                    self.media_cache_dirty = true;
                 }
             }
             Message::PresetsDetected(obs, nvidia) => {
