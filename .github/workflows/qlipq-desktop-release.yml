@@ -1,11 +1,19 @@
 name: qlipq-desktop release
 
-# Build the desktop app and attach binaries to a GitHub Release on a `v*` tag.
-# (Versioning/tagging is separate — see the release strategy in the repo docs.)
+# Build the desktop app and attach binaries to the GitHub Release that release-plz publishes for a
+# `vX.Y.Z` tag. (Versioning/tagging lives in release-plz — see apps/desktop/release-plz.toml. The
+# release-plz release job must use a PAT, or publishing the Release won't trigger this workflow.)
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
+  # Manual/backfill build of an existing tag (e.g. a release whose tag was created before this
+  # workflow, or one release-plz made with GITHUB_TOKEN so `release: published` never fired). The
+  # workflow file comes from the ref you dispatch, but the code is checked out at `tag`.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release (e.g. v0.1.0)"
+        required: true
 
 permissions:
   contents: write
@@ -27,7 +35,10 @@ jobs:
       run:
         working-directory: apps/desktop
     steps:
+      # On a `release` event this is the release's tag; on manual dispatch it's the `tag` input.
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -39,7 +50,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev
 
       # The shipped binary links FFmpeg in process (libav) — the LGPL shared build below is bundled
       # with the release so users need no external ffmpeg/ffprobe.
@@ -75,12 +86,13 @@ jobs:
           cp "$FFMPEG_SDK/LICENSE.txt" dist/FFMPEG-LICENSE.txt
           tar -czf "${{ matrix.asset }}" -C dist .
 
-      # `files:` is repo-root-relative (the action ignores `working-directory`).
+      # `files:` is repo-root-relative (the action ignores `working-directory`). Attaches the asset to
+      # the release for this tag — updating release-plz's published Release on a `release` event, or
+      # creating one on manual dispatch (no `draft:`, so it stays/becomes published & downloadable).
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           files: apps/desktop/${{ matrix.asset }}
-          draft: true
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

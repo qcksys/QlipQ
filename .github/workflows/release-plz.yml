@@ -27,7 +27,10 @@ jobs:
           manifest_path: apps/desktop/Cargo.toml
           config: apps/desktop/release-plz.toml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A PAT (not the default GITHUB_TOKEN) so the tag + GitHub Release release-plz creates
+          # actually trigger qlipq-desktop-release.yml. Falls back to GITHUB_TOKEN if the secret is
+          # unset — the Release is still created, but the binary build won't fire until the PAT exists.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
 
   # Open/update the release PR with the next versions + changelogs.
   release-plz-pr:
@@ -51,4 +54,6 @@ jobs:
           manifest_path: apps/desktop/Cargo.toml
           config: apps/desktop/release-plz.toml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same PAT (falling back to GITHUB_TOKEN) so the release PR's own CI checks run — PRs opened
+          # by the default GITHUB_TOKEN don't trigger workflows.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
