@@ -888,7 +888,7 @@ mod tests {
             .count();
         drop(ictx);
 
-        let media = MediaInfo { duration_sec: 60.0, width: w, height: h, video_codec: "av1".into(), fps: 60.0, audio_streams: vec![], size_bytes: None };
+        let media = MediaInfo { duration_sec: 60.0, width: w, height: h, video_codec: "av1".into(), fps: 60.0, audio_streams: vec![], size_bytes: None, encoder: None };
         let spec = EditSpec {
             trim: Some(TrimSpec { start_sec: 1.0, end_sec: 4.0 }),
             crop: None,

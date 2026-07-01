@@ -100,7 +100,9 @@ pub fn probe(path: &str) -> Result<(MediaInfo, bool), String> {
     }
 
     let size_bytes = std::fs::metadata(path).ok().map(|m| m.len() as i64);
-    let media = MediaInfo { duration_sec, width, height, video_codec, fps, audio_streams, size_bytes };
+    // Container-level `encoder` ("encoded by") tag — e.g. "NVIDIA APP" / "NVIDIA APP (Highlights)".
+    let encoder = dict_tag(unsafe { (*input.as_ptr()).metadata }, c"encoder");
+    let media = MediaInfo { duration_sec, width, height, video_codec, fps, audio_streams, size_bytes, encoder };
     Ok((media, is_hdr))
 }
 

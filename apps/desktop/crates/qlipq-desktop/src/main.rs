@@ -191,11 +191,9 @@ struct Editor {
     time_input: String,
     /// True while the user is typing in the timestamp field, so live playback doesn't clobber it.
     editing_time: bool,
-    /// Editable In/Out timestamp text (kept in sync with `trim_start`/`trim_end` unless being edited).
+    /// Editable In/Out timestamp text, refreshed from `trim_start`/`trim_end` on each committed change.
     in_input: String,
     out_input: String,
-    editing_in: bool,
-    editing_out: bool,
     /// Latest decoded preview frame, shared with the `video` shader widget (persistent GPU texture).
     shared_frame: video::SharedFrame,
     has_frame: bool,
@@ -367,6 +365,7 @@ enum Message {
     SetPreviewRes(PreviewResChoice),
     ToggleAutoplay(bool),
     ToggleDebug(bool),
+    ToggleHideHighlights(bool),
     /// Copy the given text (the debug panel's diagnostics) to the system clipboard.
     CopyText(String),
     SetAfter(AfterChoice),
@@ -544,9 +543,11 @@ impl App {
     /// Set the in-point to `secs`, clamped to `[0, out − 0.1s]` (out never moves), then persist +
     /// refresh the editable field. Shared by Set-in, the ± bumps, and the text entry.
     fn apply_trim_in(&mut self, secs: f64) {
+        if !secs.is_finite() {
+            return;
+        }
         if let Some(ed) = &mut self.editor {
             ed.trim_start = secs.clamp(0.0, (ed.trim_end - 0.1).max(0.0));
-            ed.editing_in = false;
             sync_inout_inputs(ed);
         }
         self.commit_spec();
@@ -554,13 +555,21 @@ impl App {
 
     /// Set the out-point to `secs`, clamped to `[in + 0.1s, duration]`, then persist + refresh the field.
     fn apply_trim_out(&mut self, secs: f64) {
+        if !secs.is_finite() {
+            return;
+        }
         if let Some(ed) = &mut self.editor {
             let max = ed.media.as_ref().map(|m| m.duration_sec).unwrap_or(ed.trim_end);
             ed.trim_end = secs.clamp(ed.trim_start + 0.1, max.max(ed.trim_start + 0.1));
-            ed.editing_out = false;
             sync_inout_inputs(ed);
         }
         self.commit_spec();
+    }
+
+    /// Whether the clip at `path` is an auto-captured highlight, per its cached `encoder` tag (NVIDIA
+    /// App tags highlights `"NVIDIA APP (Highlights)"`). Used to hide auto-saves from the queue.
+    fn is_highlight(&self, path: &str) -> bool {
+        self.media_cache.get(path).is_some_and(|c| qlipq_core::media::is_auto_highlight(c.media.encoder.as_deref()))
     }
 
     fn commit_spec(&mut self) {
@@ -712,7 +721,7 @@ impl App {
                 }
             }
             Message::TimestampSubmit => {
-                let parsed = self.editor.as_ref().and_then(|ed| parse_timestamp(&ed.time_input));
+                let parsed = self.editor.as_ref().and_then(|ed| parse_timestamp(&ed.time_input, ed_fps(ed)));
                 if let Some(ed) = &mut self.editor {
                     ed.editing_time = false;
                 }
@@ -838,34 +847,36 @@ impl App {
             }
             Message::InEdited(s) => {
                 if let Some(ed) = &mut self.editor {
-                    ed.editing_in = true;
                     ed.in_input = s;
                 }
             }
-            Message::InSubmit => match self.editor.as_ref().and_then(|e| parse_timestamp(&e.in_input)) {
-                Some(v) => self.apply_trim_in(v),
-                None => {
-                    if let Some(ed) = &mut self.editor {
-                        ed.editing_in = false;
-                        sync_inout_inputs(ed); // invalid input → snap back to the current in-point
+            Message::InSubmit => {
+                let parsed = self.editor.as_ref().and_then(|e| parse_timestamp(&e.in_input, ed_fps(e)));
+                match parsed {
+                    Some(v) => self.apply_trim_in(v),
+                    None => {
+                        if let Some(ed) = &mut self.editor {
+                            sync_inout_inputs(ed); // invalid input → snap back to the current in-point
+                        }
                     }
                 }
-            },
+            }
             Message::OutEdited(s) => {
                 if let Some(ed) = &mut self.editor {
-                    ed.editing_out = true;
                     ed.out_input = s;
                 }
             }
-            Message::OutSubmit => match self.editor.as_ref().and_then(|e| parse_timestamp(&e.out_input)) {
-                Some(v) => self.apply_trim_out(v),
-                None => {
-                    if let Some(ed) = &mut self.editor {
-                        ed.editing_out = false;
-                        sync_inout_inputs(ed);
+            Message::OutSubmit => {
+                let parsed = self.editor.as_ref().and_then(|e| parse_timestamp(&e.out_input, ed_fps(e)));
+                match parsed {
+                    Some(v) => self.apply_trim_out(v),
+                    None => {
+                        if let Some(ed) = &mut self.editor {
+                            sync_inout_inputs(ed);
+                        }
                     }
                 }
-            },
+            }
             Message::ToggleCrop(on) => {
                 if let Some(ed) = &mut self.editor {
                     ed.crop_enabled = on;
@@ -1154,6 +1165,7 @@ impl App {
             }
             Message::ToggleAutoplay(on) => { self.config.autoplay = on; return self.save_config_task(); }
             Message::ToggleDebug(on) => { self.config.debug = on; return self.save_config_task(); }
+            Message::ToggleHideHighlights(on) => { self.config.hide_highlights = on; return self.save_config_task(); }
             Message::CopyText(s) => return iced::clipboard::write(s),
             Message::SetAfter(c) => { self.config.after_export.action = c.to_core(); return self.save_config_task(); }
             Message::MoveFolderChanged(s) => { self.config.after_export.move_folder = s; return self.save_config_task(); }
@@ -1240,8 +1252,16 @@ impl App {
             Some(d) => ed.trim_end.min(d),
             None => ed.trim_end,
         };
+        // Only loop for a real trim that ends before EOF. When the out-point IS the clip end (untrimmed,
+        // or out set to the very end), stop cleanly — looping there would race the decoder's EOF and can
+        // seek a thread that's already exiting (hang) instead of stopping. Unknown duration → stop too.
+        let at_eof = dur.map_or(true, |d| stop_at >= d - 1e-3);
         if stop_at > 0.0 && ed.current_time >= stop_at {
-            if !ed.awaiting_loop {
+            if at_eof {
+                ed.current_time = stop_at;
+                ed.playing = false;
+                ed.player = None;
+            } else if !ed.awaiting_loop {
                 let looped = ed.player.as_ref().map(|p| p.try_seek(ed.trim_start)).unwrap_or(false);
                 if looped {
                     ed.awaiting_loop = true;
@@ -1359,12 +1379,10 @@ impl App {
             crop: CropSpec { x: 0, y: 0, width: 0, height: 0 },
             audio: Vec::new(),
             current_time: 0.0,
-            time_input: format_timestamp(0.0),
+            time_input: format_timestamp(0.0, 30.0),
             editing_time: false,
-            in_input: format_timestamp(0.0),
-            out_input: format_timestamp(0.0),
-            editing_in: false,
-            editing_out: false,
+            in_input: format_timestamp(0.0, 30.0),
+            out_input: format_timestamp(0.0, 30.0),
             shared_frame: video::new_shared_frame(),
             has_frame: false,
             is_hdr: false,
@@ -1411,7 +1429,6 @@ impl App {
                 let dur = media.duration_sec.max(0.0);
                 ed.trim_start = spec.trim.as_ref().map(|t| t.start_sec).unwrap_or(0.0).clamp(0.0, dur);
                 ed.trim_end = spec.trim.as_ref().map(|t| t.end_sec).unwrap_or(dur).clamp(ed.trim_start, dur);
-                sync_inout_inputs(ed);
                 if let Some(c) = &spec.crop {
                     ed.crop_enabled = true;
                     ed.crop = c.clone();
@@ -1435,6 +1452,8 @@ impl App {
                     .collect();
                 let (mw, mh) = (media.width, media.height);
                 ed.media = Some(media);
+                // Now that media (and its fps) is set, format the In/Out fields at the real frame rate.
+                sync_inout_inputs(ed);
                 ed.frame_dirty = true;
                 // Open the warm scrub decoder for this clip (synchronous, like `start_player`); it
                 // lives until the next selection drops this Editor.
@@ -1890,53 +1909,78 @@ fn build_export_name(config: &AppConfig, item: &QueueItem, name: &str, ext: &str
     rename::build_renamed_file_name(&config.naming_template, &vars)
 }
 
-/// Format seconds as `M:SS.mmm` (or `H:MM:SS.mmm` past an hour) for the editable playhead field.
-fn format_timestamp(secs: f64) -> String {
-    let total_ms = (secs.max(0.0) * 1000.0).round() as u64;
-    let ms = total_ms % 1000;
-    let s = (total_ms / 1000) % 60;
-    let m = (total_ms / 60_000) % 60;
-    let h = total_ms / 3_600_000;
+/// A usable frame rate for timecode math — the clip's fps, or 30 as a fallback before media loads.
+fn ed_fps(ed: &Editor) -> f64 {
+    ed.media.as_ref().map(|m| m.fps).filter(|f| *f >= 1.0).unwrap_or(30.0)
+}
+
+/// Format seconds as a frame-accurate timecode `M:SS.FF` (or `H:MM:SS.FF` past an hour), where `FF` is
+/// the frame within the second (0..fps-1). Frames are the editor's natural unit — the ←/→ keys and the
+/// preview step by whole frames — so the readout matches what a single step changes.
+fn format_timestamp(secs: f64, fps: f64) -> String {
+    let fpr = (fps.round() as u64).max(1);
+    let total_frames = (secs.max(0.0) * fpr as f64).round() as u64;
+    let f = total_frames % fpr;
+    let total_s = total_frames / fpr;
+    let s = total_s % 60;
+    let m = (total_s / 60) % 60;
+    let h = total_s / 3600;
     if h > 0 {
-        format!("{h}:{m:02}:{s:02}.{ms:03}")
+        format!("{h}:{m:02}:{s:02}.{f:02}")
     } else {
-        format!("{m}:{s:02}.{ms:03}")
+        format!("{m}:{s:02}.{f:02}")
     }
 }
 
-/// Parse `S`, `M:SS`, `M:SS.mmm`, or `H:MM:SS(.mmm)` into seconds. `None` if a component isn't a number.
-fn parse_timestamp(text: &str) -> Option<f64> {
+/// Parse `S`, `M:SS`, `H:MM:SS`, or any of those with a trailing `.FF` frame count, into seconds. The
+/// part after the final `.` is a frame count (converted via `fps`); everything before is base-60
+/// H/M/S. Returns `None` on any non-numeric, negative, or non-finite component (so a stray `nan`/`inf`
+/// can never poison a trim point).
+fn parse_timestamp(text: &str, fps: f64) -> Option<f64> {
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
+    // Round the rate to a whole number of frames per second, matching `format_timestamp`, so a value
+    // it produced parses back to the same time even at fractional rates (59.94/29.97).
+    let fpr = fps.round().max(1.0);
+    // Optional trailing `.FF` frames component.
+    let (time_part, frames) = match text.rsplit_once('.') {
+        Some((t, f)) => {
+            let fr: f64 = f.trim().parse().ok()?;
+            if fr < 0.0 || !fr.is_finite() {
+                return None;
+            }
+            (t, fr / fpr)
+        }
+        None => (text, 0.0),
+    };
     let mut total = 0.0;
-    for part in text.split(':') {
+    for part in time_part.split(':') {
         let v: f64 = part.trim().parse().ok()?;
-        if v < 0.0 {
+        if v < 0.0 || !v.is_finite() {
             return None;
         }
         total = total * 60.0 + v;
     }
-    Some(total)
+    let total = total + frames;
+    total.is_finite().then_some(total)
 }
 
-/// Refresh the timestamp field from the playhead, unless the user is mid-edit.
+/// Refresh the playhead field from `current_time`, unless the user is mid-edit (the fast playback tick
+/// calls this, so the guard keeps live playback from clobbering what's being typed).
 fn sync_time_input(ed: &mut Editor) {
     if !ed.editing_time {
-        ed.time_input = format_timestamp(ed.current_time);
+        ed.time_input = format_timestamp(ed.current_time, ed_fps(ed));
     }
 }
 
-/// Refresh the editable In/Out timestamp fields from `trim_start`/`trim_end`, unless the user is
-/// mid-edit in one (so typing isn't clobbered).
+/// Refresh the editable In/Out fields from `trim_start`/`trim_end`. Only ever called on a committed
+/// change (Set/bump/submit/load), never per-tick, so it can safely overwrite — no edit latch needed.
 fn sync_inout_inputs(ed: &mut Editor) {
-    if !ed.editing_in {
-        ed.in_input = format_timestamp(ed.trim_start);
-    }
-    if !ed.editing_out {
-        ed.out_input = format_timestamp(ed.trim_end);
-    }
+    let fps = ed_fps(ed);
+    ed.in_input = format_timestamp(ed.trim_start, fps);
+    ed.out_input = format_timestamp(ed.trim_end, fps);
 }
 
 /// Raw key event → [`Message::EditorKey`], but only when no widget captured it (a focused text field
@@ -2039,15 +2083,48 @@ mod tests {
     use iced::keyboard::{key::Named, Key, Modifiers};
 
     #[test]
-    fn timestamp_round_trip() {
-        assert_eq!(format_timestamp(65.5), "1:05.500");
-        assert_eq!(format_timestamp(3661.0), "1:01:01.000");
-        assert_eq!(parse_timestamp("90"), Some(90.0));
-        assert_eq!(parse_timestamp("1:05.5"), Some(65.5));
-        assert_eq!(parse_timestamp("1:01:01"), Some(3661.0));
-        assert_eq!(parse_timestamp("  2:00 "), Some(120.0));
-        assert_eq!(parse_timestamp("nope"), None);
-        assert_eq!(parse_timestamp(""), None);
+    fn timecode_formats_as_frames() {
+        assert_eq!(format_timestamp(0.0, 60.0), "0:00.00");
+        // 5.5s @ 60fps = frame 30 within the second.
+        assert_eq!(format_timestamp(5.5, 60.0), "0:05.30");
+        // 30fps: 2.5s = frame 15.
+        assert_eq!(format_timestamp(2.5, 30.0), "0:02.15");
+        // Past an hour shows the hours field.
+        assert_eq!(format_timestamp(3661.0, 60.0), "1:01:01.00");
+    }
+
+    #[test]
+    fn timecode_round_trips() {
+        // Includes fractional (NTSC) rates: format + parse must use the same rounded fps so a produced
+        // timecode parses back to the same time (within a frame's quantization).
+        for &(secs, fps) in &[(5.5, 60.0), (2.5, 30.0), (61.25, 60.0), (0.0, 60.0), (5.5, 59.94), (10.0, 29.97)] {
+            let parsed = parse_timestamp(&format_timestamp(secs, fps), fps).unwrap();
+            assert!((parsed - secs).abs() < 1.0 / fps.round(), "{secs} @ {fps} -> {parsed}");
+        }
+    }
+
+    #[test]
+    fn parse_frames_and_plain_seconds() {
+        assert_eq!(parse_timestamp("5", 60.0), Some(5.0)); // plain seconds
+        assert_eq!(parse_timestamp("1:00", 60.0), Some(60.0)); // m:ss
+        assert_eq!(parse_timestamp("0:05.30", 60.0), Some(5.5)); // frame 30 @ 60 = 0.5s
+    }
+
+    #[test]
+    fn parse_rejects_non_finite_and_negative() {
+        // A stray nan/inf must never reach a trim clamp (it would panic).
+        for bad in ["nan", "NaN", "-nan", "inf", "infinity", "1e400", "1:nan", "5.nan", "-1"] {
+            assert_eq!(parse_timestamp(bad, 60.0), None, "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn parse_handles_hms_and_whitespace() {
+        assert_eq!(parse_timestamp("90", 60.0), Some(90.0));
+        assert_eq!(parse_timestamp("1:01:01", 60.0), Some(3661.0));
+        assert_eq!(parse_timestamp("  2:00 ", 60.0), Some(120.0));
+        assert_eq!(parse_timestamp("nope", 60.0), None);
+        assert_eq!(parse_timestamp("", 60.0), None);
     }
 
     #[test]

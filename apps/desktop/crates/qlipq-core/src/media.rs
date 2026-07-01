@@ -28,6 +28,18 @@ pub struct MediaInfo {
     pub audio_streams: Vec<AudioStreamInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<i64>,
+    /// The container's `encoder` ("encoded by") tag, when present. NVIDIA App writes `"NVIDIA APP"`
+    /// for manual recordings/Instant Replay and `"NVIDIA APP (Highlights)"` for auto-captured
+    /// highlights, which lets qlipq tell auto-saves apart (see [`is_auto_highlight`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<String>,
+}
+
+/// True if the container `encoder` tag marks an auto-captured highlight (NVIDIA App tags these
+/// `"NVIDIA APP (Highlights)"`; manual captures are just `"NVIDIA APP"`). Case-insensitive so a future
+/// casing tweak still matches.
+pub fn is_auto_highlight(encoder: Option<&str>) -> bool {
+    encoder.is_some_and(|e| e.to_lowercase().contains("highlight"))
 }
 
 /// A best-effort, human-friendly label for an audio stream.

@@ -192,6 +192,9 @@ pub struct AppConfig {
     /// Show the editor's debug panel: clip details, the active decoder (hardware vs software), and
     /// live preview buffer stats to help diagnose playback stutter.
     pub debug: bool,
+    /// Hide auto-captured highlight clips (files whose `encoder` tag is NVIDIA App's
+    /// `"NVIDIA APP (Highlights)"`) from the queue, so only deliberate recordings show.
+    pub hide_highlights: bool,
     pub after_export: AfterExportSettings,
     pub output: OutputSettings,
     pub keybinds: Keybinds,
@@ -208,6 +211,7 @@ impl Default for AppConfig {
             preview_max_height: 1080,
             autoplay: true,
             debug: false,
+            hide_highlights: false,
             after_export: AfterExportSettings::default(),
             output: OutputSettings::default(),
             keybinds: Keybinds::default(),

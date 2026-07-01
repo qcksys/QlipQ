@@ -413,14 +413,35 @@ pub struct CachedMedia {
 
 pub type MediaCache = HashMap<String, CachedMedia>;
 
+/// Bump when a probed field is added, so caches written by an older build (which lack it) are
+/// discarded and the library is re-probed once. Raised to 2 for the `encoder` tag (highlight
+/// filtering) — old entries have no `encoder`, so without this they'd never be recognized.
+const MEDIA_CACHE_VERSION: u32 = 2;
+
+#[derive(serde::Deserialize)]
+struct MediaCacheFile {
+    version: u32,
+    entries: MediaCache,
+}
+
+/// Borrowing counterpart for serialization (avoids cloning the whole cache on each debounced save).
+#[derive(serde::Serialize)]
+struct MediaCacheFileRef<'a> {
+    version: u32,
+    entries: &'a MediaCache,
+}
+
 pub fn load_media_cache() -> MediaCache {
     read_app_file("media-cache.json")
-        .and_then(|t| serde_json::from_str(&t).ok())
+        .and_then(|t| serde_json::from_str::<MediaCacheFile>(&t).ok())
+        .filter(|f| f.version == MEDIA_CACHE_VERSION)
+        .map(|f| f.entries)
         .unwrap_or_default()
 }
 
 pub fn save_media_cache(cache: &MediaCache) {
-    if let Ok(json) = serde_json::to_string(cache) {
+    let file = MediaCacheFileRef { version: MEDIA_CACHE_VERSION, entries: cache };
+    if let Ok(json) = serde_json::to_string(&file) {
         let _ = write_app_file("media-cache.json", &json);
     }
 }

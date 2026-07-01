@@ -33,6 +33,7 @@ impl App {
         let visible: Vec<&QueueItem> = self
             .items
             .iter()
+            .filter(|i| !(self.config.hide_highlights && self.is_highlight(&i.path)))
             .filter(|i| match &self.tag_filter {
                 Some(f) if all_tags.contains(f) => i.tags.as_ref().map(|t| t.contains(f)).unwrap_or(false),
                 _ => !item_dismissed(i),
@@ -85,12 +86,16 @@ impl App {
     fn queue_card(&self, item: &QueueItem) -> Element<'_, Message> {
         let selected = self.selected_id.as_deref() == Some(&item.id);
         let status = item.status;
-        let header = row![
+        let mut header = row![
             container(Space::new().width(Length::Fixed(8.0)).height(Length::Fixed(8.0))).style(theme::status_dot(status)),
             text(item.file_name.clone()).size(theme::BODY).font(theme::FONT_MEDIUM).width(Length::Fill),
         ]
         .spacing(theme::SM)
         .align_y(iced::Alignment::Center);
+        // Flag NVIDIA App auto-captured highlights so they're identifiable even when not hidden.
+        if self.is_highlight(&item.path) {
+            header = header.push(chip("Highlight".to_string()));
+        }
         let open = button(
             column![
                 header,
@@ -182,7 +187,7 @@ impl App {
                 .font(Font::MONOSPACE)
                 .style(theme::input)
                 .width(Length::Fixed(110.0)),
-            text(format!("/ {}", format_timestamp(dur))).size(theme::META).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
+            text(format!("/ {}", format_timestamp(dur, media.fps))).size(theme::META).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
         ]
         .spacing(theme::SM)
         .align_y(iced::Alignment::Center);
@@ -291,6 +296,11 @@ impl App {
             ("File", item.file_name.clone()),
             ("Path", item.path.clone()),
             ("Container", container_ext),
+            ("Encoder", match &media.encoder {
+                Some(e) if qlipq_core::media::is_auto_highlight(Some(e)) => format!("{e} — auto-captured highlight"),
+                Some(e) => e.clone(),
+                None => "—".into(),
+            }),
             ("Video", format!("{} · {}×{} · {:.3} fps{}", media.video_codec, media.width, media.height, media.fps, if ed.is_hdr { " · HDR" } else { "" })),
             ("Source bitrate", bitrate),
             ("Audio tracks", format!("{}", media.audio_streams.len())),
@@ -493,6 +503,13 @@ impl App {
             }
         }
         folders = folders.push(add_row);
+        folders = folders.push(
+            checkbox(self.config.hide_highlights)
+                .label("Hide auto-captured highlights (NVIDIA App)")
+                .text_size(theme::LABEL)
+                .style(theme::checkbox_style)
+                .on_toggle(Message::ToggleHideHighlights),
+        );
 
         // Output folder.
         let output_folder = row![
