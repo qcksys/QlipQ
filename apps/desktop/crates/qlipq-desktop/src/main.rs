@@ -122,6 +122,12 @@ choice!(AudioKbpsChoice, i64, {
     K192 => ("192 kbps", 192),
     K256 => ("256 kbps", 256),
 });
+choice!(PreviewResChoice, i64, {
+    Source => ("Source (sharpest)", 0),
+    P1440 => ("1440p", 1440),
+    P1080 => ("1080p", 1080),
+    P720 => ("720p (fastest)", 720),
+});
 choice!(AfterChoice, AfterExportAction, {
     Nothing => ("Do nothing", AfterExportAction::Nothing),
     Delete => ("Delete", AfterExportAction::Delete),
@@ -222,6 +228,10 @@ struct App {
     items: Vec<QueueItem>,
     known_paths: HashSet<String>,
     edit_store: host::EditStore,
+    /// Persisted probe results (duration + parsed metadata) keyed by path, so the backlog isn't
+    /// re-probed on every launch. Written back debounced via `media_cache_dirty` on the tick.
+    media_cache: host::MediaCache,
+    media_cache_dirty: bool,
     selected_id: Option<String>,
     view: View,
     tag_filter: Option<String>,
@@ -251,7 +261,16 @@ enum Message {
     OpenRepo,
     RescanAll,
     Scanned(Vec<String>),
-    FileInfoLoaded(Vec<(String, i64, i64)>),
+    /// Freshly scanned files classified against the media cache: stats for the list, plus any cached
+    /// probe so unchanged files skip re-probing.
+    MediaResolved(Vec<host::MediaResolution>),
+    /// A background duration probe finished for a cache miss (`size`/`modified_ms` stamp the cache).
+    MediaProbedBg {
+        path: String,
+        size: i64,
+        modified_ms: i64,
+        result: Result<(MediaInfo, bool), String>,
+    },
     PresetsDetected(Option<String>, Option<String>),
     SelectItem(String),
     MediaProbed(String, Result<(MediaInfo, bool), String>),
@@ -322,6 +341,7 @@ enum Message {
     /// preview and persists.
     SetHdrPreviewGamma(f64),
     ApplyHdrPreviewGamma,
+    SetPreviewRes(PreviewResChoice),
     ToggleAutoplay(bool),
     ToggleDebug(bool),
     /// Copy the given text (the debug panel's diagnostics) to the system clipboard.
@@ -349,6 +369,7 @@ impl App {
         let _ = host::write_config_schema();
         let config = host::load_config();
         let edit_store = host::load_edit_store();
+        let media_cache = host::load_media_cache();
         let watcher = host::start_watch(&config.watched_folders, &config.video_extensions);
 
         let app = App {
@@ -356,6 +377,8 @@ impl App {
             items: Vec::new(),
             known_paths: HashSet::new(),
             edit_store,
+            media_cache,
+            media_cache_dirty: false,
             selected_id: None,
             view: View::Queue,
             tag_filter: None,
@@ -466,31 +489,10 @@ impl App {
         for item in new_items.into_iter().rev() {
             self.items.insert(0, item);
         }
-        let to_probe = fresh.clone();
-        let info = Task::perform(
-            blocking(move || {
-                host::file_info(&fresh).into_iter().map(|f| (f.path, f.size, f.modified_ms)).collect()
-            }),
-            Message::FileInfoLoaded,
-        );
-        // Background duration probing, capped at PROBE_SEM permits so a large folder doesn't
-        // saturate the blocking pool and starve the editor's on-demand probe.
-        let durations = Task::batch(to_probe.into_iter().map(move |path| {
-            let id_path = path.clone();
-            Task::perform(
-                async move {
-                    let _permit = PROBE_SEM.acquire().await;
-                    blocking(move || libav::probe(&path).map(|(m, _)| m)).await
-                },
-                move |res| {
-                    Message::FileInfoLoaded(match res {
-                        Ok(m) => vec![(format!("dur:{id_path}"), m.duration_sec as i64, m.duration_sec.to_bits() as i64)],
-                        Err(_) => vec![],
-                    })
-                },
-            )
-        }));
-        Task::batch([info, durations])
+        // Stat the fresh files and pair each with its cached probe when unchanged; only misses are
+        // probed (see `Message::MediaResolved`), so a full backlog isn't re-probed on every launch.
+        let cache = self.media_cache.clone();
+        Task::perform(blocking(move || host::resolve_media(&fresh, &cache)), Message::MediaResolved)
     }
 
     fn effective_output(&self, item: &QueueItem) -> OutputSettings {
@@ -535,19 +537,53 @@ impl App {
                 return Task::perform(blocking(move || host::scan_folders(&folders, &exts)), Message::Scanned);
             }
             Message::Scanned(paths) => return self.add_paths(paths),
-            Message::FileInfoLoaded(infos) => {
-                for (path, size, modified) in infos {
-                    if let Some(rest) = path.strip_prefix("dur:") {
-                        let dur = f64::from_bits(modified as u64);
-                        if let Some(item) = self.items.iter_mut().find(|i| i.path == rest) {
-                            if item.duration_sec.is_none() {
-                                item.duration_sec = Some(dur);
-                            }
-                        }
-                    } else if let Some(item) = self.items.iter_mut().find(|i| i.path == path) {
+            Message::MediaResolved(list) => {
+                let mut to_probe: Vec<(String, i64, i64)> = Vec::new();
+                for host::MediaResolution { path, size, modified_ms, cached } in list {
+                    if let Some(item) = self.items.iter_mut().find(|i| i.path == path) {
                         item.file_size_bytes = Some(size);
-                        item.file_modified_at = Some(iso::from_unix_ms(modified));
+                        item.file_modified_at = Some(iso::from_unix_ms(modified_ms));
+                        if let Some(c) = cached {
+                            item.duration_sec = Some(c.media.duration_sec);
+                            continue; // cache hit — no re-probe
+                        }
+                    } else if cached.is_some() {
+                        continue; // item already gone; nothing to probe
                     }
+                    to_probe.push((path, size, modified_ms));
+                }
+                if to_probe.is_empty() {
+                    return Task::none();
+                }
+                // Probe only the misses, capped at PROBE_SEM permits so a large folder doesn't
+                // saturate the blocking pool and starve the editor's on-demand probe.
+                return Task::batch(to_probe.into_iter().map(|(path, size, modified_ms)| {
+                    let id_path = path.clone();
+                    Task::perform(
+                        async move {
+                            let _permit = PROBE_SEM.acquire().await;
+                            blocking(move || libav::probe(&path)).await
+                        },
+                        move |result| Message::MediaProbedBg {
+                            path: id_path.clone(),
+                            size,
+                            modified_ms,
+                            result,
+                        },
+                    )
+                }));
+            }
+            Message::MediaProbedBg { path, size, modified_ms, result } => {
+                if let Ok((media, is_hdr)) = result {
+                    if let Some(item) = self.items.iter_mut().find(|i| i.path == path) {
+                        item.duration_sec = Some(media.duration_sec);
+                    }
+                    self.media_cache.insert(
+                        path,
+                        host::CachedMedia { size_bytes: size, modified_ms, media, is_hdr },
+                    );
+                    // Debounced write on the tick — a first-run backlog probes many files at once.
+                    self.media_cache_dirty = true;
                 }
             }
             Message::PresetsDetected(obs, nvidia) => {
@@ -752,6 +788,7 @@ impl App {
                 self.commit_spec();
             }
             Message::AudioToggle(index, on) => {
+                let playing = self.editor.as_ref().map(|e| e.playing).unwrap_or(false);
                 if let Some(ed) = &mut self.editor {
                     if let Some(r) = ed.audio.iter_mut().find(|r| r.index == index) {
                         r.enabled = on;
@@ -759,6 +796,12 @@ impl App {
                     self.audio_defaults = editor_audio_specs(ed);
                 }
                 self.commit_spec();
+                // The running monitor mix was started with a fixed track set, so a live volume change
+                // (set_gain) can't add/remove a track. Restart from the current position so the toggle
+                // is heard immediately instead of only after the next play/seek.
+                if playing {
+                    return self.play_from_current();
+                }
             }
             Message::AudioVolume(index, vol) => {
                 if let Some(ed) = &mut self.editor {
@@ -976,6 +1019,19 @@ impl App {
                 };
                 return Task::batch([save, refresh]);
             }
+            Message::SetPreviewRes(c) => {
+                // Rebuild the decoders at the new preview size, persist, and refresh what's on screen
+                // (restart playback if playing, else re-extract the current frame).
+                self.config.preview_max_height = c.to_core();
+                self.reopen_scrubber();
+                let save = self.save_config_task();
+                let refresh = if self.editor.as_ref().map(|e| e.playing).unwrap_or(false) {
+                    self.play_from_current()
+                } else {
+                    self.request_frame()
+                };
+                return Task::batch([save, refresh]);
+            }
             Message::ToggleAutoplay(on) => { self.config.autoplay = on; return self.save_config_task(); }
             Message::ToggleDebug(on) => { self.config.debug = on; return self.save_config_task(); }
             Message::CopyText(s) => return iced::clipboard::write(s),
@@ -1008,6 +1064,13 @@ impl App {
                     ed.progress_display = *p;
                 }
             }
+        }
+        // Flush new probe results to the media cache, coalesced so a backlog's probe storm is a
+        // handful of writes rather than one per file.
+        if self.media_cache_dirty {
+            self.media_cache_dirty = false;
+            let cache = self.media_cache.clone();
+            std::thread::spawn(move || host::save_media_cache(&cache));
         }
         Task::batch(tasks)
     }
@@ -1059,18 +1122,24 @@ impl App {
         sync_time_input(ed);
     }
 
-    /// Rebuild the warm scrub decoder for the open clip, picking up the current `hdr_preview_gamma`.
-    /// Used when a preview-affecting setting changes so the next extracted frame reflects it.
+    /// Rebuild the warm scrub decoder for the open clip, picking up the current preview settings
+    /// (`hdr_preview_gamma`, `preview_max_height`). Used when a preview-affecting setting changes so
+    /// the next extracted frame reflects it.
     fn reopen_scrubber(&mut self) {
         let Some(ed) = self.editor.as_ref() else { return };
         let Some(media) = ed.media.as_ref() else { return };
         let (mw, mh, is_hdr, id) = (media.width, media.height, ed.is_hdr, ed.item_id.clone());
         let path = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone());
         let gamma = self.config.hdr_preview_gamma;
+        let max_h = self.config.preview_max_height;
         let scrubber = path
-            .and_then(|p| ScrubDecoder::open(&p, mw, mh, is_hdr, gamma))
+            .and_then(|p| ScrubDecoder::open(&p, mw, mh, is_hdr, gamma, max_h))
             .map(|s| Arc::new(Mutex::new(s)));
         if let Some(ed) = self.editor.as_mut() {
+            // Preview size may have changed, so refresh the debug-panel capture too.
+            if let Some(s) = scrubber.as_ref().and_then(|s| s.lock().ok()) {
+                ed.preview_dims = Some(s.preview_dims());
+            }
             ed.scrubber = scrubber;
         }
     }
@@ -1124,7 +1193,8 @@ impl App {
             return Task::none();
         };
         let gamma = self.config.hdr_preview_gamma;
-        let player = start_player(&path, start, mw, mh, mfps, is_hdr, audio_tracks, gamma);
+        let max_h = self.config.preview_max_height;
+        let player = start_player(&path, start, mw, mh, mfps, is_hdr, audio_tracks, gamma, max_h);
         let started = player.is_some();
         if let Some(ed) = &mut self.editor {
             ed.current_time = start;
@@ -1221,8 +1291,9 @@ impl App {
                 // lives until the next selection drops this Editor.
                 let path = self.items.iter().find(|i| i.id == id).map(|i| i.path.clone());
                 let gamma = self.config.hdr_preview_gamma;
+                let max_h = self.config.preview_max_height;
                 ed.scrubber = path
-                    .and_then(|p| ScrubDecoder::open(&p, mw, mh, is_hdr, gamma))
+                    .and_then(|p| ScrubDecoder::open(&p, mw, mh, is_hdr, gamma, max_h))
                     .map(|s| Arc::new(Mutex::new(s)));
                 // Capture the decode path + preview size once (the scrubber isn't driven yet, so the
                 // lock is free) for the debug panel — representative of the streaming player too.
@@ -1483,6 +1554,11 @@ impl App {
             if let Some(stored) = self.edit_store.remove(old) {
                 self.edit_store.insert(new_path.to_string(), stored);
             }
+            // The file's bytes are unchanged, so its cached probe follows the new path.
+            if let Some(cached) = self.media_cache.remove(old) {
+                self.media_cache.insert(new_path.to_string(), cached);
+                self.media_cache_dirty = true;
+            }
         }
         self.known_paths.insert(new_path.to_string());
         if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
@@ -1511,6 +1587,15 @@ impl App {
             let path = self.items[pos].path.clone();
             self.known_paths.remove(&path);
             self.items.remove(pos);
+            // A deleted recording keeps no persisted app data: drop its edit + cached probe.
+            if self.edit_store.remove(&path).is_some() {
+                let store = self.edit_store.clone();
+                std::thread::spawn(move || host::save_edit_store(&store));
+            }
+            if self.media_cache.remove(&path).is_some() {
+                let cache = self.media_cache.clone();
+                std::thread::spawn(move || host::save_media_cache(&cache));
+            }
         }
         if self.selected_id.as_deref() == Some(id) {
             self.selected_id = None;
@@ -1562,10 +1647,16 @@ impl App {
             None
         };
 
-        match overlay {
-            Some(m) => stack![base, m].into(),
-            None => base,
+        // Always root the tree in a `stack`, even with no modal, so the root widget's type never
+        // changes. iced rebuilds a widget's whole state subtree when the root tag flips (container ↔
+        // stack), which would reset the queue scrollable to the top when a modal opens — e.g. the
+        // delete-confirm dialog. Keeping `base` as stack child 0 preserves its scroll offset across
+        // modal open/close and the item removal that follows a delete.
+        let mut layers = stack![base];
+        if let Some(m) = overlay {
+            layers = layers.push(m);
         }
+        layers.into()
     }
 
     // ---- view helpers are defined in the `views` impl block below ----

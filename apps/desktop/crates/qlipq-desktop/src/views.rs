@@ -574,11 +574,21 @@ impl App {
         ]
         .spacing(theme::SM);
 
+        // Preview quality (resolution the preview decodes/tonemaps at — separate from export size).
+        let preview_quality = column![
+            pick_list(PreviewResChoice::ALL.to_vec(), Some(PreviewResChoice::from_core(self.config.preview_max_height)), Message::SetPreviewRes).style(theme::pick_list_style),
+            text("Resolution the preview decodes at (never upscales past the source). Higher is sharper but costs more decode/GPU work — lower it if playback stutters. Preview only; exports are unaffected.")
+                .size(theme::SMALL)
+                .style(|t| text::Style { color: Some(theme::muted(t)) }),
+        ]
+        .spacing(theme::XS);
+
         let body = column![
             text("Settings").size(theme::DISPLAY).font(theme::FONT_BOLD),
             section("Watched folders", folders.into()),
             section("Output folder", output_folder.into()),
             section("Output defaults", column![quality, encode_row, rate_row].spacing(theme::SM).into()),
+            section("Preview quality", preview_quality.into()),
             section("Playback", playback.into()),
             section(
                 "Naming template",

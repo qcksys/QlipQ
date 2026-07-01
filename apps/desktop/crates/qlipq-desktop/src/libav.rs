@@ -339,6 +339,7 @@ pub fn start_player(
     is_hdr: bool,
     audio_tracks: Vec<(i64, f64)>,
     gamma: f64,
+    max_h: i64,
 ) -> Option<Player> {
     let _log = crate::log_ctx::enter(path);
     let cpath = CString::new(path).ok()?;
@@ -354,7 +355,7 @@ pub fn start_player(
     let file_has_audio = input.find_best_stream(ffi::AVMEDIA_TYPE_AUDIO).ok().flatten().is_some();
     let has_audio = file_has_audio && !audio_tracks.is_empty();
 
-    let dims = placebo_dims(src_w, src_h);
+    let dims = placebo_dims(src_w, src_h, max_h);
     let fps = if src_fps.is_finite() && src_fps > 0.0 { src_fps.min(60.0) } else { 30.0 };
 
     let shared = Arc::new(Shared {
@@ -452,7 +453,7 @@ pub struct ScrubDecoder {
 impl ScrubDecoder {
     /// Open the file and build the video decoder once (the filter graph is built lazily on first use).
     /// `None` if the file/decoder can't open.
-    pub fn open(path: &str, src_w: i64, src_h: i64, is_hdr: bool, gamma: f64) -> Option<Self> {
+    pub fn open(path: &str, src_w: i64, src_h: i64, is_hdr: bool, gamma: f64, max_h: i64) -> Option<Self> {
         let _log = crate::log_ctx::enter(path);
         let cpath = CString::new(path).ok()?;
         let input = AVFormatContextInput::open(&cpath).ok()?;
@@ -464,7 +465,7 @@ impl ScrubDecoder {
             vid_idx: vid_idx as i32,
             tb_v,
             sar,
-            dims: placebo_dims(src_w, src_h),
+            dims: placebo_dims(src_w, src_h, max_h),
             is_hdr,
             gamma,
             pix_fmt,
@@ -480,7 +481,8 @@ impl ScrubDecoder {
         self.hw_decode
     }
 
-    /// The preview output size (≤720 tall, aspect-preserved) this decoder renders frames at.
+    /// The preview output size (aspect-preserved, capped per the preview-quality setting) this
+    /// decoder renders frames at.
     pub fn preview_dims(&self) -> (u32, u32) {
         self.dims
     }
@@ -918,6 +920,15 @@ fn audio_segment(
                     if let Some(a) = audio.as_ref() {
                         if a.producer.occupied_len() >= prime {
                             started = a.start();
+                            if !started {
+                                // The device won't start (e.g. a WASAPI failure). Don't keep filling a
+                                // ring that will never drain — that hangs this thread and freezes video
+                                // on the first frame. Fall back to silent wall-clock playback, matching
+                                // the pre-roll refactor's predecessor (`build_audio_out`'s old play()?).
+                                *shared.clock.wall.lock().unwrap() = Some((Instant::now(), start));
+                                shared.clock.use_audio.store(false, Ordering::Relaxed);
+                                return SegEnd::Eof;
+                            }
                         }
                     }
                 }
@@ -1121,10 +1132,11 @@ fn build_audio_out(device: &cpal::Device, played: Arc<AtomicU64>, stats: Arc<Pla
         return None;
     }
     let config = supported.config();
-    // ~2 s of audio. Audio decode is cheap but the audio thread competes for CPU with continuous
-    // 1440p video decode + libplacebo; a deep ring lets it build a lead during light moments and
-    // coast through heavy-decode bursts without the cpal callback hitting silence (dropouts).
-    let cap = (out_rate as usize * out_ch * 2).max(out_ch * 2048);
+    // ~0.5 s of audio. The ring is the monitor-mix latency: everything in it was already summed at
+    // the levels in force when it was pushed, so per-track volume/enable changes aren't heard until it
+    // drains. A shallow ring keeps that responsive while still giving the (cheap AAC) audio thread a
+    // cushion to coast through brief CPU contention from the video decode/libplacebo work.
+    let cap = (out_rate as usize * out_ch / 2).max(out_ch * 2048);
     let (producer, mut consumer) = HeapRb::<f32>::new(cap).split();
     let played_cb = Arc::clone(&played);
     let stream = device
@@ -1154,12 +1166,13 @@ fn build_audio_out(device: &cpal::Device, played: Arc<AtomicU64>, stats: Arc<Pla
 
 // ---- setup helpers ----
 
-/// Preview output size: ≤720 tall, preserving aspect, both dimensions even (libplacebo/scale want
-/// even). Matches `host::preview_dims` so the two preview paths agree on geometry.
-fn placebo_dims(src_w: i64, src_h: i64) -> (u32, u32) {
+/// Preview output size: height capped at `max_h` (px; `0` = source, no cap — never upscales),
+/// preserving aspect, both dimensions even (libplacebo/scale want even).
+fn placebo_dims(src_w: i64, src_h: i64, max_h: i64) -> (u32, u32) {
     let sw = src_w.max(2) as f64;
     let sh = src_h.max(2) as f64;
-    let h = ((sh.min(720.0).round() as i64) & !1).max(2);
+    let cap = if max_h > 0 { (max_h as f64).min(sh) } else { sh };
+    let h = ((cap.round() as i64) & !1).max(2);
     let w = (((sw * h as f64 / sh).round() as i64) & !1).max(2);
     (w as u32, h as u32)
 }
@@ -1381,7 +1394,9 @@ fn build_video_filter<'g>(
             "libplacebo=w={w}:h={h}:tonemapping=auto:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc{lift},format=rgba"
         ))
     } else {
-        CString::new(format!("scale={w}:{h}:flags=bilinear,format=rgba"))
+        // lanczos: a sharper downscale than bilinear (the preview is usually shrinking the source),
+        // and cheap on the CPU for SDR. HDR goes through libplacebo above, which scales itself.
+        CString::new(format!("scale={w}:{h}:flags=lanczos,format=rgba"))
     }
     .map_err(|e| e.to_string())?;
 

@@ -15,6 +15,7 @@ fn autoplay_defaults_on_and_debug_off() {
     let cfg = AppConfig::default();
     assert!(cfg.autoplay);
     assert!(!cfg.debug);
+    assert_eq!(cfg.preview_max_height, 1080);
     // Missing keys keep the defaults; an explicit value is honored.
     assert!(config_json::parse("{}").autoplay);
     assert!(!config_json::parse(r#"{"autoplay":false}"#).autoplay);

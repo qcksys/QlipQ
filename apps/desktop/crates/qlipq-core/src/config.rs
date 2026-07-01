@@ -182,6 +182,11 @@ pub struct AppConfig {
     /// Preview only — exports are unaffected; SDR clips ignore it.
     #[schemars(range(min = 0.1, max = 10.0))]
     pub hdr_preview_gamma: f64,
+    /// Max height (px) the **preview** decodes/tonemaps at; `0` = source resolution. Never upscales.
+    /// Higher is sharper but costs more decode/GPU work — lower it if the preview stutters. Preview
+    /// only; exports use the source and the separate output resolution setting.
+    #[schemars(range(min = 0))]
+    pub preview_max_height: i64,
     /// Start playback automatically as soon as a clip is selected. Off opens clips paused.
     pub autoplay: bool,
     /// Show the editor's debug panel: clip details, the active decoder (hardware vs software), and
@@ -200,6 +205,7 @@ impl Default for AppConfig {
             video_extensions: DEFAULT_VIDEO_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
             naming_template: "{date}_{source}_{name}".into(),
             hdr_preview_gamma: 1.8,
+            preview_max_height: 1080,
             autoplay: true,
             debug: false,
             after_export: AfterExportSettings::default(),

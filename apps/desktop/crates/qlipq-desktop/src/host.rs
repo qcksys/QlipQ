@@ -11,6 +11,7 @@ use std::time::UNIX_EPOCH;
 use qlipq_core::config::AppConfig;
 use qlipq_core::config_json;
 use qlipq_core::detect::{detect_obs_recording_folder, ObsConfigFiles};
+use qlipq_core::media::MediaInfo;
 
 /// Normalize a path to forward slashes (matches the web app's `toPosixPath`).
 pub fn to_posix(path: &str) -> String {
@@ -121,26 +122,37 @@ pub fn scan_folders(folders: &[String], extensions: &[String]) -> Vec<String> {
     found
 }
 
+/// One recording's on-disk stats paired with a still-valid cached probe, if any. `cached` is `Some`
+/// when a [`MediaCache`] entry matches the file's current size + mtime, so it needs no re-probe.
 #[derive(Debug, Clone)]
-pub struct FileInfo {
+pub struct MediaResolution {
     pub path: String,
     pub size: i64,
     pub modified_ms: i64,
+    pub cached: Option<CachedMedia>,
 }
 
-pub fn file_info(paths: &[String]) -> Vec<FileInfo> {
+/// Stat each path and pair it with its cached probe when the file is unchanged (size + mtime match).
+/// Runs on the blocking pool; the caller probes only the misses (`cached == None`), so a whole
+/// backlog isn't re-probed on every launch.
+pub fn resolve_media(paths: &[String], cache: &MediaCache) -> Vec<MediaResolution> {
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
         let Ok(meta) = std::fs::metadata(path) else {
             continue;
         };
+        let size = meta.len() as i64;
         let modified_ms = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        out.push(FileInfo { path: path.clone(), size: meta.len() as i64, modified_ms });
+        let cached = cache
+            .get(path)
+            .filter(|c| c.size_bytes == size && c.modified_ms == modified_ms)
+            .cloned();
+        out.push(MediaResolution { path: path.clone(), size, modified_ms, cached });
     }
     out
 }
@@ -371,5 +383,32 @@ pub fn load_edit_store() -> EditStore {
 pub fn save_edit_store(store: &EditStore) {
     if let Ok(json) = serde_json::to_string(store) {
         let _ = write_app_file("edits.json", &json);
+    }
+}
+
+/// A cached probe result for one recording, persisted to `media-cache.json` so the queue's durations
+/// (and other parsed metadata) survive restarts without re-probing every file. `size_bytes` +
+/// `modified_ms` invalidate the entry when the file changes on disk, so a replaced/re-encoded
+/// recording is re-probed rather than trusted.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedMedia {
+    pub size_bytes: i64,
+    pub modified_ms: i64,
+    pub media: MediaInfo,
+    pub is_hdr: bool,
+}
+
+pub type MediaCache = HashMap<String, CachedMedia>;
+
+pub fn load_media_cache() -> MediaCache {
+    read_app_file("media-cache.json")
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_media_cache(cache: &MediaCache) {
+    if let Ok(json) = serde_json::to_string(cache) {
+        let _ = write_app_file("media-cache.json", &json);
     }
 }
