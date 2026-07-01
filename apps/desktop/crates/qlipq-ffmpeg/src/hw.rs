@@ -86,13 +86,19 @@ fn rate_control(vendor: Vendor, s: &OutputSettings) -> (Vec<(&'static str, Strin
             opts.push(("preset", nvenc_preset(&s.encoder_preset).to_string()));
             match (cq, bitrate) {
                 (Some(c), Some(b)) => {
+                    // Constrained: constant-quality VBR with a bitrate ceiling (the cap gives VBR the
+                    // headroom it needs, so `cq` isn't starved the way it is with no ceiling below).
                     opts.push(("rc", "vbr".into()));
                     opts.push(("cq", c.to_string()));
-                    maxr = Some(b); // constrained: quality target with a bitrate ceiling
+                    maxr = Some(b);
                 }
                 (Some(c), None) => {
-                    opts.push(("rc", "vbr".into()));
-                    opts.push(("cq", c.to_string()));
+                    // Pure constant quality, no bitrate cap. NVENC's VBR+CQ badly under-shoots here
+                    // (≈4–5× smaller / lower quality than the equivalent CLI encode) because with no
+                    // target/max bitrate it collapses to a low default; constant-QP honors the level
+                    // instead — matching the AMF/QSV constant-quality paths.
+                    opts.push(("rc", "constqp".into()));
+                    opts.push(("qp", c.to_string()));
                 }
                 (None, Some(b)) => {
                     opts.push(("rc", "vbr".into()));
@@ -183,7 +189,8 @@ mod tests {
     }
 
     #[test]
-    fn nvenc_crf_maps_to_cq_and_preset() {
+    fn nvenc_crf_maps_to_constqp_and_preset() {
+        // CRF with no bitrate cap → constant-QP (NVENC's VBR+CQ under-shoots without a ceiling).
         let p = plan_hw_video(
             &settings(|s| {
                 s.quality_mode = QualityMode::Crf;
@@ -194,8 +201,8 @@ mod tests {
             |_| true,
         )
         .unwrap();
-        assert!(p.opts.contains(&("rc", "vbr".to_string())));
-        assert!(p.opts.contains(&("cq", "20".to_string())));
+        assert!(p.opts.contains(&("rc", "constqp".to_string())));
+        assert!(p.opts.contains(&("qp", "20".to_string())));
         assert!(p.opts.contains(&("preset", "p6".to_string())));
         assert_eq!(p.bitrate_kbps, None);
     }
@@ -233,8 +240,10 @@ mod tests {
     }
 
     #[test]
-    fn preset_quality_maps_named_preset_to_cq() {
+    fn preset_quality_maps_named_preset_to_constqp() {
+        // Preset quality has no bitrate cap → constant-QP at the preset's level (High → 18).
         let p = plan_hw_video(&settings(|s| s.quality_preset = QualityPreset::High), false, |_| true).unwrap();
-        assert!(p.opts.contains(&("cq", "18".to_string()))); // High → 18
+        assert!(p.opts.contains(&("rc", "constqp".to_string())));
+        assert!(p.opts.contains(&("qp", "18".to_string())));
     }
 }

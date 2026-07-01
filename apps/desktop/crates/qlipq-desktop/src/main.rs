@@ -1312,8 +1312,12 @@ impl App {
                     crop: None,
                     audio_tracks: qlipq_core::edit_spec::default_edit_spec(Some(&media)).audio_tracks,
                 });
-                ed.trim_start = spec.trim.as_ref().map(|t| t.start_sec).unwrap_or(0.0);
-                ed.trim_end = spec.trim.as_ref().map(|t| t.end_sec).unwrap_or(media.duration_sec);
+                // Clamp a persisted trim to the real duration (a stale edits.json or a shrunk file can
+                // hold end_sec > duration), so the out-point stays ≤ duration like the SetOut handler
+                // enforces — the playback stop/restart logic relies on that invariant.
+                let dur = media.duration_sec.max(0.0);
+                ed.trim_start = spec.trim.as_ref().map(|t| t.start_sec).unwrap_or(0.0).clamp(0.0, dur);
+                ed.trim_end = spec.trim.as_ref().map(|t| t.end_sec).unwrap_or(dur).clamp(ed.trim_start, dur);
                 if let Some(c) = &spec.crop {
                     ed.crop_enabled = true;
                     ed.crop = c.clone();

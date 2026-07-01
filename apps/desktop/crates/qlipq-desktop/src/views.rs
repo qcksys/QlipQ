@@ -419,7 +419,9 @@ impl App {
         let mut col = column![checkbox(enabled).label("Override quality for this clip").text_size(theme::LABEL).style(theme::checkbox_style).on_toggle(Message::ToggleOverride)].spacing(theme::SM);
         if enabled {
             let out = self.effective_output(item);
-            let mut fields = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::OverrideQm).style(theme::pick_list_style)].spacing(theme::SM);
+            let mut fields = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::OverrideQm).style(theme::pick_list_style)]
+                .spacing(theme::SM)
+                .align_y(iced::Alignment::End);
             match out.quality_mode {
                 QualityMode::Preset => {
                     fields = fields.push(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::OverrideQp).style(theme::pick_list_style));
@@ -496,8 +498,11 @@ impl App {
         ]
         .spacing(theme::SM);
 
-        // Output defaults.
-        let mut quality = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::SetQm).style(theme::pick_list_style)].spacing(theme::SM);
+        // Output defaults. Bottom-align so the mode picker shares a baseline with the numeric field
+        // (which carries a label above it) instead of floating above it.
+        let mut quality = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::SetQm).style(theme::pick_list_style)]
+            .spacing(theme::SM)
+            .align_y(iced::Alignment::End);
         match out.quality_mode {
             QualityMode::Preset => quality = quality.push(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::SetQp).style(theme::pick_list_style)),
             QualityMode::Crf | QualityMode::Vbr => {
