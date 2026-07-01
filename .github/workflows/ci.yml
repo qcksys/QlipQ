@@ -31,8 +31,7 @@ jobs:
       - name: Format, lint & type check
         run: vp check
 
-      - name: Test
-        run: vp run -r test
-
+      # No JS/TS tests in the pnpm workspace (website + OBS script) — the correctness gate is the
+      # Rust `cargo test` in build-desktop.yml. Re-add a test step here if JS tests are introduced.
       - name: Build website
         run: vp run -r build

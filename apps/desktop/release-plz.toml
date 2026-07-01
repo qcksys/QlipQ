@@ -1,9 +1,12 @@
 # release-plz config for the qlipq desktop Cargo workspace.
 #
-# The crates here are internal path-deps, NOT published to crates.io — so versions are derived
-# from git tags (`git_only`) and `cargo publish` is skipped.
+# The crates here are internal path-deps, NOT published to crates.io, so `cargo publish` is skipped
+# (`publish = false`). We deliberately do NOT set `git_only` here: its worktree-based version
+# detection opens the git repo at the manifest dir (`apps/desktop`), but our `.git` is at the repo
+# root, so it errors ("failed to open repository") for this subdirectory Cargo workspace. The default
+# registry-based path handles the subdirectory layout correctly (crates absent from crates.io are
+# treated as unreleased).
 [workspace]
-git_only = true # version from git tags (not the crates.io registry)
 publish = false # never run `cargo publish` — these crates are internal, not on crates.io
 git_release_enable = false # don't create a GitHub release per crate…
 git_tag_enable = false # …and no per-crate git tag by default
