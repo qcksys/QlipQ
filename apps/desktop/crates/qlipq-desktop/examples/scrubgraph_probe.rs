@@ -9,7 +9,7 @@
 //! corresponds to the target). The graph is reused, so frames get monotonically-rewritten PTS to keep
 //! buffersrc happy across backward seeks; the realized image is unaffected.
 //!
-//!   cargo run --release -p qlipq-desktop --example scrubgraph_probe --features libav-preview -- "<hdr clip>"
+//!   cargo run --release -p qlipq-desktop --example scrubgraph_probe -- "<hdr clip>"
 
 use std::ffi::CString;
 use std::time::Instant;

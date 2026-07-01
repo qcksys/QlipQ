@@ -9,7 +9,7 @@
 //! Standalone on purpose — zero blast radius on the app. Mirrors the decode/filter pattern of
 //! `play_probe`/`hdr_probe` and adds the encoder + muxer.
 //!
-//!   cargo run --release -p qlipq-desktop --example encode_probe --features libav-preview -- \
+//!   cargo run --release -p qlipq-desktop --example encode_probe -- \
 //!       "<input>" "<out.mp4>" [encoder=h264_nvenc|auto] [seconds=5]
 //!
 //! Verify by re-probing the output (`ffprobe -show_streams out.mp4`: codec, pix_fmt, color tags,

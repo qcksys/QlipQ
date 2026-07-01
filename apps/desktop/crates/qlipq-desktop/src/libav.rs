@@ -1,10 +1,9 @@
-//! In-process libav preview player (feature `libav-preview`).
+//! In-process libav preview player.
 //!
-//! This replaces the CLI ffmpeg preview ([`crate::host::Player`]) with a decoder that runs *inside*
-//! the process, so it can use **libplacebo** for VLC-quality HDR→SDR tonemapping and play **synced
-//! audio** — neither of which the per-frame CLI path can do. It mirrors `host::Player`'s interface
-//! (`poll`/`dimensions`/`fps`) so [`crate::main`] is feature-agnostic, and adds `position()` (an
-//! authoritative master clock) plus `try_seek()` (a seek command channel — no decoder re-init).
+//! The preview decoder runs *inside* the process, so it can use **libplacebo** for VLC-quality
+//! HDR→SDR tonemapping and play **synced audio** — neither of which an external per-frame ffmpeg
+//! process could do. It exposes `poll`/`dimensions`/`fps` plus `position()` (an authoritative master
+//! clock) and `try_seek()` (a seek command channel — no decoder re-init).
 //!
 //! Threading: **audio and video decode on separate threads**, each with its own demuxer (the file is
 //! opened twice). This is deliberate — **audio is the master clock**, so it must keep its output
@@ -12,8 +11,8 @@
 //! libplacebo frame starve the audio and stutter it. The audio thread decodes → resamples → feeds a
 //! lock-free ring buffer drained by cpal (which counts samples played into the clock); the video
 //! thread decodes → libplacebo/scale → RGBA into a small queue. The UI presents the video frame whose
-//! PTS is due against the master clock (a wall clock when the clip has no audio). Export is unaffected
-//! — it stays on the parity-tested CLI arg-vector; only the preview decodes in-process.
+//! PTS is due against the master clock (a wall clock when the clip has no audio). Export runs through a
+//! separate in-process libav path ([`crate::export`]); only the preview lives here.
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
@@ -181,6 +180,12 @@ struct Shared {
     video: Mutex<VecDeque<(f64, Vec<u8>)>>,
     /// Set when the video decoder reaches EOF (or dies); playback ends once the queue drains.
     ended: AtomicBool,
+    /// Set by the video thread once the first frame of the current segment is queued, cleared when a
+    /// segment (re)starts. The audio thread waits on this before starting the device, so the master
+    /// clock doesn't run ahead of a cold video start (per-segment libplacebo graph rebuild takes
+    /// ~0.5 s) — otherwise video begins behind the clock and stutters/freezes catching up, worst at
+    /// the higher preview resolutions.
+    video_ready: AtomicBool,
     clock: Clock,
     /// HDR→SDR preview brightness (`eq` gamma applied after the tonemap); read when (re)building the
     /// per-segment filter graph. Set once at `start_player`.
@@ -204,8 +209,8 @@ enum SegEnd {
     Stopped,
 }
 
-/// A warm in-process decoder feeding [`crate::video::SharedFrame`]. Interface-compatible with
-/// `host::Player` (`poll`/`dimensions`/`fps`) plus `position()`/`try_seek()`.
+/// A warm in-process decoder feeding [`crate::video::SharedFrame`]. Provides `poll`/`dimensions`/`fps`
+/// plus `position()`/`try_seek()` for live playback control.
 pub struct Player {
     shared: Arc<Shared>,
     video_cmd: Option<Sender<Command>>,
@@ -230,7 +235,7 @@ impl Player {
     }
 
     /// The master clock position in seconds (audio clock, or wall clock when there is no audio).
-    /// `Some` tells the caller this is authoritative — unlike the CLI player, which advances by 1/fps.
+    /// Always `Some`: the clock is authoritative, so the caller advances the playhead from it.
     pub fn position(&self) -> Option<f64> {
         Some(self.shared.clock.now())
     }
@@ -291,8 +296,8 @@ impl Player {
     }
 
     /// Seek both decode threads to `sec` without re-opening files or rebuilding the Vulkan/libplacebo
-    /// graph. Returns `true` (the command was queued); the CLI player returns `false` here so the
-    /// caller knows to fall back to a full restart.
+    /// graph. Returns `true` once the command is queued; returns `false` when there is no live decode
+    /// thread to seek (e.g. the player never started), so the caller falls back to a full restart.
     pub fn try_seek(&self, sec: f64) -> bool {
         let sec = sec.max(0.0);
         if let Some(tx) = &self.audio_cmd {
@@ -361,6 +366,7 @@ pub fn start_player(
     let shared = Arc::new(Shared {
         video: Mutex::new(VecDeque::new()),
         ended: AtomicBool::new(false),
+        video_ready: AtomicBool::new(false),
         gamma,
         video_pix_fmt,
         stats: Arc::new(PlayerStats::default()),
@@ -673,6 +679,7 @@ fn video_segment(
     };
 
     shared.video.lock().unwrap().clear();
+    shared.video_ready.store(false, Ordering::Relaxed);
     if manages_clock {
         // No audio thread → the video thread owns the (wall) clock.
         shared.clock.use_audio.store(false, Ordering::Relaxed);
@@ -757,6 +764,9 @@ fn pull_video(
                 shared.video.lock().unwrap().push_back((pts, rgba));
                 if !*first {
                     *first = true;
+                    // Tell the audio thread the first frame is ready, so it can start the clock in sync
+                    // (see `Shared::video_ready`).
+                    shared.video_ready.store(true, Ordering::Relaxed);
                     if manages_clock {
                         *shared.clock.wall.lock().unwrap() = Some((Instant::now(), pts));
                     }
@@ -919,6 +929,19 @@ fn audio_segment(
                 if !started {
                     if let Some(a) = audio.as_ref() {
                         if a.producer.occupied_len() >= prime {
+                            // Also wait for the video thread's first frame so audio and video start
+                            // together (see `Shared::video_ready`). Bounded, so an audio-only or
+                            // slow-to-decode clip still starts; the ring holds at `prime` meanwhile
+                            // (we've stopped pushing), so no underrun on start.
+                            let wait = Instant::now();
+                            while !shared.video_ready.load(Ordering::Relaxed)
+                                && wait.elapsed() < Duration::from_millis(1500)
+                            {
+                                if let Some(end) = poll_cmd(cmd_rx) {
+                                    return end;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
                             started = a.start();
                             if !started {
                                 // The device won't start (e.g. a WASAPI failure). Don't keep filling a

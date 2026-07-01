@@ -8,7 +8,7 @@
 //! `play_probe`/`hdr_probe`). It decodes through the same libplacebo (HDR) / scale (SDR) pipeline and
 //! packs RGBA, so the measured work matches the real scrub.
 //!
-//!   cargo run --release -p qlipq-desktop --example scrub_probe --features libav-preview -- "<clip>"
+//!   cargo run --release -p qlipq-desktop --example scrub_probe -- "<clip>"
 
 use std::ffi::CString;
 use std::time::Instant;

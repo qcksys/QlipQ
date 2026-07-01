@@ -1,16 +1,12 @@
-//! Ship the shared FFmpeg runtime DLLs next to the built `qlipq` exe so the `libav-preview` build
-//! can find avcodec/avformat/avfilter/etc. at runtime (otherwise: STATUS_DLL_NOT_FOUND / 0xc0000135).
-//! No-op unless the `libav-preview` feature is on and `FFMPEG_DLL_DIR` is set (so default/CI builds
-//! are unaffected).
+//! Ship the shared FFmpeg runtime DLLs next to the built `qlipq` exe so it can find
+//! avcodec/avformat/avfilter/etc. at runtime (otherwise: STATUS_DLL_NOT_FOUND / 0xc0000135).
+//! No-op unless `FFMPEG_DLL_DIR` is set (so builds without the shared FFmpeg dev build are unaffected).
 
 use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=FFMPEG_DLL_DIR");
 
-    if env::var_os("CARGO_FEATURE_LIBAV_PREVIEW").is_none() {
-        return;
-    }
     let Ok(bin) = env::var("FFMPEG_DLL_DIR") else {
         return;
     };

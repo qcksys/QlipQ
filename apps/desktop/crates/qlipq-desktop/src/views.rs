@@ -401,7 +401,7 @@ impl App {
                     .spacing(theme::SM)
                     .align_y(iced::Alignment::Center),
                     row![
-                        container(slider(0.0..=2.0, r.volume, move |v| Message::AudioVolume(idx, v)).step(0.05).style(theme::slider_style))
+                        container(slider(0.0..=2.0, r.volume, move |v| Message::AudioVolume(idx, v)).step(0.05).on_release(Message::AudioVolumeCommit).style(theme::slider_style))
                             .width(Length::Fixed(180.0)),
                         text(format!("{}%", (r.volume * 100.0) as i32)).size(theme::SMALL).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
                     ]
@@ -674,6 +674,23 @@ impl App {
             ]
             .spacing(theme::MD),
             Message::DeleteCancel,
+        )
+    }
+
+    fn delete_error_modal<'a>(&self, msg: &'a str) -> Element<'a, Message> {
+        modal(
+            column![
+                text("Couldn't delete file").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
+                text(msg.to_string()).size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("OK").size(theme::LABEL).font(theme::FONT_MEDIUM)).style(theme::btn_primary).on_press(Message::DismissModal),
+                ]
+                .spacing(theme::SM)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(theme::MD),
+            Message::DismissModal,
         )
     }
 

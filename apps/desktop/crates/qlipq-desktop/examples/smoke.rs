@@ -2,7 +2,7 @@
 //! its duration + per-stream codec/dims. Success = it links, loads the shared FFmpeg DLLs, and
 //! prints without a missing-DLL error (0xc0000135).
 //!
-//!   cargo run -p qlipq-desktop --example smoke --features libav-preview -- "<path-to-clip>"
+//!   cargo run -p qlipq-desktop --example smoke -- "<path-to-clip>"
 
 use std::ffi::CString;
 

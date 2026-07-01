@@ -7,7 +7,7 @@
 //!   * halving a track's gain drops its level by ~6.02 dB (when it isn't already clipping),
 //!   * muting every track yields silence.
 //!
-//!   cargo run --release -p qlipq-desktop --example mixdown_probe --features libav-preview -- "<clip>"
+//!   cargo run --release -p qlipq-desktop --example mixdown_probe -- "<clip>"
 
 use std::ffi::CString;
 

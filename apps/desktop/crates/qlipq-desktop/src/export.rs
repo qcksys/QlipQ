@@ -1,11 +1,11 @@
-//! In-process export (feature `libav-preview`): decode → apply edits → hardware-encode → mux, fully
-//! in-process, replacing the CLI ffmpeg export. Uses the Step-5 HW quality model
+//! In-process export: decode → apply edits → hardware-encode → mux, fully
+//! in-process (the sole export path). Uses the Step-5 HW quality model
 //! ([`qlipq_ffmpeg::hw::plan_hw_video`]) to pick the encoder + rate control.
 //!
 //! - **Video:** `buffer → trim,setpts,crop,scale,fps,format → buffersink → HW encoder`.
 //! - **Audio:** per enabled track `abuffer → atrim,asetpts,[volume] → amix(normalize=0) →
 //!   aformat(fltp/48k/stereo) → abuffersink(frame_size) → AAC`. `amix` sums the enabled tracks at
-//!   their set levels (matching the preview monitor mix and `build_export_args`).
+//!   their set levels (matching the preview monitor mix).
 //! - **Mux:** video + audio interleaved by DTS into an mp4 written to a temp file, then renamed.
 //!
 //! Progress (0..1) and a cancel flag are shared with the UI. Windows-first prototype: it assumes a
@@ -845,7 +845,7 @@ mod tests {
     use qlipq_core::edit_spec::{AudioTrackSpec, TrimSpec};
 
     /// End-to-end export against a real file. Ignored by default; run with a real clip:
-    ///   QLIPQ_TEST_INPUT="E:/clip.mkv" cargo test -p qlipq-desktop --features libav-preview \
+    ///   QLIPQ_TEST_INPUT="E:/clip.mkv" cargo test -p qlipq-desktop \
     ///     -- --ignored --nocapture export_real_clip
     #[test]
     #[ignore]

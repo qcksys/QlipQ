@@ -241,6 +241,8 @@ struct App {
     audio_defaults: Vec<AudioTrackSpec>,
     rename: Option<RenameState>,
     delete_confirm: Option<String>,
+    /// Set when a delete fails (e.g. the file is still open in another app) to show an error dialog.
+    delete_error: Option<String>,
     new_tag: String,
     export_target: Option<String>,
     /// Queue card currently under the cursor (whole-card hover styling).
@@ -293,6 +295,8 @@ enum Message {
     CropEdited(u8, String),
     AudioToggle(i64, bool),
     AudioVolume(i64, f64),
+    /// Slider released — persist the volume once (the drag itself only updates live, no per-frame save).
+    AudioVolumeCommit,
     ToggleOverride(bool),
     OverrideQm(QmChoice),
     OverrideQp(QpChoice),
@@ -388,6 +392,7 @@ impl App {
             audio_defaults: Vec::new(),
             rename: None,
             delete_confirm: None,
+            delete_error: None,
             new_tag: String::new(),
             export_target: None,
             hovered_card: None,
@@ -413,6 +418,7 @@ impl App {
         // just avoid binding over the queue/settings or a dialog.
         let modal = self.rename.is_some()
             || self.delete_confirm.is_some()
+            || self.delete_error.is_some()
             || self.editor.as_ref().map(|e| e.overwrite_target.is_some() || e.after_prompt).unwrap_or(false);
         if self.editor.is_some() && !modal {
             subs.push(iced::event::listen_with(editor_key_event));
@@ -730,7 +736,7 @@ impl App {
                     ed.editing_time = false;
                     sync_time_input(ed);
                     if playing {
-                        // Prefer an in-process seek of the warm decoder; the CLI player can't, so it
+                        // Seek the warm decoder in-process; if it can't (no live decode thread) it
                         // reports false and we restart below instead.
                         seeked = ed.player.as_ref().map(|p| p.try_seek(ed.current_time)).unwrap_or(false);
                     }
@@ -808,6 +814,8 @@ impl App {
                 }
             }
             Message::AudioVolume(index, vol) => {
+                // Live update only — a drag fires this per frame, so persisting here would spawn a
+                // save per frame. The slider's on_release (AudioVolumeCommit) persists once at the end.
                 if let Some(ed) = &mut self.editor {
                     if let Some(r) = ed.audio.iter_mut().find(|r| r.index == index) {
                         r.volume = vol;
@@ -818,8 +826,8 @@ impl App {
                     }
                     self.audio_defaults = editor_audio_specs(ed);
                 }
-                self.commit_spec();
             }
+            Message::AudioVolumeCommit => self.commit_spec(),
             Message::ToggleOverride(on) => return self.toggle_override(on),
             Message::OverrideQm(c) => return self.patch_override(|o| o.quality_mode = Some(c.to_core())),
             Message::OverrideQp(c) => return self.patch_override(|o| o.quality_preset = Some(c.to_core())),
@@ -936,6 +944,14 @@ impl App {
                 if let Some(id) = self.delete_confirm.take() {
                     if let Some(item) = self.items.iter().find(|i| i.id == id) {
                         let path = item.path.clone();
+                        // The preview player + scrub decoder keep the file open, and Windows refuses
+                        // to delete an open file. Tear the editor down first so both are dropped —
+                        // Player::drop joins its decode threads synchronously, closing the handle —
+                        // before we attempt the delete below.
+                        if self.editor.as_ref().is_some_and(|e| e.item_id == id) {
+                            self.selected_id = None;
+                            self.editor = None;
+                        }
                         return Task::perform(blocking(move || host::delete_file(&path)), move |r| Message::Deleted(id.clone(), r));
                     }
                 }
@@ -946,6 +962,8 @@ impl App {
                     self.rename = None;
                 } else if self.delete_confirm.is_some() {
                     self.delete_confirm = None;
+                } else if self.delete_error.is_some() {
+                    self.delete_error = None;
                 } else if let Some(ed) = &mut self.editor {
                     if ed.overwrite_target.is_some() {
                         ed.overwrite_target = None;
@@ -954,11 +972,16 @@ impl App {
                     }
                 }
             }
-            Message::Deleted(id, result) => {
-                if result.is_ok() {
-                    self.remove_item(&id);
+            Message::Deleted(id, result) => match result {
+                Ok(()) => self.remove_item(&id),
+                Err(e) => {
+                    // Deletion failed even after we released our handles — usually another app (OBS
+                    // still recording, a media player) holds the file. Tell the user instead of
+                    // silently leaving the clip in the queue.
+                    let name = self.items.iter().find(|i| i.id == id).map(|i| i.file_name.clone()).unwrap_or_default();
+                    self.delete_error = Some(format!("Couldn't delete {name}.\n\n{e}"));
                 }
-            }
+            },
             Message::Dismiss(id) => {
                 if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
                     let tags = item.tags.get_or_insert_with(Vec::new);
@@ -1094,7 +1117,7 @@ impl App {
                 true
             }
             // Keep the playhead tracking the master clock between video frames (smooth scrubber with
-            // synced audio); a no-op for the CLI player, which has no clock.
+            // synced audio).
             host::FramePoll::Empty => position.is_some(),
             host::FramePoll::Ended => {
                 if let Some(dur) = dur {
@@ -1109,9 +1132,10 @@ impl App {
         if !advance {
             return;
         }
-        // Advance the playhead from the player's master clock when it has one (libav: audio-synced),
-        // else by one frame interval (CLI player). Then hard-stop at the known end so playback halts
-        // cleanly and never overruns or loops — `Ended` (decoder EOF) is the fallback when dur is 0.
+        // Advance the playhead from the master clock (audio-synced, or a wall clock without audio);
+        // fall back to one frame interval only if the clock reports no position. Then hard-stop at the
+        // known end so playback halts cleanly and never overruns or loops — `Ended` (decoder EOF) is
+        // the fallback when dur is 0.
         match position {
             Some(p) => ed.current_time = p,
             None => ed.current_time += 1.0 / fps,
@@ -1639,6 +1663,8 @@ impl App {
             Some(self.rename_modal(r))
         } else if let Some(id) = &self.delete_confirm {
             Some(self.delete_modal(id))
+        } else if let Some(msg) = &self.delete_error {
+            Some(self.delete_error_modal(msg))
         } else if let Some(ed) = &self.editor {
             if let Some(target) = &ed.overwrite_target {
                 Some(self.overwrite_modal(target))

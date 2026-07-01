@@ -3,7 +3,7 @@
 //! brightness distribution. Compare against `ffmpeg -vf libplacebo=...` (the VLC-quality reference)
 //! to confirm the in-process path is equivalent.
 //!
-//!   cargo run -p qlipq-desktop --example hdr_probe --features libav-preview -- "<clip>"
+//!   cargo run -p qlipq-desktop --example hdr_probe -- "<clip>"
 
 use std::ffi::CString;
 

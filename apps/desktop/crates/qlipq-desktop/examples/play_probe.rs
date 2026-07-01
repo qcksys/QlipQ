@@ -7,7 +7,7 @@
 //! It prints, twice a second: wall elapsed, the audio master clock, the latest video PTS, and the
 //! video frame count. All three of {wall, audio clock, video PTS} should advance together at ~1×.
 //!
-//!   cargo run --release -p qlipq-desktop --example play_probe --features libav-preview -- "<clip>"
+//!   cargo run --release -p qlipq-desktop --example play_probe -- "<clip>"
 
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
