@@ -277,31 +277,36 @@ impl App {
             None => "—".to_string(),
         };
 
-        let mut rows = column![
-            dbg_row("File", item.file_name.clone()),
-            dbg_row("Container", container_ext),
-            dbg_row("Video", format!("{} · {}×{} · {:.3} fps{}", media.video_codec, media.width, media.height, media.fps, if ed.is_hdr { " · HDR" } else { "" })),
-            dbg_row("Source bitrate", bitrate),
-            dbg_row("Audio tracks", format!("{}", media.audio_streams.len())),
-            dbg_row("Decoder", decoder),
-            dbg_row("Preview", preview_res),
-        ]
-        .spacing(theme::XS);
-
-        // Live playback health (only meaningful while the streaming player is running).
+        // Static clip/decoder facts, then live playback health (only while the player is running).
+        let mut pairs: Vec<(&'static str, String)> = vec![
+            ("File", item.file_name.clone()),
+            ("Path", item.path.clone()),
+            ("Container", container_ext),
+            ("Video", format!("{} · {}×{} · {:.3} fps{}", media.video_codec, media.width, media.height, media.fps, if ed.is_hdr { " · HDR" } else { "" })),
+            ("Source bitrate", bitrate),
+            ("Audio tracks", format!("{}", media.audio_streams.len())),
+            ("Decoder", decoder),
+            ("Preview", preview_res),
+        ];
+        let live_from = pairs.len();
         if let Some(p) = &ed.player {
-            let clock = if p.audio_clock() { "audio-synced" } else { "wall clock" };
-            let underruns = p.audio_underruns();
-            rows = rows.push(rule::horizontal(1));
-            rows = rows.push(dbg_row("Master clock", clock.to_string()));
-            rows = rows.push(dbg_row("Video buffer", format!("{}/{} frames", p.queue_depth(), libav::VIDEO_LOOKAHEAD)));
-            rows = rows.push(dbg_row("Dropped frames", format!("{}", p.dropped_frames())));
+            pairs.push(("Master clock", if p.audio_clock() { "audio-synced".into() } else { "wall clock".into() }));
+            pairs.push(("Video buffer", format!("{}/{} frames", p.queue_depth(), libav::VIDEO_LOOKAHEAD)));
+            pairs.push(("Dropped frames", format!("{} (preview display only)", p.dropped_frames())));
             if p.audio_clock() {
-                rows = rows.push(dbg_row("Audio buffer", format!("{}% full", (p.audio_fill() * 100.0) as i32)));
-                rows = rows.push(dbg_row("Audio underruns", format!("{underruns}")));
+                pairs.push(("Audio buffer", format!("{}% full", (p.audio_fill() * 100.0) as i32)));
+                pairs.push(("Audio underruns", format!("{}", p.audio_underruns())));
             }
         } else {
-            rows = rows.push(dbg_row("Playback", "paused (play for live buffer stats)".to_string()));
+            pairs.push(("Playback", "paused (play for live buffer stats)".into()));
+        }
+
+        let mut rows = column![].spacing(theme::XS);
+        for (i, &(label, ref value)) in pairs.iter().enumerate() {
+            if i == live_from {
+                rows = rows.push(rule::horizontal(1)); // divider between static facts and live stats
+            }
+            rows = rows.push(dbg_row(label, value.clone()));
         }
 
         // The single most common cause of preview stutter — call it out in plain language.
@@ -313,7 +318,15 @@ impl App {
             );
         }
 
-        container(column![text("Debug").size(theme::HEADING).font(theme::FONT_SEMIBOLD), rows].spacing(theme::SM))
+        // iced text labels aren't selectable, so offer a one-click copy of the whole panel as text.
+        let blob = pairs.iter().map(|(l, v)| format!("{l}: {v}")).collect::<Vec<_>>().join("\n");
+        let header = row![
+            text("Debug").size(theme::HEADING).font(theme::FONT_SEMIBOLD).width(Length::Fill),
+            button(text("Copy").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::CopyText(blob)),
+        ]
+        .align_y(iced::Alignment::Center);
+
+        container(column![header, rows].spacing(theme::SM))
             .width(Length::Fill)
             .padding(theme::MD)
             .style(theme::card)

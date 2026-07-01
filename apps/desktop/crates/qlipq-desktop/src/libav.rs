@@ -893,6 +893,12 @@ fn audio_segment(
     shared.clock.rate.store((out_rate as f64).to_bits(), Ordering::Relaxed);
     let played = audio.as_ref().map(|a| Arc::clone(&a.played));
 
+    // Pre-roll cushion: keep the device paused until the ring holds ~125 ms, so the first callbacks
+    // never drain a near-empty ring while decoder/graph startup is hogging CPU (the first-seconds
+    // skip). The clock advances on `played`, so video simply holds the start frame until we start.
+    let prime = (out_rate.max(1) as usize * out_ch.max(1)) / 8;
+    let mut started = false;
+
     loop {
         if let Some(end) = poll_cmd(cmd_rx) {
             return end;
@@ -906,6 +912,15 @@ fn audio_segment(
                 if let Some(end) = mix_and_push(tracks, &mut audio, out_ch, out_rate, false, cmd_rx) {
                     return end;
                 }
+                // Start the device once the cushion is buffered (prime ≪ ring capacity, so mix_and_push
+                // never backs up against a not-yet-draining ring before we get here).
+                if !started {
+                    if let Some(a) = audio.as_ref() {
+                        if a.producer.occupied_len() >= prime {
+                            started = a.start();
+                        }
+                    }
+                }
             }
             Ok(None) => {
                 for t in tracks.iter_mut() {
@@ -915,13 +930,20 @@ fn audio_segment(
                 if let Some(end) = mix_and_push(tracks, &mut audio, out_ch, out_rate, true, cmd_rx) {
                     return end;
                 }
+                // A clip shorter than the pre-roll cushion never crossed `prime`; start the device now
+                // so the drain loop below can actually empty the ring instead of spinning forever.
+                let running = match audio.as_ref() {
+                    Some(a) => started || a.start(),
+                    None => false,
+                };
                 // Keep the device alive until its buffer drains (so the last ~0.5 s isn't cut off),
                 // then hand the clock to wall time so any longer video tail keeps playing smoothly.
+                // If the device never started, don't wait on a ring that can't drain.
                 loop {
                     if let Some(end) = poll_cmd(cmd_rx) {
                         return end;
                     }
-                    if audio.as_ref().map(|a| a.producer.is_empty()).unwrap_or(true) {
+                    if !running || audio.as_ref().map(|a| a.producer.is_empty()).unwrap_or(true) {
                         if use_audio {
                             let pos = match &played {
                                 Some(p) => start + p.load(Ordering::Relaxed) as f64 / out_rate as f64,
@@ -1075,11 +1097,22 @@ struct AudioOut {
     out_channels: usize,
 }
 
-/// Build an f32 output stream on the default device, draining a fresh ring buffer. The callback
-/// increments `played` — the **clock's** counter, passed in by the caller — counting only the samples
-/// it actually plays (silence-filled underruns don't count), which is what advances the master clock
-/// through pre-roll and seeks. Sharing the clock's atomic (rather than a private one) is essential:
-/// otherwise the clock never moves and video freezes while audio plays.
+impl AudioOut {
+    /// Start the device draining the ring; `true` if it's now playing. The stream is built **paused**
+    /// so the caller can pre-fill a cushion first — otherwise the first callbacks drain an empty ring
+    /// and glitch (the audible skip in the first moments of playback), especially while decoder/graph
+    /// startup is hogging CPU.
+    fn start(&self) -> bool {
+        self._stream.play().is_ok()
+    }
+}
+
+/// Build a **paused** f32 output stream on the default device, draining a fresh ring buffer; the
+/// caller pre-fills the ring, then calls [`AudioOut::start`]. The callback increments `played` — the
+/// **clock's** counter, passed in by the caller — counting only the samples it actually plays
+/// (silence-filled underruns don't count), which is what advances the master clock through pre-roll
+/// and seeks. Sharing the clock's atomic (rather than a private one) is essential: otherwise the clock
+/// never moves and video freezes while audio plays.
 fn build_audio_out(device: &cpal::Device, played: Arc<AtomicU64>, stats: Arc<PlayerStats>) -> Option<AudioOut> {
     let supported = device.default_output_config().ok()?;
     let out_rate = supported.sample_rate();
@@ -1115,7 +1148,7 @@ fn build_audio_out(device: &cpal::Device, played: Arc<AtomicU64>, stats: Arc<Pla
             None,
         )
         .ok()?;
-    stream.play().ok()?;
+    // Built paused — `audio_segment` primes the ring, then calls `AudioOut::start`.
     Some(AudioOut { _stream: stream, producer, played, out_rate, out_channels: out_ch })
 }
 

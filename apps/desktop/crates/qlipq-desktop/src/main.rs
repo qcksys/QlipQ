@@ -324,6 +324,8 @@ enum Message {
     ApplyHdrPreviewGamma,
     ToggleAutoplay(bool),
     ToggleDebug(bool),
+    /// Copy the given text (the debug panel's diagnostics) to the system clipboard.
+    CopyText(String),
     SetAfter(AfterChoice),
     MoveFolderChanged(String),
     RenamePrefixChanged(String),
@@ -976,6 +978,7 @@ impl App {
             }
             Message::ToggleAutoplay(on) => { self.config.autoplay = on; return self.save_config_task(); }
             Message::ToggleDebug(on) => { self.config.debug = on; return self.save_config_task(); }
+            Message::CopyText(s) => return iced::clipboard::write(s),
             Message::SetAfter(c) => { self.config.after_export.action = c.to_core(); return self.save_config_task(); }
             Message::MoveFolderChanged(s) => { self.config.after_export.move_folder = s; return self.save_config_task(); }
             Message::RenamePrefixChanged(s) => { self.config.after_export.rename_prefix = s; return self.save_config_task(); }
