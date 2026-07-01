@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/qcksys/QlipQ/releases/tag/v0.1.1) - 2026-07-01
+
+### Added
+
+- Implement container format handling in export and enhance UI controls
+- Enhance NVENC quality handling and align UI elements
+- Add editable in/out timestamp fields and looping playback functionality
+- Add encoder field to MediaInfo and implement highlight filtering in settings
+- Format code for improved readability across multiple files and add queue filters
+
 ## [0.1.0](https://github.com/qcksys/QlipQ/releases/tag/v0.1.0) - 2026-07-01
 
 ### Other

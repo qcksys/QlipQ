@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-01
+
+### Added
+
+- Enhance NVENC quality handling and align UI elements
+- Add encoder field to MediaInfo and implement highlight filtering in settings
+
 ## [0.1.0](https://github.com/qcksys/QlipQ/releases/tag/qlipq-ffmpeg-v0.1.0) - 2026-07-01
 
 ### Other
