@@ -46,6 +46,11 @@ const SIDEBAR_WIDTH: f32 = 360.0;
 static PROBE_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
 
 fn main() -> iced::Result {
+    // Quiet libav's demuxer/filter chatter (e.g. the harmless "UDTA parsing failed retrying raw"
+    // most recorders trigger, logged once per file open) while keeping real errors visible.
+    unsafe {
+        rsmpeg::ffi::av_log_set_level(rsmpeg::ffi::AV_LOG_ERROR as i32);
+    }
     iced::application(App::new, App::update, App::view)
         .title("QlipQ")
         .subscription(App::subscription)

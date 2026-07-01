@@ -1193,14 +1193,19 @@ fn build_video_filter<'g>(
     let outputs = AVFilterInOut::new(c"in", &mut src, 0);
     let inputs = AVFilterInOut::new(c"out", &mut sink, 0);
     let descr = if is_hdr {
-        // HDR→BT.709 SDR tonemap (full-range RGB out for the GPU upload), then an `eq=gamma` midtone
+        // HDR→BT.709 SDR tonemap (full-range RGB out for the GPU upload), then a luma-gamma midtone
         // lift (the `hdr_preview_gamma` setting). Windows HDR *desktop* capture pins SDR-content white
         // at the Windows "SDR content brightness" level (often well above the 203-nit reference)
         // inside the PQ container, so libplacebo maps that down to its 203-nit SDR target and the UI
         // reads ~half brightness. The ffmpeg libplacebo wrapper exposes no source/target-peak knob, so
         // we compensate with gamma (>1 brightens, preserves true black). 1.0 = off (filter skipped).
+        // `lutyuv` (not `eq`) does the gamma because `eq` is a GPL filter, absent from the LGPL build.
         let g = gamma.clamp(0.1, 10.0);
-        let lift = if (g - 1.0).abs() > 1e-3 { format!(",eq=gamma={g:.3}") } else { String::new() };
+        let lift = if (g - 1.0).abs() > 1e-3 {
+            format!(",lutyuv=y='pow(val/maxval,1/{g:.3})*maxval'")
+        } else {
+            String::new()
+        };
         CString::new(format!(
             "libplacebo=w={w}:h={h}:tonemapping=auto:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc{lift},format=rgba"
         ))
