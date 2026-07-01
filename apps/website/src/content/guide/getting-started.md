@@ -4,6 +4,16 @@ description: Install QlipQ and export your first clip.
 order: 1
 ---
 
+## Install
+
+Grab the latest build from [GitHub Releases](https://github.com/qcksys/qlipq/releases/latest):
+
+- **Windows installer** — `qlipq-setup-x64.exe` runs a short setup wizard and adds a Start-menu shortcut and an uninstaller. Recommended.
+- **Windows portable** — `qlipq-windows-x64.zip`: no install, just unzip and run `qlipq.exe`.
+- **Linux** — `qlipq-linux-x64.tar.gz`: extract and run `qlipq` (loads its bundled FFmpeg libraries from `./lib`).
+
+Every build bundles the FFmpeg libraries QlipQ needs — there's no separate `ffmpeg` to install.
+
 ## 1. Add watched folders
 
 In **Settings → Watched folders**, add the folder(s) where your recordings land (for OBS this is your recording or replay-buffer output path). QlipQ can auto-detect the **OBS** and **NVIDIA Share** output folders and offer them as one-click presets. It scans these folders — including subfolders — on launch and watches for new files while it runs.

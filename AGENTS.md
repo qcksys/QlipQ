@@ -174,8 +174,11 @@ pnpm -C apps/website deploy:prod   # build + wrangler deploy --env production
   website's Astro/Cloudflare build needs them).
 - **The desktop app builds with `cargo`, independently of `vp`.** Its crates
   (`qlipq-core`, `qlipq-ffmpeg`, `qlipq-desktop`) are internal path-deps (not on
-  crates.io); release-plz versions them from git tags (`apps/desktop/release-plz.toml`,
-  `git_only`).
+  crates.io) sharing one workspace version; release-please versions the app from
+  conventional commits (`release-please-config.json` — a `simple` package that bumps
+  the shared `apps/desktop/Cargo.toml` version via an `x-release-please-version` marker,
+  since the `rust`/`cargo-workspace` releaser can't handle `version.workspace = true`)
+  and tags it `vX.Y.Z`.
 - **The libav build links a shared FFmpeg 8.x dev build, wired machine-specifically and gitignored.**
   `apps/desktop/.cargo/config.toml` sets `FFMPEG_*` env vars + the vendored
   `apps/desktop/vendor/rusty_ffmpeg_*_binding.rs` (skips bindgen, so no libclang/MSVC headers needed).
@@ -187,6 +190,7 @@ pnpm -C apps/website deploy:prod   # build + wrangler deploy --env production
 - **CI** (`.github/workflows/`): `ci.yml` (website — `vp check` + build),
   `build-desktop.yml` (the Rust app — `cargo test` + `cargo build -p qlipq-desktop` against libav on
   Windows + Linux, after `setup-ffmpeg` pulls the LGPL SDK), `deploy-website.yml` (Cloudflare Workers),
-  `release-plz.yml` (versions/changelogs the crates and tags the app `vX.Y.Z`), and
-  `qlipq-desktop-release.yml` (on a `v*` tag, builds libav + bundles the FFmpeg shared libs and
-  attaches the Windows/Linux binaries to a GitHub Release).
+  `release-please.yml` (versions/changelogs + tags the app `vX.Y.Z` on merge to main; a follow-up job
+  syncs `Cargo.lock` into the release PR), and `qlipq-desktop-release.yml` (on a published `v*`
+  Release, builds libav + bundles the FFmpeg shared libs and attaches the Windows/Linux binaries and
+  the Inno Setup Windows installer).

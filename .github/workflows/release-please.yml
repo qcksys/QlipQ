@@ -1,0 +1,59 @@
+name: release-please
+
+# Versioning + changelog + tag/release for the desktop app (release-please) — replaces release-plz.
+# On merge to main it opens/updates a release PR that bumps apps/desktop/Cargo.toml (via the generic
+# `x-release-please-version` marker) and the changelog. Merging that PR tags `vX.Y.Z` and publishes a
+# GitHub Release, which triggers qlipq-desktop-release.yml to build + attach the binaries + installer.
+#
+# release-please's `rust`/`cargo-workspace` releaser is deliberately NOT used: it can't handle
+# `version.workspace = true` (googleapis/release-please#2111). So the app is a `simple` package and the
+# workspace version is bumped through a generic file marker instead.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      prs_created: ${{ steps.rp.outputs.prs_created }}
+      pr: ${{ steps.rp.outputs.pr }}
+      releases_created: ${{ steps.rp.outputs.releases_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          # A PAT (not GITHUB_TOKEN) so the tag + Release trigger qlipq-desktop-release.yml, and the
+          # release PR's own CI runs. Same secret release-plz used.
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # release-please bumps Cargo.toml but not Cargo.lock (see #2111 above). Sync the lockfile into the
+  # release PR so main lands consistent — `cargo update --workspace` rewrites only the 3 path-dep
+  # version lines. No build, so the FFmpeg SDK isn't needed here.
+  sync-lockfile:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.prs_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Sync Cargo.lock to the bumped version
+        run: cargo update --workspace --manifest-path apps/desktop/Cargo.toml
+      - name: Commit if the lockfile changed
+        run: |
+          if ! git diff --quiet -- apps/desktop/Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: sync Cargo.lock" -- apps/desktop/Cargo.lock
+            git push
+          fi

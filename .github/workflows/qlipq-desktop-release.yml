@@ -1,14 +1,15 @@
 name: qlipq-desktop release
 
-# Build the desktop app and attach binaries to the GitHub Release that release-plz publishes for a
-# `vX.Y.Z` tag. (Versioning/tagging lives in release-plz — see apps/desktop/release-plz.toml. The
-# release-plz release job must use a PAT, or publishing the Release won't trigger this workflow.)
+# Build the desktop app and attach the binaries + Windows installer to the GitHub Release that
+# release-please publishes for a `vX.Y.Z` tag. (Versioning/tagging lives in release-please — see
+# release-please-config.json. The release-please job must use a PAT, or publishing the Release won't
+# trigger this workflow.)
 on:
   release:
     types: [published]
   # Manual/backfill build of an existing tag (e.g. a release whose tag was created before this
-  # workflow, or one release-plz made with GITHUB_TOKEN so `release: published` never fired). The
-  # workflow file comes from the ref you dispatch, but the code is checked out at `tag`.
+  # workflow, or one made with GITHUB_TOKEN so `release: published` never fired). The workflow file
+  # comes from the ref you dispatch, but the code is checked out at `tag`.
   workflow_dispatch:
     inputs:
       tag:
@@ -76,6 +77,16 @@ jobs:
           Copy-Item "$env:FFMPEG_SDK/LICENSE.txt" dist/FFMPEG-LICENSE.txt
           Compress-Archive -Path dist/* -DestinationPath ${{ matrix.asset }}
 
+      # Wrap the same dist/ into a Setup.exe (Start-menu shortcut + uninstaller). Additive — the
+      # portable .zip above is still produced and attached.
+      - name: Build Windows installer (Inno Setup)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $ver = ("${{ github.event.inputs.tag || github.ref_name }}").TrimStart('v')
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=$ver installer/qlipq.iss
+
       # Bundle the FFmpeg .so into dist/lib (found via the binary's $ORIGIN/lib rpath) plus the license.
       - name: Package (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -86,13 +97,17 @@ jobs:
           cp "$FFMPEG_SDK/LICENSE.txt" dist/FFMPEG-LICENSE.txt
           tar -czf "${{ matrix.asset }}" -C dist .
 
-      # `files:` is repo-root-relative (the action ignores `working-directory`). Attaches the asset to
-      # the release for this tag — updating release-plz's published Release on a `release` event, or
+      # `files:` is repo-root-relative (the action ignores `working-directory`). Attaches the assets to
+      # the release for this tag — updating release-please's published Release on a `release` event, or
       # creating one on manual dispatch (no `draft:`, so it stays/becomes published & downloadable).
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: apps/desktop/${{ matrix.asset }}
+          # The installer path only exists on the Windows leg; action-gh-release ignores unmatched
+          # globs (fail_on_unmatched_files defaults to false), so the Linux leg just skips it.
+          files: |
+            apps/desktop/${{ matrix.asset }}
+            apps/desktop/installer/Output/qlipq-setup-x64.exe
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
