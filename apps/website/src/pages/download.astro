@@ -4,17 +4,17 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const repo = "https://github.com/qcksys/qlipq";
 ---
 
-<Base title="Download QlipQ" description="Download QlipQ, a cross-platform clip editor for gameplay capture.">
+<Base title="Download QlipQ" description="Download QlipQ, a clip editor for gameplay capture on Windows and Linux.">
   <h1>Download QlipQ</h1>
   <p class="lead" style="color:var(--muted)">
-    QlipQ is a cross-platform desktop app (Windows, macOS, Linux) built with Rust and
+    QlipQ is a native desktop app for Windows and Linux (Windows-first) built with Rust and
     <a href="https://iced.rs">iced</a>. Build it from source, or grab a prebuilt build from the
     releases page when one is available.
   </p>
 
   <div class="platforms">
     <div class="card">
-      <h3>Windows · macOS · Linux</h3>
+      <h3>Windows · Linux</h3>
       <p>Build the desktop app from source with Cargo — see the
         <a href={`${base}/guide/getting-started`}>getting started</a> guide.</p>
       <p style="margin-top:14px"><a class="btn" href={`${repo}/releases/latest`}>Releases</a></p>

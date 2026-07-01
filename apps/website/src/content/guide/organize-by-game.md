@@ -20,18 +20,18 @@ Requires OBS 28 or newer. Works on Windows, macOS, and Linux. Unlike the origina
 
 The script reads the game from your scene's **Game Capture** (or **Window Capture**) source, then files clips into subfolders of your existing recording folder. Open it under **Tools → Scripts → qlipq-renamer.lua** to set:
 
-| Setting                              | Default         | What it does                                                              |
-| ------------------------------------ | --------------- | ------------------------------------------------------------------------- |
-| Fallback folder name                 | `Any Recording` | Where clips go when no app is detected (e.g. desktop screenshots).        |
-| Organization mode                    | Folder per game | Optionally add a `yy-mm-dd` date subfolder under each game.               |
-| Move clips into per-game folders     | On              | Turn off to leave files where OBS put them (e.g. metadata-only).          |
-| Prefix filenames with the game title | Off             | Names files `Game - <original>` so the game also travels in the filename. |
-| Write game name into file metadata   | Off             | Embeds a `game=` tag with ffmpeg (stream copy). See below.                |
-| ffmpeg path (for metadata)           | `ffmpeg`        | Full path if ffmpeg isn't on `PATH`. Only used when the tag option is on. |
-| Organize replay-buffer saves         | On              | Organize saved replays too; turn off to leave them where OBS put them.    |
-| Replay subfolder name                | _(none)_        | Empty (default) = replays go straight in the game folder.                 |
-| Organize screenshots                 | On              | Screenshots go under a `screenshot` subfolder.                            |
-| Screenshot subfolder name            | `screenshot`    | Name of that subfolder.                                                   |
+| Setting                                              | Default         | What it does                                                              |
+| ---------------------------------------------------- | --------------- | ------------------------------------------------------------------------- |
+| Fallback folder name                                 | `Any Recording` | Where clips go when no app is detected (e.g. desktop screenshots).        |
+| Organization mode                                    | Folder per game | Optionally add a `yy-mm-dd` date subfolder under each game.               |
+| Move clips into per-game folders                     | On              | Turn off to leave files where OBS put them (e.g. metadata-only).          |
+| Prefix filenames with the game title                 | Off             | Names files `Game - <original>` so the game also travels in the filename. |
+| Write the game name into file metadata (uses ffmpeg) | Off             | Embeds a `game=` tag with ffmpeg (stream copy). See below.                |
+| ffmpeg path (for metadata)                           | `ffmpeg`        | Full path if ffmpeg isn't on `PATH`. Only used when the tag option is on. |
+| Organize replay-buffer saves                         | On              | Organize saved replays too; turn off to leave them where OBS put them.    |
+| Replay subfolder name                                | _(none)_        | Empty (default) = replays go straight in the game folder.                 |
+| Organize screenshots                                 | On              | Screenshots go under a `screenshot` subfolder.                            |
+| Screenshot subfolder name                            | `screenshot`    | Name of that subfolder.                                                   |
 
 **Folders vs. metadata are independent.** You can move into folders, embed the game as a `game=` metadata tag, both, or neither — whatever suits your workflow. The metadata tag uses ffmpeg to stream-copy the file (no re-encode); **mkv** stores it most reliably (mp4's metadata support is limited), and on Windows it briefly flashes a console window per clip. qlipq already writes this same `game=` tag when you export, so the metadata option is mainly for tagging the original recordings.
 
