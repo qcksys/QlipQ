@@ -13,6 +13,7 @@ fn media() -> MediaInfo {
             AudioStreamInfo { stream_index: 2, index: 1, codec: "aac".into(), channels: 1, language: None, title: Some("Mic".into()) },
         ],
         size_bytes: None,
+        encoder: None,
     }
 }
 

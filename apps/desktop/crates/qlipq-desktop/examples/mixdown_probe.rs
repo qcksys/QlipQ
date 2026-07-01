@@ -12,8 +12,8 @@
 use std::ffi::CString;
 
 use rsmpeg::avcodec::{AVCodec, AVCodecContext};
-use rsmpeg::avutil::AVChannelLayout;
 use rsmpeg::avformat::AVFormatContextInput;
+use rsmpeg::avutil::AVChannelLayout;
 use rsmpeg::ffi;
 use rsmpeg::swresample::SwrContext;
 
@@ -64,11 +64,23 @@ fn decode_track(path: &str, abs_idx: usize) -> Vec<f32> {
     out
 }
 
-fn resample_into(swr: &mut Option<SwrContext>, frame: &rsmpeg::avutil::AVFrame, dst: &mut Vec<f32>) {
+fn resample_into(
+    swr: &mut Option<SwrContext>,
+    frame: &rsmpeg::avutil::AVFrame,
+    dst: &mut Vec<f32>,
+) {
     if swr.is_none() {
         let in_layout = AVChannelLayout::from_nb_channels(frame.ch_layout().nb_channels.max(1));
         let out_layout = AVChannelLayout::from_nb_channels(OUT_CH as i32);
-        let mut s = SwrContext::new(&out_layout, ffi::AV_SAMPLE_FMT_FLT, OUT_RATE, &in_layout, frame.format, frame.sample_rate).unwrap();
+        let mut s = SwrContext::new(
+            &out_layout,
+            ffi::AV_SAMPLE_FMT_FLT,
+            OUT_RATE,
+            &in_layout,
+            frame.format,
+            frame.sample_rate,
+        )
+        .unwrap();
         s.init().unwrap();
         *swr = Some(s);
     }
@@ -124,7 +136,9 @@ fn clip_pct(samples: &[f32]) -> f64 {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: mixdown_probe <media path>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: mixdown_probe <media path>");
     let cpath = CString::new(path.clone()).unwrap();
     let input = AVFormatContextInput::open(&cpath).unwrap();
     let abs: Vec<usize> = input
@@ -140,7 +154,11 @@ fn main() {
 
     let decoded: Vec<Vec<f32>> = abs.iter().map(|&a| decode_track(&path, a)).collect();
     for (i, d) in decoded.iter().enumerate() {
-        println!("  track {i}: {:.1} dBFS  ({} samples)", rms_dbfs(d), d.len());
+        println!(
+            "  track {i}: {:.1} dBFS  ({} samples)",
+            rms_dbfs(d),
+            d.len()
+        );
     }
 
     // --- mixes ---
@@ -152,25 +170,56 @@ fn main() {
     let silence = mix(&muted);
 
     println!("\nmixes:");
-    println!("  track0 solo @1.0   {:7.1} dBFS  clip {:.2}%", rms_dbfs(&solo0), clip_pct(&solo0));
-    println!("  track0 @0.5        {:7.1} dBFS  clip {:.2}%", rms_dbfs(&half0), clip_pct(&half0));
-    println!("  all tracks @1.0    {:7.1} dBFS  clip {:.2}%", rms_dbfs(&all), clip_pct(&all));
+    println!(
+        "  track0 solo @1.0   {:7.1} dBFS  clip {:.2}%",
+        rms_dbfs(&solo0),
+        clip_pct(&solo0)
+    );
+    println!(
+        "  track0 @0.5        {:7.1} dBFS  clip {:.2}%",
+        rms_dbfs(&half0),
+        clip_pct(&half0)
+    );
+    println!(
+        "  all tracks @1.0    {:7.1} dBFS  clip {:.2}%",
+        rms_dbfs(&all),
+        clip_pct(&all)
+    );
     println!("  all muted          {:7.1} dBFS", rms_dbfs(&silence));
 
     // --- invariants ---
     let t0 = rms_dbfs(&decoded[0]);
     let solo_ok = (rms_dbfs(&solo0) - t0).abs() < 0.05;
     // -6.02 dB only holds when track0 isn't clipping at unity (loud transients aside); allow slack.
-    let half_ok = !solo0.iter().any(|&x| x.abs() >= 1.0) && (rms_dbfs(&half0) - (t0 - 6.02)).abs() < 0.3
+    let half_ok = !solo0.iter().any(|&x| x.abs() >= 1.0)
+        && (rms_dbfs(&half0) - (t0 - 6.02)).abs() < 0.3
         || (rms_dbfs(&half0) < t0 - 4.0); // always at least clearly quieter
     let mute_ok = rms_dbfs(&silence) == f64::NEG_INFINITY;
-    let sum_louder = decoded.len() < 2 || rms_dbfs(&all) >= decoded.iter().map(|d| rms_dbfs(d)).fold(f64::NEG_INFINITY, f64::max) - 0.01;
+    let sum_louder = decoded.len() < 2
+        || rms_dbfs(&all)
+            >= decoded
+                .iter()
+                .map(|d| rms_dbfs(d))
+                .fold(f64::NEG_INFINITY, f64::max)
+                - 0.01;
 
     println!("\ninvariants:");
-    println!("  solo(t0,1.0) == t0 level ............ {}", if solo_ok { "PASS" } else { "FAIL" });
-    println!("  gain 0.5 clearly quieter than 1.0 ... {}", if half_ok { "PASS" } else { "FAIL" });
-    println!("  all muted == silence ............... {}", if mute_ok { "PASS" } else { "FAIL" });
-    println!("  sum >= loudest single track ........ {}", if sum_louder { "PASS" } else { "FAIL" });
+    println!(
+        "  solo(t0,1.0) == t0 level ............ {}",
+        if solo_ok { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  gain 0.5 clearly quieter than 1.0 ... {}",
+        if half_ok { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  all muted == silence ............... {}",
+        if mute_ok { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  sum >= loudest single track ........ {}",
+        if sum_louder { "PASS" } else { "FAIL" }
+    );
 
     if !(solo_ok && half_ok && mute_ok && sum_louder) {
         std::process::exit(1);

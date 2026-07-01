@@ -15,7 +15,10 @@ fn main() {
     let ctx = AVFormatContextInput::open(&path).expect("failed to open input");
 
     let dur = ctx.duration as f64 / rsmpeg::ffi::AV_TIME_BASE as f64;
-    println!("opened OK — duration {dur:.3}s, {} stream(s)", ctx.nb_streams);
+    println!(
+        "opened OK — duration {dur:.3}s, {} stream(s)",
+        ctx.nb_streams
+    );
 
     for (i, stream) in ctx.streams().iter().enumerate() {
         let par = stream.codecpar();

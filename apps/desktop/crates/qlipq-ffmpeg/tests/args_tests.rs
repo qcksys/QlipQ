@@ -3,7 +3,7 @@ use qlipq_core::media::MediaInfo;
 use qlipq_ffmpeg::args::*;
 
 fn media() -> MediaInfo {
-    MediaInfo { duration_sec: 60.0, width: 2560, height: 1440, video_codec: "h264".into(), fps: 60.0, audio_streams: vec![], size_bytes: None }
+    MediaInfo { duration_sec: 60.0, width: 2560, height: 1440, video_codec: "h264".into(), fps: 60.0, audio_streams: vec![], size_bytes: None, encoder: None }
 }
 
 fn settings(configure: impl FnOnce(&mut OutputSettings)) -> OutputSettings {

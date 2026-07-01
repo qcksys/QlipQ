@@ -12,6 +12,7 @@ fn media() -> MediaInfo {
         fps: 60.0,
         audio_streams: vec![],
         size_bytes: Some(1_000_000_000),
+        encoder: None,
     }
 }
 

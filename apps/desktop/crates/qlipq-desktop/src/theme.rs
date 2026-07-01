@@ -13,7 +13,12 @@ use qlipq_core::queue::QueueStatus;
 
 // ---- Surface ramp (explicit so the dark theme reads with real depth, not one flat fill) ----
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
-    Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
+    Color {
+        r: r as f32 / 255.0,
+        g: g as f32 / 255.0,
+        b: b as f32 / 255.0,
+        a: 1.0,
+    }
 }
 const C_CANVAS: Color = rgb(0x0e, 0x0f, 0x13); // app background (deepest)
 const C_SIDEBAR: Color = rgb(0x14, 0x15, 0x1c); // sidebar / top bar
@@ -50,12 +55,28 @@ pub const SMALL: f32 = 11.0;
 
 // ---- Fonts (Inter is bundled + registered in main(); weights select along its variable axis) ----
 pub const FONT: Font = Font::with_name("Inter");
-pub const FONT_MEDIUM: Font = Font { weight: Weight::Medium, ..Font::with_name("Inter") };
-pub const FONT_SEMIBOLD: Font = Font { weight: Weight::Semibold, ..Font::with_name("Inter") };
-pub const FONT_BOLD: Font = Font { weight: Weight::Bold, ..Font::with_name("Inter") };
+pub const FONT_MEDIUM: Font = Font {
+    weight: Weight::Medium,
+    ..Font::with_name("Inter")
+};
+pub const FONT_SEMIBOLD: Font = Font {
+    weight: Weight::Semibold,
+    ..Font::with_name("Inter")
+};
+pub const FONT_BOLD: Font = Font {
+    weight: Weight::Bold,
+    ..Font::with_name("Inter")
+};
 
 fn shadow(alpha: f32, y: f32, blur: f32) -> Shadow {
-    Shadow { color: Color { a: alpha, ..Color::BLACK }, offset: Vector::new(0.0, y), blur_radius: blur }
+    Shadow {
+        color: Color {
+            a: alpha,
+            ..Color::BLACK
+        },
+        offset: Vector::new(0.0, y),
+        blur_radius: blur,
+    }
 }
 
 /// The app's dark brand palette. Built once in `App::new` and cloned by `App::theme`.
@@ -77,12 +98,18 @@ pub fn dark() -> Theme {
 
 /// Root window background.
 pub fn canvas(_theme: &Theme) -> container::Style {
-    container::Style { background: Some(Background::Color(C_CANVAS)), ..container::Style::default() }
+    container::Style {
+        background: Some(Background::Color(C_CANVAS)),
+        ..container::Style::default()
+    }
 }
 
 /// Queue sidebar column.
 pub fn sidebar(_theme: &Theme) -> container::Style {
-    container::Style { background: Some(Background::Color(C_SIDEBAR)), ..container::Style::default() }
+    container::Style {
+        background: Some(Background::Color(C_SIDEBAR)),
+        ..container::Style::default()
+    }
 }
 
 /// Top app bar: sidebar tone with a soft downward shadow to lift it off the content.
@@ -98,7 +125,11 @@ pub fn top_bar(_theme: &Theme) -> container::Style {
 pub fn card(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(C_SURFACE)),
-        border: Border { color: C_BORDER, width: 1.0, radius: Radius::from(RADIUS) },
+        border: Border {
+            color: C_BORDER,
+            width: 1.0,
+            radius: Radius::from(RADIUS),
+        },
         shadow: shadow(0.22, 2.0, 8.0),
         ..container::Style::default()
     }
@@ -108,7 +139,11 @@ pub fn card(_theme: &Theme) -> container::Style {
 pub fn panel(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(C_PANEL)),
-        border: Border { color: C_BORDER, width: 1.0, radius: Radius::from(RADIUS_SM) },
+        border: Border {
+            color: C_BORDER,
+            width: 1.0,
+            radius: Radius::from(RADIUS_SM),
+        },
         ..container::Style::default()
     }
 }
@@ -117,7 +152,11 @@ pub fn panel(_theme: &Theme) -> container::Style {
 pub fn dialog(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(C_DIALOG)),
-        border: Border { color: C_BORDER_STRONG, width: 1.0, radius: Radius::from(RADIUS_LG) },
+        border: Border {
+            color: C_BORDER_STRONG,
+            width: 1.0,
+            radius: Radius::from(RADIUS_LG),
+        },
         shadow: shadow(0.5, 18.0, 48.0),
         ..container::Style::default()
     }
@@ -126,7 +165,10 @@ pub fn dialog(_theme: &Theme) -> container::Style {
 /// Semi-opaque backdrop behind a modal so the app dims instead of vanishing.
 pub fn scrim(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color { a: 0.62, ..Color::BLACK })),
+        background: Some(Background::Color(Color {
+            a: 0.62,
+            ..Color::BLACK
+        })),
         ..container::Style::default()
     }
 }
@@ -136,7 +178,11 @@ pub fn chip(theme: &Theme) -> container::Style {
     let p = theme.extended_palette();
     container::Style {
         background: Some(Background::Color(p.primary.base.color.scale_alpha(0.16))),
-        border: Border { color: p.primary.base.color.scale_alpha(0.30), width: 1.0, radius: Radius::from(RADIUS_PILL) },
+        border: Border {
+            color: p.primary.base.color.scale_alpha(0.30),
+            width: 1.0,
+            radius: Radius::from(RADIUS_PILL),
+        },
         text_color: Some(p.primary.base.color),
         ..container::Style::default()
     }
@@ -146,7 +192,10 @@ pub fn chip(theme: &Theme) -> container::Style {
 pub fn status_dot(status: QueueStatus) -> impl Fn(&Theme) -> container::Style {
     move |theme| container::Style {
         background: Some(Background::Color(status_color(theme, status))),
-        border: Border { radius: Radius::from(RADIUS_PILL), ..Border::default() },
+        border: Border {
+            radius: Radius::from(RADIUS_PILL),
+            ..Border::default()
+        },
         ..container::Style::default()
     }
 }
@@ -158,21 +207,33 @@ pub fn queue_card(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container
         if selected {
             container::Style {
                 background: Some(Background::Color(p.primary.base.color.scale_alpha(0.16))),
-                border: Border { color: p.primary.base.color, width: 1.5, radius: Radius::from(RADIUS) },
+                border: Border {
+                    color: p.primary.base.color,
+                    width: 1.5,
+                    radius: Radius::from(RADIUS),
+                },
                 shadow: shadow(0.25, 2.0, 10.0),
                 ..container::Style::default()
             }
         } else if hovered {
             container::Style {
                 background: Some(Background::Color(C_SURFACE_HI)),
-                border: Border { color: C_BORDER_STRONG, width: 1.0, radius: Radius::from(RADIUS) },
+                border: Border {
+                    color: C_BORDER_STRONG,
+                    width: 1.0,
+                    radius: Radius::from(RADIUS),
+                },
                 shadow: shadow(0.22, 2.0, 10.0),
                 ..container::Style::default()
             }
         } else {
             container::Style {
                 background: Some(Background::Color(C_SURFACE)),
-                border: Border { color: C_BORDER, width: 1.0, radius: Radius::from(RADIUS) },
+                border: Border {
+                    color: C_BORDER,
+                    width: 1.0,
+                    radius: Radius::from(RADIUS),
+                },
                 shadow: shadow(0.18, 1.0, 6.0),
                 ..container::Style::default()
             }
@@ -220,8 +281,16 @@ pub fn btn_secondary(theme: &Theme, status: button::Status) -> button::Style {
     };
     button::Style {
         background: Some(Background::Color(bg)),
-        text_color: if matches!(status, button::Status::Disabled) { C_MUTED } else { p.background.base.text },
-        border: Border { color: C_BORDER_STRONG, width: 1.0, radius: Radius::from(RADIUS_SM) },
+        text_color: if matches!(status, button::Status::Disabled) {
+            C_MUTED
+        } else {
+            p.background.base.text
+        },
+        border: Border {
+            color: C_BORDER_STRONG,
+            width: 1.0,
+            radius: Radius::from(RADIUS_SM),
+        },
         ..button::Style::default()
     }
 }
@@ -239,7 +308,10 @@ pub fn btn_plain(theme: &Theme, _status: button::Status) -> button::Style {
     button::Style {
         background: None,
         text_color: theme.extended_palette().background.base.text,
-        border: Border { radius: Radius::from(RADIUS_SM), ..Border::default() },
+        border: Border {
+            radius: Radius::from(RADIUS_SM),
+            ..Border::default()
+        },
         ..button::Style::default()
     }
 }
@@ -257,7 +329,10 @@ pub fn btn_ghost(theme: &Theme, status: button::Status) -> button::Style {
             button::Status::Disabled => C_MUTED,
             _ => p.background.base.text,
         },
-        border: Border { radius: Radius::from(RADIUS_SM), ..Border::default() },
+        border: Border {
+            radius: Radius::from(RADIUS_SM),
+            ..Border::default()
+        },
         ..button::Style::default()
     }
 }
@@ -270,7 +345,10 @@ pub fn nav(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
             button::Style {
                 background: Some(Background::Color(p.primary.base.color.scale_alpha(0.18))),
                 text_color: p.primary.base.color,
-                border: Border { radius: Radius::from(RADIUS_SM), ..Border::default() },
+                border: Border {
+                    radius: Radius::from(RADIUS_SM),
+                    ..Border::default()
+                },
                 ..button::Style::default()
             }
         } else {
@@ -286,7 +364,11 @@ pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let p = theme.extended_palette();
     let mut s = text_input::Style {
         background: Background::Color(C_SURFACE),
-        border: Border { color: C_BORDER, width: 1.0, radius: Radius::from(RADIUS_SM) },
+        border: Border {
+            color: C_BORDER,
+            width: 1.0,
+            radius: Radius::from(RADIUS_SM),
+        },
         icon: C_MUTED,
         placeholder: C_MUTED,
         value: C_TEXT,
@@ -315,10 +397,15 @@ pub fn slider_style(theme: &Theme, status: slider::Status) -> slider::Style {
                 Background::Color(C_BORDER_STRONG),
             ),
             width: 6.0,
-            border: Border { radius: Radius::from(3.0), ..Border::default() },
+            border: Border {
+                radius: Radius::from(3.0),
+                ..Border::default()
+            },
         },
         handle: slider::Handle {
-            shape: slider::HandleShape::Circle { radius: if engaged { 9.0 } else { 7.0 } },
+            shape: slider::HandleShape::Circle {
+                radius: if engaged { 9.0 } else { 7.0 },
+            },
             background: Background::Color(p.primary.base.color),
             border_width: if engaged { 4.0 } else { 0.0 },
             border_color: p.primary.base.color.scale_alpha(0.30),
@@ -337,10 +424,18 @@ pub fn checkbox_style(theme: &Theme, status: checkbox::Status) -> checkbox::Styl
     );
     let hovered = matches!(status, checkbox::Status::Hovered { .. });
     checkbox::Style {
-        background: Background::Color(if checked { p.primary.base.color } else { C_SURFACE }),
+        background: Background::Color(if checked {
+            p.primary.base.color
+        } else {
+            C_SURFACE
+        }),
         icon_color: p.primary.base.text,
         border: Border {
-            color: if checked || hovered { p.primary.base.color } else { C_BORDER_STRONG },
+            color: if checked || hovered {
+                p.primary.base.color
+            } else {
+                C_BORDER_STRONG
+            },
             width: 1.5,
             radius: Radius::from(5.0),
         },
@@ -356,7 +451,11 @@ pub fn pick_list_style(theme: &Theme, status: pick_list::Status) -> pick_list::S
         placeholder_color: C_MUTED,
         handle_color: C_MUTED,
         background: Background::Color(C_SURFACE),
-        border: Border { color: C_BORDER, width: 1.0, radius: Radius::from(RADIUS_SM) },
+        border: Border {
+            color: C_BORDER,
+            width: 1.0,
+            radius: Radius::from(RADIUS_SM),
+        },
     };
     match status {
         pick_list::Status::Hovered => s.border.color = C_BORDER_STRONG,
@@ -372,6 +471,9 @@ pub fn progress_style(theme: &Theme) -> progress_bar::Style {
     progress_bar::Style {
         background: Background::Color(C_BORDER),
         bar: Background::Color(p.primary.base.color),
-        border: Border { radius: Radius::from(RADIUS_PILL), ..Border::default() },
+        border: Border {
+            radius: Radius::from(RADIUS_PILL),
+            ..Border::default()
+        },
     }
 }

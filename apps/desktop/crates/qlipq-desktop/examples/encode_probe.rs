@@ -30,8 +30,12 @@ use rsmpeg::ffi;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let input = args.next().expect("usage: encode_probe <input> <out.mp4> [encoder] [seconds]");
-    let output = args.next().expect("usage: encode_probe <input> <out.mp4> [encoder] [seconds]");
+    let input = args
+        .next()
+        .expect("usage: encode_probe <input> <out.mp4> [encoder] [seconds]");
+    let output = args
+        .next()
+        .expect("usage: encode_probe <input> <out.mp4> [encoder] [seconds]");
     let encoder = args.next().unwrap_or_else(|| "h264_nvenc".to_string());
     let max_secs: f64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5.0);
 
@@ -67,10 +71,18 @@ fn run(input: &str, output: &str, encoder: &str, max_secs: f64) -> Result<(), St
         let st = &ictx.streams()[vid_idx];
         let tb = st.time_base;
         let afr = st.avg_frame_rate;
-        let fps = if afr.num > 0 && afr.den > 0 { afr } else { st.r_frame_rate };
+        let fps = if afr.num > 0 && afr.den > 0 {
+            afr
+        } else {
+            st.r_frame_rate
+        };
         let par = st.codecpar();
         let sar0 = par.sample_aspect_ratio;
-        let sar = if sar0.num == 0 { ffi::AVRational { num: 1, den: 1 } } else { sar0 };
+        let sar = if sar0.num == 0 {
+            ffi::AVRational { num: 1, den: 1 }
+        } else {
+            sar0
+        };
         let src_color = SrcColor {
             primaries: par.color_primaries,
             trc: par.color_trc,
@@ -79,7 +91,8 @@ fn run(input: &str, output: &str, encoder: &str, max_secs: f64) -> Result<(), St
         };
         let codec = AVCodec::find_decoder(par.codec_id).ok_or("no decoder for input")?;
         let mut dec = AVCodecContext::new(&codec);
-        dec.apply_codecpar(&par).map_err(|e| format!("apply_codecpar: {e:?}"))?;
+        dec.apply_codecpar(&par)
+            .map_err(|e| format!("apply_codecpar: {e:?}"))?;
         dec.set_pkt_timebase(tb);
         unsafe { (*dec.as_mut_ptr()).thread_count = 0 };
         dec.open(None).map_err(|e| format!("open decoder: {e:?}"))?;
@@ -89,44 +102,90 @@ fn run(input: &str, output: &str, encoder: &str, max_secs: f64) -> Result<(), St
     // --- pick encoder pixel format from source bit depth / HDR transfer ---
     let depth = unsafe {
         let d = ffi::av_pix_fmt_desc_get(dec.pix_fmt);
-        if d.is_null() { 8 } else { (*d.cast::<ffi::AVPixFmtDescriptor>()).comp[0].depth }
+        if d.is_null() {
+            8
+        } else {
+            (*d.cast::<ffi::AVPixFmtDescriptor>()).comp[0].depth
+        }
     };
-    let is_hdr = src_color.trc == ffi::AVCOL_TRC_SMPTE2084 || src_color.trc == ffi::AVCOL_TRC_ARIB_STD_B67;
+    let is_hdr =
+        src_color.trc == ffi::AVCOL_TRC_SMPTE2084 || src_color.trc == ffi::AVCOL_TRC_ARIB_STD_B67;
     let ten_bit = depth > 8 || is_hdr;
 
     // Encoder + rate-control. `auto` runs the Step-5 HW quality model (`plan_hw_video`) with a runtime
     // usability probe, so it picks the encoder + opts and falls back vendor by vendor; otherwise the
     // named encoder is used (with a fixed NVENC rate-control for the gate). 10-bit/HDR forces HEVC.
-    let (encoder, planned_opts, bitrate_kbps, maxrate_kbps): (String, Vec<(&str, String)>, Option<i64>, Option<i64>) =
-        if encoder == "auto" {
-            let settings = qlipq_core::config::OutputSettings::default();
-            let plan = qlipq_ffmpeg::hw::plan_hw_video(&settings, ten_bit, encoder_usable).ok_or("no usable HW encoder")?;
-            eprintln!("auto: {} opts={:?} bitrate={:?} maxrate={:?}", plan.encoder, plan.opts, plan.bitrate_kbps, plan.maxrate_kbps);
-            (plan.encoder, plan.opts, plan.bitrate_kbps, plan.maxrate_kbps)
-        } else if ten_bit && encoder == "h264_nvenc" {
-            eprintln!("note: 10-bit/HDR source — upgrading h264_nvenc → hevc_nvenc (h264 has no 10-bit profile)");
-            ("hevc_nvenc".to_string(), vec![("preset", "p5".into()), ("rc", "vbr".into()), ("cq", "23".into())], None, None)
+    let (encoder, planned_opts, bitrate_kbps, maxrate_kbps): (
+        String,
+        Vec<(&str, String)>,
+        Option<i64>,
+        Option<i64>,
+    ) = if encoder == "auto" {
+        let settings = qlipq_core::config::OutputSettings::default();
+        let plan = qlipq_ffmpeg::hw::plan_hw_video(&settings, ten_bit, encoder_usable)
+            .ok_or("no usable HW encoder")?;
+        eprintln!(
+            "auto: {} opts={:?} bitrate={:?} maxrate={:?}",
+            plan.encoder, plan.opts, plan.bitrate_kbps, plan.maxrate_kbps
+        );
+        (
+            plan.encoder,
+            plan.opts,
+            plan.bitrate_kbps,
+            plan.maxrate_kbps,
+        )
+    } else if ten_bit && encoder == "h264_nvenc" {
+        eprintln!("note: 10-bit/HDR source — upgrading h264_nvenc → hevc_nvenc (h264 has no 10-bit profile)");
+        (
+            "hevc_nvenc".to_string(),
+            vec![
+                ("preset", "p5".into()),
+                ("rc", "vbr".into()),
+                ("cq", "23".into()),
+            ],
+            None,
+            None,
+        )
+    } else {
+        let o = if encoder.contains("nvenc") {
+            vec![
+                ("preset", "p5".into()),
+                ("rc", "vbr".into()),
+                ("cq", "23".into()),
+            ]
         } else {
-            let o = if encoder.contains("nvenc") {
-                vec![("preset", "p5".into()), ("rc", "vbr".into()), ("cq", "23".into())]
-            } else {
-                vec![]
-            };
-            (encoder.to_string(), o, None, None)
+            vec![]
         };
+        (encoder.to_string(), o, None, None)
+    };
 
-    let (enc_pix_name, enc_pix) = if ten_bit { ("p010le", ffi::AV_PIX_FMT_P010LE) } else { ("nv12", ffi::AV_PIX_FMT_NV12) };
+    let (enc_pix_name, enc_pix) = if ten_bit {
+        ("p010le", ffi::AV_PIX_FMT_P010LE)
+    } else {
+        ("nv12", ffi::AV_PIX_FMT_NV12)
+    };
 
     // --- filter: buffer -> format=<nv12|p010le> -> buffersink (keep source resolution) ---
     let graph = AVFilterGraph::new();
     let bufargs = CString::new(format!(
         "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}:colorspace={}:range={}",
-        dec.width, dec.height, dec.pix_fmt as i32, tb_in.num, tb_in.den, sar.num, sar.den,
-        src_color.space as i32, src_color.range as i32
+        dec.width,
+        dec.height,
+        dec.pix_fmt as i32,
+        tb_in.num,
+        tb_in.den,
+        sar.num,
+        sar.den,
+        src_color.space as i32,
+        src_color.range as i32
     ))
     .map_err(|e| e.to_string())?;
     let mut src = graph
-        .create_filter_context(&AVFilter::get_by_name(c"buffer").unwrap(), c"in", Some(&bufargs))
+        .create_filter_context(
+            &AVFilter::get_by_name(c"buffer").unwrap(),
+            c"in",
+            Some(&bufargs),
+        )
         .map_err(|e| format!("buffer: {e:?}"))?;
     let mut sink = graph
         .create_filter_context(&AVFilter::get_by_name(c"buffersink").unwrap(), c"out", None)
@@ -134,12 +193,15 @@ fn run(input: &str, output: &str, encoder: &str, max_secs: f64) -> Result<(), St
     let outputs = AVFilterInOut::new(c"in", &mut src, 0);
     let inputs = AVFilterInOut::new(c"out", &mut sink, 0);
     let descr = CString::new(format!("format={enc_pix_name}")).map_err(|e| e.to_string())?;
-    graph.parse_ptr(&descr, Some(inputs), Some(outputs)).map_err(|e| format!("parse: {e:?}"))?;
+    graph
+        .parse_ptr(&descr, Some(inputs), Some(outputs))
+        .map_err(|e| format!("parse: {e:?}"))?;
     graph.config().map_err(|e| format!("graph config: {e:?}"))?;
 
     // --- encoder ---
     let cenc = CString::new(encoder.as_str()).map_err(|e| e.to_string())?;
-    let codec = AVCodec::find_encoder_by_name(&cenc).ok_or_else(|| format!("encoder '{encoder}' not found (HW present?)"))?;
+    let codec = AVCodec::find_encoder_by_name(&cenc)
+        .ok_or_else(|| format!("encoder '{encoder}' not found (HW present?)"))?;
     let mut enc = AVCodecContext::new(&codec);
     enc.set_width(dec.width);
     enc.set_height(dec.height);
@@ -151,9 +213,21 @@ fn run(input: &str, output: &str, encoder: &str, max_secs: f64) -> Result<(), St
     // Carry color metadata so HDR survives (x265's automatic carry-through is gone on HW encoders).
     unsafe {
         let p = enc.as_mut_ptr();
-        (*p).color_primaries = if is_hdr { ffi::AVCOL_PRI_BT2020 } else { src_color.primaries };
-        (*p).color_trc = if is_hdr { ffi::AVCOL_TRC_SMPTE2084 } else { src_color.trc };
-        (*p).colorspace = if is_hdr { ffi::AVCOL_SPC_BT2020_NCL } else { src_color.space };
+        (*p).color_primaries = if is_hdr {
+            ffi::AVCOL_PRI_BT2020
+        } else {
+            src_color.primaries
+        };
+        (*p).color_trc = if is_hdr {
+            ffi::AVCOL_TRC_SMPTE2084
+        } else {
+            src_color.trc
+        };
+        (*p).colorspace = if is_hdr {
+            ffi::AVCOL_SPC_BT2020_NCL
+        } else {
+            src_color.space
+        };
         (*p).color_range = src_color.range;
     }
     let global_header = ffi::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
@@ -166,19 +240,22 @@ fn run(input: &str, output: &str, encoder: &str, max_secs: f64) -> Result<(), St
     }
 
     let opts = dict_from(&planned_opts);
-    enc.open(opts).map_err(|e| format!("open encoder '{encoder}': {e:?}"))?;
+    enc.open(opts)
+        .map_err(|e| format!("open encoder '{encoder}': {e:?}"))?;
     let enc_tb = enc.time_base;
 
     // --- muxer ---
     let cout = CString::new(output).map_err(|e| e.to_string())?;
-    let mut octx = AVFormatContextOutput::create(&cout).map_err(|e| format!("create output: {e:?}"))?;
+    let mut octx =
+        AVFormatContextOutput::create(&cout).map_err(|e| format!("create output: {e:?}"))?;
     {
         let mut stream = octx.new_stream();
         stream.set_codecpar(enc.extract_codecpar());
         stream.set_time_base(enc_tb);
     }
     let mut header_opts = Some(AVDictionary::new(c"movflags", c"+faststart", 0));
-    octx.write_header(&mut header_opts).map_err(|e| format!("write_header: {e:?}"))?;
+    octx.write_header(&mut header_opts)
+        .map_err(|e| format!("write_header: {e:?}"))?;
     let out_tb = octx.streams()[0].time_base;
 
     // --- decode -> filter -> encode -> mux, stopping after `max_secs` of content ---
@@ -197,7 +274,14 @@ fn run(input: &str, output: &str, encoder: &str, max_secs: f64) -> Result<(), St
                     if max_secs > 0.0 && (frame.pts - f0) as f64 * tb_secs >= max_secs {
                         break 'pump; // reached the cut; flush the encoder below
                     }
-                    encode(&mut enc, Some(&frame), &mut octx, enc_tb, out_tb, &mut frames_out)?;
+                    encode(
+                        &mut enc,
+                        Some(&frame),
+                        &mut octx,
+                        enc_tb,
+                        out_tb,
+                        &mut frames_out,
+                    )?;
                     frames_in += 1;
                 }
                 Err(RsmpegError::BufferSinkDrainError) => break,
@@ -238,7 +322,8 @@ fn run(input: &str, output: &str, encoder: &str, max_secs: f64) -> Result<(), St
 
     // flush the encoder, then finalize the container
     encode(&mut enc, None, &mut octx, enc_tb, out_tb, &mut frames_out)?;
-    octx.write_trailer().map_err(|e| format!("write_trailer: {e:?}"))?;
+    octx.write_trailer()
+        .map_err(|e| format!("write_trailer: {e:?}"))?;
 
     let bytes = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -255,8 +340,12 @@ fn run(input: &str, output: &str, encoder: &str, max_secs: f64) -> Result<(), St
 /// Runtime usability probe for the Step-5 HW quality model: does this encoder actually open here?
 /// Catches the "listed but unusable" case (e.g. QSV with no working iGPU — `MFX session` errors).
 fn encoder_usable(name: &str) -> bool {
-    let Ok(cname) = CString::new(name) else { return false };
-    let Some(codec) = AVCodec::find_encoder_by_name(&cname) else { return false };
+    let Ok(cname) = CString::new(name) else {
+        return false;
+    };
+    let Some(codec) = AVCodec::find_encoder_by_name(&cname) else {
+        return false;
+    };
     let mut enc = AVCodecContext::new(&codec);
     enc.set_width(320);
     enc.set_height(240);
@@ -288,13 +377,15 @@ fn encode(
     out_tb: ffi::AVRational,
     frames_out: &mut u64,
 ) -> Result<(), String> {
-    enc.send_frame(frame).map_err(|e| format!("send_frame: {e:?}"))?;
+    enc.send_frame(frame)
+        .map_err(|e| format!("send_frame: {e:?}"))?;
     loop {
         match enc.receive_packet() {
             Ok(mut pkt) => {
                 pkt.set_stream_index(0);
                 pkt.rescale_ts(enc_tb, out_tb);
-                octx.interleaved_write_frame(&mut pkt).map_err(|e| format!("write_frame: {e:?}"))?;
+                octx.interleaved_write_frame(&mut pkt)
+                    .map_err(|e| format!("write_frame: {e:?}"))?;
                 *frames_out += 1;
             }
             Err(RsmpegError::EncoderDrainError) | Err(RsmpegError::EncoderFlushedError) => break,

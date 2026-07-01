@@ -34,13 +34,21 @@ struct Decoder {
 fn open(path: &str) -> Decoder {
     let cpath = CString::new(path).unwrap();
     let input = AVFormatContextInput::open(&cpath).unwrap();
-    let vid_idx = input.find_best_stream(ffi::AVMEDIA_TYPE_VIDEO).unwrap().map(|(i, _)| i).expect("no video");
+    let vid_idx = input
+        .find_best_stream(ffi::AVMEDIA_TYPE_VIDEO)
+        .unwrap()
+        .map(|(i, _)| i)
+        .expect("no video");
     let (vdec, tb, sar) = {
         let st = &input.streams()[vid_idx];
         let tb = st.time_base;
         let par = st.codecpar();
         let sar0 = par.sample_aspect_ratio;
-        let sar = if sar0.num == 0 { ffi::AVRational { num: 1, den: 1 } } else { sar0 };
+        let sar = if sar0.num == 0 {
+            ffi::AVRational { num: 1, den: 1 }
+        } else {
+            sar0
+        };
         let codec = AVCodec::find_decoder(par.codec_id).unwrap();
         let mut d = AVCodecContext::new(&codec);
         d.apply_codecpar(&par).unwrap();
@@ -49,7 +57,13 @@ fn open(path: &str) -> Decoder {
         d.open(None).unwrap();
         (d, tb, sar)
     };
-    Decoder { input, vdec, vid_idx: vid_idx as i32, tb, sar }
+    Decoder {
+        input,
+        vdec,
+        vid_idx: vid_idx as i32,
+        tb,
+        sar,
+    }
 }
 
 fn build_graph<'g>(
@@ -61,11 +75,25 @@ fn build_graph<'g>(
 ) -> (AVFilterContextMut<'g>, AVFilterContextMut<'g>) {
     let args = CString::new(format!(
         "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}",
-        d.vdec.width, d.vdec.height, d.vdec.pix_fmt as i32, d.tb.num, d.tb.den, d.sar.num, d.sar.den
+        d.vdec.width,
+        d.vdec.height,
+        d.vdec.pix_fmt as i32,
+        d.tb.num,
+        d.tb.den,
+        d.sar.num,
+        d.sar.den
     ))
     .unwrap();
-    let mut src = graph.create_filter_context(&AVFilter::get_by_name(c"buffer").unwrap(), c"in", Some(&args)).unwrap();
-    let mut sink = graph.create_filter_context(&AVFilter::get_by_name(c"buffersink").unwrap(), c"out", None).unwrap();
+    let mut src = graph
+        .create_filter_context(
+            &AVFilter::get_by_name(c"buffer").unwrap(),
+            c"in",
+            Some(&args),
+        )
+        .unwrap();
+    let mut sink = graph
+        .create_filter_context(&AVFilter::get_by_name(c"buffersink").unwrap(), c"out", None)
+        .unwrap();
     let outputs = AVFilterInOut::new(c"in", &mut src, 0);
     let inputs = AVFilterInOut::new(c"out", &mut sink, 0);
     let descr = if is_hdr {
@@ -76,7 +104,9 @@ fn build_graph<'g>(
         CString::new(format!("scale={w}:{h}:flags=bilinear,format=rgba"))
     }
     .unwrap();
-    graph.parse_ptr(&descr, Some(inputs), Some(outputs)).unwrap();
+    graph
+        .parse_ptr(&descr, Some(inputs), Some(outputs))
+        .unwrap();
     graph.config().expect("graph config");
     (src, sink)
 }
@@ -86,7 +116,9 @@ fn decode_target(d: &mut Decoder, target: f64) -> Option<AVFrame> {
     let tb_secs = d.tb.num as f64 / d.tb.den as f64;
     if d.tb.num != 0 {
         let ts = (target / tb_secs) as i64;
-        let _ = d.input.seek(d.vid_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
+        let _ = d
+            .input
+            .seek(d.vid_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
         d.vdec.flush_buffers();
     }
     let mut flushed = false;
@@ -138,7 +170,13 @@ fn decode_next(d: &mut Decoder) -> Option<AVFrame> {
 /// Push `first` (the target frame) into the graph, then feed following frames until the graph emits
 /// its first output — that output is the target frame. `mono` keeps buffersrc PTS monotonic across
 /// reuse. Returns the realized RGBA byte count.
-fn filter_target(d: &mut Decoder, src: &mut AVFilterContextMut, sink: &mut AVFilterContextMut, first: AVFrame, mono: &mut i64) -> Option<usize> {
+fn filter_target(
+    d: &mut Decoder,
+    src: &mut AVFilterContextMut,
+    sink: &mut AVFilterContextMut,
+    first: AVFrame,
+    mono: &mut i64,
+) -> Option<usize> {
     // Drain any stale output left from a previous scrub's flush-pushes.
     while sink.buffersink_get_frame(None).is_ok() {}
 
@@ -175,7 +213,9 @@ fn placebo_dims(src_w: i64, src_h: i64) -> (u32, u32) {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: scrubgraph_probe <hdr clip>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: scrubgraph_probe <hdr clip>");
     let probe = open(&path);
     let (src_w, src_h) = (probe.vdec.width as i64, probe.vdec.height as i64);
     let is_hdr = {
@@ -184,7 +224,16 @@ fn main() {
         trc == ffi::AVCOL_TRC_SMPTE2084 || trc == ffi::AVCOL_TRC_ARIB_STD_B67
     };
     let dims = placebo_dims(src_w, src_h);
-    println!("clip: {src_w}x{src_h} -> {}x{} preview, {}\n", dims.0, dims.1, if is_hdr { "HDR (libplacebo)" } else { "SDR (scale)" });
+    println!(
+        "clip: {src_w}x{src_h} -> {}x{} preview, {}\n",
+        dims.0,
+        dims.1,
+        if is_hdr {
+            "HDR (libplacebo)"
+        } else {
+            "SDR (scale)"
+        }
+    );
     drop(probe);
 
     // --- FRESH: rebuild the graph every scrub (current behaviour) ---
@@ -204,7 +253,10 @@ fn main() {
         };
         let ms = started.elapsed().as_secs_f64() * 1e3;
         fresh_total += ms;
-        println!("  seek {t:>4.1}s  {ms:7.1} ms  {}", if ok { "ok" } else { "MISS" });
+        println!(
+            "  seek {t:>4.1}s  {ms:7.1} ms  {}",
+            if ok { "ok" } else { "MISS" }
+        );
     }
     drop(fresh);
 
@@ -227,7 +279,10 @@ fn main() {
         };
         let ms = started.elapsed().as_secs_f64() * 1e3;
         warm_total += ms;
-        println!("  seek {t:>4.1}s  {ms:7.1} ms  {}", if ok { "ok" } else { "MISS" });
+        println!(
+            "  seek {t:>4.1}s  {ms:7.1} ms  {}",
+            if ok { "ok" } else { "MISS" }
+        );
     }
 
     let n = TARGETS.len() as f64;

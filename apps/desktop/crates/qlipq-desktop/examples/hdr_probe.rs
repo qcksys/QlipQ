@@ -15,7 +15,9 @@ use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 
 fn main() {
-    let arg = std::env::args().nth(1).expect("usage: hdr_probe <media path>");
+    let arg = std::env::args()
+        .nth(1)
+        .expect("usage: hdr_probe <media path>");
     let path = CString::new(arg).unwrap();
     let mut input = AVFormatContextInput::open(&path).expect("open failed");
 
@@ -30,7 +32,11 @@ fn main() {
         let tb = stream.time_base;
         let par = stream.codecpar();
         let sar = par.sample_aspect_ratio;
-        let sar = if sar.num == 0 { ffi::AVRational { num: 1, den: 1 } } else { sar };
+        let sar = if sar.num == 0 {
+            ffi::AVRational { num: 1, den: 1 }
+        } else {
+            sar
+        };
 
         let mut dec = AVCodecContext::new(&codec);
         dec.apply_codecpar(&par).expect("apply_codecpar failed");
@@ -49,7 +55,11 @@ fn main() {
     // --- filter graph: buffer -> libplacebo (tonemap HDR→BT.709 SDR, ≤720p, RGBA) -> buffersink ---
     let graph = AVFilterGraph::new();
     let mut src = graph
-        .create_filter_context(&AVFilter::get_by_name(c"buffer").unwrap(), c"in", Some(&args))
+        .create_filter_context(
+            &AVFilter::get_by_name(c"buffer").unwrap(),
+            c"in",
+            Some(&args),
+        )
         .expect("create buffer");
     let mut sink = graph
         .create_filter_context(&AVFilter::get_by_name(c"buffersink").unwrap(), c"out", None)
@@ -60,15 +70,22 @@ fn main() {
     let outputs = AVFilterInOut::new(c"in", &mut src, 0);
     let inputs = AVFilterInOut::new(c"out", &mut sink, 0);
     let descr = c"libplacebo=w=-2:h=min(ih\\,720):tonemapping=auto:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc,format=rgba";
-    graph.parse_ptr(descr, Some(inputs), Some(outputs)).expect("parse_ptr failed");
-    graph.config().expect("graph config failed (libplacebo/Vulkan init?)");
+    graph
+        .parse_ptr(descr, Some(inputs), Some(outputs))
+        .expect("parse_ptr failed");
+    graph
+        .config()
+        .expect("graph config failed (libplacebo/Vulkan init?)");
 
     // --- pump demux → decode → filter until the first RGBA frame ---
     let (w, h, rgba) = pump_one(&mut input, &mut dec, &mut src, &mut sink, vid_idx as i32)
         .expect("produced no frame");
 
     // --- report size + brightness distribution (RGB only) ---
-    let px: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let px: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
     let mean = px.iter().map(|&v| v as u64).sum::<u64>() as f64 / px.len() as f64;
     let shadows = 100.0 * px.iter().filter(|&&v| v < 48).count() as f64 / px.len() as f64;
     let blown = 100.0 * px.iter().filter(|&&v| v > 235).count() as f64 / px.len() as f64;
@@ -142,7 +159,11 @@ fn extract_rgba(frame: &AVFrame) -> (u32, u32, Vec<u8>) {
     // RGBA rows are `stride`-padded in the AVFrame; copy each to a tight `w*4` row.
     unsafe {
         for y in 0..h {
-            std::ptr::copy_nonoverlapping(sptr.add(y * stride), out.as_mut_ptr().add(y * tight), tight);
+            std::ptr::copy_nonoverlapping(
+                sptr.add(y * stride),
+                out.as_mut_ptr().add(y * tight),
+                tight,
+            );
         }
     }
     (w as u32, h as u32, out)

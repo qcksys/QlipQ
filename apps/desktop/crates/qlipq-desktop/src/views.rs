@@ -25,23 +25,23 @@ impl App {
     }
 
     fn queue_sidebar(&self) -> Element<'_, Message> {
+        let f = &self.filter;
+
         let mut all_tags: Vec<String> = self.items.iter().flat_map(|i| i.tags.clone().unwrap_or_default()).collect();
         all_tags.sort();
         all_tags.dedup();
         all_tags.retain(|t| t != DISMISSED_TAG);
 
-        let visible: Vec<&QueueItem> = self
-            .items
-            .iter()
-            .filter(|i| match &self.tag_filter {
-                Some(f) if all_tags.contains(f) => i.tags.as_ref().map(|t| t.contains(f)).unwrap_or(false),
-                _ => !item_dismissed(i),
-            })
-            .collect();
+        let mut all_games: Vec<String> = self.items.iter().filter_map(|i| i.source.clone()).collect();
+        all_games.sort();
+        all_games.dedup();
+
+        let visible: Vec<&QueueItem> = self.items.iter().filter(|i| f.matches(i, self.is_highlight(&i.path))).collect();
+        let active = f.is_active(HighlightFilter::from_hidden(self.config.hide_highlights));
 
         let mut col = column![].spacing(theme::SM).padding(theme::MD);
 
-        // Keep the rescan button + tag filters in one always-present header child so the queue
+        // Keep the rescan button + filter controls in one always-present header child so the queue
         // scrollable below stays at a fixed index in `col`. iced tracks a scrollable's offset by its
         // position in the widget tree; if a conditional sibling above it vanished (e.g. deleting the
         // last tagged clip drops the filter row), the scrollable would shift index and reset to the
@@ -50,19 +50,59 @@ impl App {
         if !self.config.watched_folders.is_empty() {
             header = header.push(button(text("Rescan all folders").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::RescanAll));
         }
-        if !all_tags.is_empty() {
-            let mut filters = row![button(text("All").size(theme::SMALL)).style(theme::nav(self.tag_filter.is_none())).on_press(Message::SetTagFilter(None))].spacing(theme::XS);
-            for t in &all_tags {
-                let active = self.tag_filter.as_deref() == Some(t.as_str());
-                filters = filters.push(button(text(format!("#{t}")).size(theme::SMALL)).style(theme::nav(active)).on_press(Message::SetTagFilter(Some(t.clone()))));
+        header = header.push(
+            text_input("Search clips…", &f.search).on_input(Message::FilterSearch).style(theme::input).width(Length::Fill),
+        );
+        header = header.push(
+            row![
+                pick_list(StatusFilter::ALL.to_vec(), Some(StatusFilter::from_opt(f.status)), |s: StatusFilter| Message::SetStatusFilter(s.to_opt()))
+                    .style(theme::pick_list_style)
+                    .width(Length::Fill),
+                pick_list(HighlightFilter::ALL.to_vec(), Some(f.highlights), Message::SetHighlightFilter).style(theme::pick_list_style).width(Length::Fill),
+            ]
+            .spacing(theme::SM),
+        );
+        if !all_games.is_empty() || !all_tags.is_empty() {
+            let mut selectors = row![].spacing(theme::SM);
+            if !all_games.is_empty() {
+                let mut opts = vec![ALL_GAMES.to_string()];
+                opts.extend(all_games.iter().cloned());
+                let selected = Some(f.game.clone().unwrap_or_else(|| ALL_GAMES.to_string()));
+                selectors = selectors.push(
+                    pick_list(opts, selected, |s: String| Message::SetGameFilter((s != ALL_GAMES).then_some(s))).style(theme::pick_list_style).width(Length::Fill),
+                );
             }
-            header = header.push(filters);
+            if !all_tags.is_empty() {
+                let mut opts = vec![ALL_TAGS_LABEL.to_string()];
+                opts.extend(all_tags.iter().cloned());
+                let selected = Some(f.tag.clone().unwrap_or_else(|| ALL_TAGS_LABEL.to_string()));
+                selectors = selectors.push(
+                    pick_list(opts, selected, |s: String| Message::SetTagFilter((s != ALL_TAGS_LABEL).then_some(s))).style(theme::pick_list_style).width(Length::Fill),
+                );
+            }
+            header = header.push(selectors);
+        }
+        if active {
+            header = header.push(
+                row![
+                    text(format!("{} shown", visible.len())).size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                    Space::new().width(Length::Fill),
+                    button(text("Clear filters").size(theme::SMALL)).style(theme::btn_ghost).on_press(Message::ClearFilters),
+                ]
+                .align_y(iced::Alignment::Center),
+            );
         }
         col = col.push(header);
 
         if visible.is_empty() {
             let no_folders = self.config.watched_folders.is_empty();
-            let msg = if no_folders { "No watched folders yet." } else { "Queue is empty. New recordings show up here automatically." };
+            let msg = if no_folders {
+                "No watched folders yet."
+            } else if active {
+                "No clips match the current filter."
+            } else {
+                "Queue is empty. New recordings show up here automatically."
+            };
             let mut empty = column![text(msg).size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) })]
                 .spacing(theme::MD)
                 .align_x(iced::Alignment::Center);
@@ -85,12 +125,16 @@ impl App {
     fn queue_card(&self, item: &QueueItem) -> Element<'_, Message> {
         let selected = self.selected_id.as_deref() == Some(&item.id);
         let status = item.status;
-        let header = row![
+        let mut header = row![
             container(Space::new().width(Length::Fixed(8.0)).height(Length::Fixed(8.0))).style(theme::status_dot(status)),
             text(item.file_name.clone()).size(theme::BODY).font(theme::FONT_MEDIUM).width(Length::Fill),
         ]
         .spacing(theme::SM)
         .align_y(iced::Alignment::Center);
+        // Flag NVIDIA App auto-captured highlights so they're identifiable even when not hidden.
+        if self.is_highlight(&item.path) {
+            header = header.push(chip("Highlight".to_string()));
+        }
         let open = button(
             column![
                 header,
@@ -172,9 +216,9 @@ impl App {
 
         let transport = container(transport_row(ed)).width(Length::Fill).center_x(Length::Fill);
 
-        // Timeline.
+        // Timeline. The seeker draws the in/out window + endpoint markers on the bar itself.
         let dur = media.duration_sec.max(0.001);
-        let scrub = slider(0.0..=dur, ed.current_time.min(dur), Message::Seek).step(0.05).style(theme::slider_style);
+        let scrub = crate::seeker::seeker(dur, ed.current_time.min(dur), ed.trim_start, ed.trim_end, Message::Seek);
         let time_row = row![
             text_input("0:00.000", &ed.time_input)
                 .on_input(Message::TimestampEdited)
@@ -182,20 +226,23 @@ impl App {
                 .font(Font::MONOSPACE)
                 .style(theme::input)
                 .width(Length::Fixed(110.0)),
-            text(format!("/ {}", format_timestamp(dur))).size(theme::META).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
+            text(format!("/ {}", format_timestamp(dur, media.fps))).size(theme::META).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
         ]
         .spacing(theme::SM)
         .align_y(iced::Alignment::Center);
-        let inout_row = row![
-            text(format!("In {}", format_timestamp(ed.trim_start))).size(theme::META).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
-            button(text("Set in").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::SetIn),
+        let length = row![
+            text("Length").size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
             text(datetimes::format_duration(ed.trim_end - ed.trim_start)).size(theme::LABEL).font(theme::FONT_MEDIUM),
-            button(text("Set out").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::SetOut),
-            text(format!("Out {}", format_timestamp(ed.trim_end))).size(theme::META).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
         ]
         .spacing(theme::SM)
         .align_y(iced::Alignment::Center);
-        let timeline = column![scrub, time_row, inout_row].spacing(theme::SM);
+        let inout = column![
+            trim_row("In", &ed.in_input, Message::InEdited, Message::InSubmit, Message::BumpIn, Message::SetIn),
+            trim_row("Out", &ed.out_input, Message::OutEdited, Message::OutSubmit, Message::BumpOut, Message::SetOut),
+            length,
+        ]
+        .spacing(theme::XS);
+        let timeline = column![scrub, time_row, inout].spacing(theme::SM);
 
         // Options laid out in two columns: media edits (crop, audio) on the left, output + metadata
         // (quality override, tags) on the right. The two toggle cards (Crop, Override) head each column.
@@ -288,6 +335,11 @@ impl App {
             ("File", item.file_name.clone()),
             ("Path", item.path.clone()),
             ("Container", container_ext),
+            ("Encoder", match &media.encoder {
+                Some(e) if qlipq_core::media::is_auto_highlight(Some(e)) => format!("{e} — auto-captured highlight"),
+                Some(e) => e.clone(),
+                None => "—".into(),
+            }),
             ("Video", format!("{} · {}×{} · {:.3} fps{}", media.video_codec, media.width, media.height, media.fps, if ed.is_hdr { " · HDR" } else { "" })),
             ("Source bitrate", bitrate),
             ("Audio tracks", format!("{}", media.audio_streams.len())),
@@ -419,7 +471,9 @@ impl App {
         let mut col = column![checkbox(enabled).label("Override quality for this clip").text_size(theme::LABEL).style(theme::checkbox_style).on_toggle(Message::ToggleOverride)].spacing(theme::SM);
         if enabled {
             let out = self.effective_output(item);
-            let mut fields = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::OverrideQm).style(theme::pick_list_style)].spacing(theme::SM);
+            let mut fields = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::OverrideQm).style(theme::pick_list_style)]
+                .spacing(theme::SM)
+                .align_y(iced::Alignment::End);
             match out.quality_mode {
                 QualityMode::Preset => {
                     fields = fields.push(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::OverrideQp).style(theme::pick_list_style));
@@ -488,6 +542,13 @@ impl App {
             }
         }
         folders = folders.push(add_row);
+        folders = folders.push(
+            checkbox(self.config.hide_highlights)
+                .label("Hide auto-captured highlights (NVIDIA App)")
+                .text_size(theme::LABEL)
+                .style(theme::checkbox_style)
+                .on_toggle(Message::ToggleHideHighlights),
+        );
 
         // Output folder.
         let output_folder = row![
@@ -496,8 +557,11 @@ impl App {
         ]
         .spacing(theme::SM);
 
-        // Output defaults.
-        let mut quality = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::SetQm).style(theme::pick_list_style)].spacing(theme::SM);
+        // Output defaults. Bottom-align so the mode picker shares a baseline with the numeric field
+        // (which carries a label above it) instead of floating above it.
+        let mut quality = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::SetQm).style(theme::pick_list_style)]
+            .spacing(theme::SM)
+            .align_y(iced::Alignment::End);
         match out.quality_mode {
             QualityMode::Preset => quality = quality.push(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::SetQp).style(theme::pick_list_style)),
             QualityMode::Crf | QualityMode::Vbr => {
@@ -546,12 +610,21 @@ impl App {
 
         // HDR preview brightness — a gamma lift for HDR clips that tonemap too dark in the preview.
         let gamma = self.config.hdr_preview_gamma;
+        let default_gamma = AppConfig::default().hdr_preview_gamma;
+        let mut brightness_head = row![
+            text("Brightness").size(theme::LABEL).width(Length::Fill),
+            text(format!("gamma {gamma:.2}")).size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+        ]
+        .spacing(theme::SM)
+        .align_y(iced::Alignment::Center);
+        // Only offer a reset when the value isn't already the default.
+        if (gamma - default_gamma).abs() > f64::EPSILON {
+            brightness_head = brightness_head.push(
+                button(text("Reset").size(theme::SMALL)).style(theme::btn_ghost).on_press(Message::ResetHdrPreviewGamma),
+            );
+        }
         let hdr_preview = column![
-            row![
-                text("Brightness").size(theme::LABEL).width(Length::Fill),
-                text(format!("gamma {gamma:.2}")).size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
-            ]
-            .align_y(iced::Alignment::Center),
+            brightness_head,
             slider(1.0..=3.0, gamma, Message::SetHdrPreviewGamma)
                 .step(0.05)
                 .on_release(Message::ApplyHdrPreviewGamma)
@@ -865,6 +938,35 @@ fn empty_state<'a>(msg: &'a str) -> Element<'a, Message> {
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .into()
+}
+
+/// One in/out editing row: label, −5/−1/−0.5 s bumps, an editable timestamp, +0.5/+1/+5 s bumps, and
+/// a Set button that captures the current playhead. `bump`/`on_edit` are the message constructors.
+fn trim_row<'a>(
+    label: &'a str,
+    value: &'a str,
+    on_edit: fn(String) -> Message,
+    on_submit: Message,
+    bump: fn(f64) -> Message,
+    set_msg: Message,
+) -> Element<'a, Message> {
+    let b = |t: &'static str, delta: f64| {
+        button(text(t).size(theme::SMALL).font(Font::MONOSPACE)).style(theme::btn_secondary).on_press(bump(delta))
+    };
+    row![
+        text(label).size(theme::LABEL).font(theme::FONT_MEDIUM).width(Length::Fixed(30.0)),
+        b("−5", -5.0),
+        b("−1", -1.0),
+        b("−0.5", -0.5),
+        text_input("0:00.000", value).on_input(on_edit).on_submit(on_submit).font(Font::MONOSPACE).style(theme::input).width(Length::Fixed(100.0)),
+        b("+0.5", 0.5),
+        b("+1", 1.0),
+        b("+5", 5.0),
+        button(text("Set").size(theme::SMALL)).style(theme::btn_secondary).on_press(set_msg),
+    ]
+    .spacing(theme::XS)
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
 fn num_field<'a>(label: &'a str, value: i64, on_input: impl Fn(String) -> Message + 'a) -> Element<'a, Message> {
