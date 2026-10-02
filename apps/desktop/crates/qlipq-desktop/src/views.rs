@@ -642,6 +642,30 @@ impl App {
         ]
         .spacing(theme::XS);
 
+        let startup = column![].spacing(theme::SM);
+        #[cfg(windows)]
+        let startup = startup
+            .push(checkbox(self.config.start_with_windows)
+                .label("Start with Windows")
+                .text_size(theme::LABEL)
+                .style(theme::checkbox_style)
+                .on_toggle(Message::ToggleStartWithWindows))
+            .push(text("Launch QlipQ when you sign in to Windows.")
+                .size(theme::SMALL)
+                .style(|t| text::Style { color: Some(theme::muted(t)) }));
+        let mut startup = startup
+            .push(checkbox(self.config.start_minimized)
+                .label("Start minimized")
+                .text_size(theme::LABEL)
+                .style(theme::checkbox_style)
+                .on_toggle(Message::ToggleStartMinimized))
+            .push(text("Minimize the window on the next launch. Watched folders stay active; restore QlipQ from the taskbar.")
+                .size(theme::SMALL)
+                .style(|t| text::Style { color: Some(theme::muted(t)) }));
+        if let Some(error) = &self.startup_error {
+            startup = startup.push(text(error).size(theme::SMALL).style(text::danger));
+        }
+
         // Playback + developer toggles.
         let playback = column![
             checkbox(self.config.autoplay)
@@ -671,6 +695,7 @@ impl App {
 
         let body = column![
             text("Settings").size(theme::DISPLAY).font(theme::FONT_BOLD),
+            section("Startup", startup.into()),
             section("Watched folders", folders.into()),
             section("Output folder", output_folder.into()),
             section("Output defaults", column![quality, encode_row, rate_row].spacing(theme::SM).into()),

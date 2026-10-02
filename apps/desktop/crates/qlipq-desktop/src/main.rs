@@ -18,6 +18,8 @@ mod log_ctx;
 mod persistence;
 mod preview;
 mod seeker;
+#[cfg(windows)]
+mod startup;
 mod theme;
 mod video;
 
@@ -358,6 +360,7 @@ struct RenameState {
 
 struct App {
     config: AppConfig,
+    startup_error: Option<String>,
     persistence: persistence::Persistence,
     reveal_config_after_save: Option<u64>,
     items: Vec<QueueItem>,
@@ -503,6 +506,9 @@ enum Message {
     /// Restore the HDR preview brightness to its default and re-apply it to the preview.
     ResetHdrPreviewGamma,
     SetPreviewRes(PreviewResChoice),
+    #[cfg(windows)]
+    ToggleStartWithWindows(bool),
+    ToggleStartMinimized(bool),
     ToggleAutoplay(bool),
     ToggleDebug(bool),
     ToggleHideHighlights(bool),
@@ -531,6 +537,17 @@ impl App {
         host::migrate_legacy_data();
         let _ = host::write_config_schema();
         let config = host::load_config();
+        #[cfg(windows)]
+        let startup_error = startup::set_enabled(config.start_with_windows)
+            .err()
+            .map(|error| format!("Couldn't update Windows startup: {error}"));
+        #[cfg(not(windows))]
+        let startup_error = None;
+        let minimize = if config.start_minimized {
+            iced::window::latest().and_then(|id| iced::window::minimize(id, true))
+        } else {
+            Task::none()
+        };
         let edit_store = host::load_edit_store();
         let media_cache = host::load_media_cache();
         let mut app = Self::with_data(
@@ -539,13 +556,14 @@ impl App {
             media_cache,
             persistence::Persistence::new(),
         );
+        app.startup_error = startup_error;
         app.watcher = host::start_watch(&app.config.watched_folders, &app.config.video_extensions);
         let folders = app.config.watched_folders.clone();
         let scan = app.request_scan(folders);
         let presets = Task::perform(blocking(host::detect_capture_presets), |p| {
             Message::PresetsDetected(p.obs, p.nvidia_share)
         });
-        (app, Task::batch([scan, presets]))
+        (app, Task::batch([minimize, scan, presets]))
     }
 
     fn with_data(
@@ -560,6 +578,7 @@ impl App {
         };
         App {
             config,
+            startup_error: None,
             persistence,
             reveal_config_after_save: None,
             items: Vec::new(),
@@ -1556,6 +1575,21 @@ impl App {
                     self.request_frame()
                 };
                 return Task::batch([save, refresh]);
+            }
+            #[cfg(windows)]
+            Message::ToggleStartWithWindows(on) => match startup::set_enabled(on) {
+                Ok(()) => {
+                    self.startup_error = None;
+                    self.config.start_with_windows = on;
+                    return self.save_config_task();
+                }
+                Err(error) => {
+                    self.startup_error = Some(format!("Couldn't update Windows startup: {error}"));
+                }
+            },
+            Message::ToggleStartMinimized(on) => {
+                self.config.start_minimized = on;
+                return self.save_config_task();
             }
             Message::ToggleAutoplay(on) => {
                 self.config.autoplay = on;
