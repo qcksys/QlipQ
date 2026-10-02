@@ -41,6 +41,8 @@ Go to **Settings → Advanced → Recording → Filename Formatting**. QlipQ par
 
 Want the game name in the clip too? Prefix it, e.g. `Apex %CCYY-%MM-%DD %hh-%mm-%ss`. QlipQ surfaces it as the `{source}` token in your naming template (and stamps it into the exported clip's metadata).
 
+To add the game name automatically, use [QlipQRenamer](/guide/organize-by-game), our optional OBS Lua script. It sorts saved replays into per-game folders and can prefix filenames with the detected game title. QlipQ reads the game from either the folder or the filename.
+
 ## 6. Assign hotkeys
 
 Open **Settings → Hotkeys** and bind `Start Replay Buffer`, `Save Replay`, and `Stop Replay Buffer`.

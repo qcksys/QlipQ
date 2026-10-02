@@ -1,16 +1,18 @@
 ---
-title: Auto-organize OBS recordings by game
-description: A companion OBS Lua script that sorts recordings, replays, and screenshots into per-game folders QlipQ reads automatically.
+title: QlipQRenamer — auto-organize OBS recordings by game
+description: Download and set up QlipQRenamer, an OBS Lua script that sorts recordings, replays, and screenshots into per-game folders.
 order: 3
 ---
 
 OBS writes every recording into one flat folder. **QlipQRenamer** is an optional companion script that sorts each finished recording, saved replay, and screenshot into a folder named after the game you were capturing — the same per-game layout NVIDIA ShadowPlay uses, and one QlipQ already understands. It runs on the LuaJIT runtime bundled with OBS, so there is no Python to install.
 
+The script works independently of the QlipQ desktop app. Use it just to organize your OBS files, or add your recording folder to QlipQ to queue the clips for editing. Sorting and renaming need no additional software; only the optional metadata tagging setting requires a separate FFmpeg install.
+
 > Based on the [original OBS Studio script](https://obsproject.com/forum/resources/recorder.1926/) by **oxypatic**, reimplemented in Lua. All credit for the original idea goes to its author.
 
 ## 1. Install the script
 
-1. Download [`qlipq-renamer.lua`](/qlipq-renamer.lua).
+1. Download <a href="/qlipq-renamer.lua" download="qlipq-renamer.lua">`qlipq-renamer.lua`</a> and keep it in a permanent folder.
 2. In OBS, open **Tools → Scripts**.
 3. On the **Lua Scripts** tab, click **+** and select `qlipq-renamer.lua`.
 
