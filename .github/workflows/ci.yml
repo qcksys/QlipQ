@@ -35,3 +35,16 @@ jobs:
       # Rust `cargo test` in build-desktop.yml. Re-add a test step here if JS tests are introduced.
       - name: Build website
         run: vp run -r build
+
+  winget:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up WinGet
+        shell: pwsh
+        run: |
+          Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery
+          Repair-WinGetPackageManager -AllUsers
+      - name: Test and validate WinGet manifests
+        shell: pwsh
+        run: ./.github/winget/Test-WinGetManifest.ps1 -ValidateWithWinGet

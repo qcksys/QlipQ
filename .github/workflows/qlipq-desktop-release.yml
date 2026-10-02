@@ -111,3 +111,14 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  winget:
+    needs: release
+    if: github.repository == 'qcksys/QlipQ' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-winget.yml
+    with:
+      tag: ${{ github.event.inputs.tag || github.ref_name }}
+    secrets:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}

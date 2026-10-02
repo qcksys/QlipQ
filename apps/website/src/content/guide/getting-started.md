@@ -14,6 +14,17 @@ Grab the latest build from [GitHub Releases](https://github.com/qcksys/qlipq/rel
 
 Every build bundles the FFmpeg libraries QlipQ needs — there's no separate `ffmpeg` to install.
 
+### WinGet (Windows)
+
+Stable releases are submitted to the WinGet community repository. Once the package submission is accepted, install or update QlipQ from PowerShell:
+
+```powershell
+winget install --id qcksys.qlipq --exact --source winget
+winget upgrade --id qcksys.qlipq --exact --source winget
+```
+
+WinGet uses the same Windows installer and may request administrator permission. A new release can appear on GitHub before it is accepted into WinGet; if the package or version isn't available yet, use the GitHub installer above.
+
 ## 1. Add watched folders
 
 In **Settings → Watched folders**, add the folder(s) where your recordings land (for OBS this is your recording or replay-buffer output path). QlipQ can auto-detect the **OBS** and **NVIDIA Share** output folders and offer them as one-click presets. It scans these folders — including subfolders — on launch and watches for new files while it runs.
