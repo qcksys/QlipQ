@@ -25,6 +25,15 @@ winget upgrade --id qcksys.qlipq --exact --source winget
 
 WinGet uses the same Windows installer and may request administrator permission. A new release can appear on GitHub before it is accepted into WinGet; if the package or version isn't available yet, use the GitHub installer above.
 
+## Startup options
+
+In **Settings → Startup**, both options are off by default:
+
+- **Start with Windows** (Windows only) — launch QlipQ when you sign in to your Windows account. Turn it off to remove QlipQ's sign-in startup entry. If you move the portable app, launch it from its new location to update the entry.
+- **Start minimized** — minimize QlipQ to the taskbar on every launch, including sign-in startup. Restore it from the taskbar when you want to edit; watched folders continue scanning and watching while minimized. Changes apply on the next launch.
+
+These options are independent: enable both to have QlipQ watch for recordings automatically after sign-in with its window minimized.
+
 ## 1. Add watched folders
 
 In **Settings → Watched folders**, add the folder(s) where your recordings land (for OBS this is your recording or replay-buffer output path). QlipQ can auto-detect the **OBS** and **NVIDIA Share** output folders and offer them as one-click presets. It scans these folders — including subfolders — on launch and refreshes the queue when recordings are created, changed, moved, renamed, or removed. Updates settle briefly before scanning, so a recording can finish writing before its details are refreshed. **Rescan all folders** also refreshes recordings already in the queue; an unavailable folder keeps its existing entries until it can be scanned again.

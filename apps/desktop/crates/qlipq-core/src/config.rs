@@ -172,6 +172,10 @@ pub const DEFAULT_VIDEO_EXTENSIONS: [&str; 6] = ["mp4", "mkv", "mov", "flv", "we
 #[serde(rename_all = "camelCase", default)]
 #[schemars(title = "qlipq configuration")]
 pub struct AppConfig {
+    /// Launch QlipQ when the current user signs in to Windows.
+    pub start_with_windows: bool,
+    /// Minimize the main window on launch, including when started at Windows sign-in.
+    pub start_minimized: bool,
     pub watched_folders: Vec<String>,
     pub output_folder: String,
     /// Lower-case extensions (no dot) considered video files.
@@ -203,6 +207,8 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            start_with_windows: false,
+            start_minimized: false,
             watched_folders: Vec::new(),
             output_folder: String::new(),
             video_extensions: DEFAULT_VIDEO_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
