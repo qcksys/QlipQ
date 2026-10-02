@@ -15,7 +15,7 @@ use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rsmpeg::avcodec::{AVCodec, AVCodecContext, AVCodecParameters};
+use rsmpeg::avcodec::{AVCodec, AVCodecContext, AVCodecParameters, AVPacket};
 use rsmpeg::avfilter::{AVFilter, AVFilterContextMut, AVFilterGraph};
 use rsmpeg::avformat::{AVFormatContextInput, AVFormatContextOutput};
 use rsmpeg::avutil::{AVDictionary, AVFrame};
@@ -70,10 +70,28 @@ pub fn run_export(
             input_path, &temp_path, spec, settings, media, metadata, &progress, &cancel,
         )
     };
+    finalize_export(result, &temp_path, output_path, &progress, &cancel)
+}
+
+fn finalize_export(
+    result: Result<(), String>,
+    temp_path: &str,
+    output_path: &str,
+    progress: &Mutex<f32>,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    // Cancellation can arrive while decoders, encoders, or the muxer are flushing.
+    let result = result.and_then(|()| {
+        if cancel.load(Ordering::Relaxed) {
+            Err("cancelled".into())
+        } else {
+            Ok(())
+        }
+    });
     match result {
         Ok(()) => {
             let _ = std::fs::remove_file(output_path); // overwrite target if present
-            std::fs::rename(&temp_path, output_path)
+            std::fs::rename(temp_path, output_path)
                 .map_err(|e| format!("rename temp → output: {e}"))?;
             if let Ok(mut p) = progress.lock() {
                 *p = 1.0;
@@ -81,7 +99,7 @@ pub fn run_export(
             Ok(())
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&temp_path);
+            let _ = std::fs::remove_file(temp_path);
             Err(e)
         }
     }
@@ -188,7 +206,8 @@ fn export_transcode(
     // ---- seek to the trim start (the trim filter does the exact cut + pts rebase) ----
     if tb_v.num != 0 && start > 0.0 {
         let ts = (start * tb_v.den as f64 / tb_v.num as f64) as i64;
-        let _ = ictx.seek(vid_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
+        ictx.seek(vid_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32)
+            .map_err(|e| format!("seek input: {e:?}"))?;
         vdec.flush_buffers();
     }
 
@@ -283,16 +302,26 @@ fn export_transcode(
     encode_video_frame(&mut venc, Some(&first), &mut octx, venc_tb, v_out_tb, 0)?;
     let mut last_v_secs = first.pts as f64 * venc_tb_secs;
 
-    let mut flushed_audio_srcs = false;
+    // Priming returns on the first filtered frame; finish draining its packet before sending more.
+    drain_video(
+        &mut vdec,
+        &mut vsrc,
+        &mut vsink,
+        &mut venc,
+        &mut octx,
+        venc_tb,
+        v_out_tb,
+        &mut last_v_secs,
+    )?;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        match ictx.read_packet() {
-            Ok(Some(pkt)) => {
+        match read_export_packet(&mut ictx)? {
+            Some(pkt) => {
                 let si = pkt.stream_index;
                 if si == vid_idx {
-                    let _ = vdec.send_packet(Some(&pkt));
+                    send_decoder_packet(&mut vdec, Some(&pkt), "video")?;
                     drain_video(
                         &mut vdec,
                         &mut vsrc,
@@ -304,8 +333,8 @@ fn export_transcode(
                         &mut last_v_secs,
                     )?;
                 } else if let Some(t) = tracks.iter_mut().find(|t| t.abs_idx == si) {
-                    let _ = t.dec.send_packet(Some(&pkt));
-                    feed_audio_decoder(t);
+                    send_decoder_packet(&mut t.dec, Some(&pkt), "audio")?;
+                    feed_decoder(&mut t.dec, &mut t.src, "audio")?;
                     if let (Some(ae), Some(asink), Some(ao)) =
                         (aenc.as_mut(), asink_opt.as_mut(), a_out_tb)
                     {
@@ -321,13 +350,12 @@ fn export_transcode(
                     break;
                 }
             }
-            Ok(None) => break,
-            Err(_) => break,
+            None => break,
         }
     }
 
     // ---- flush video: filter EOF → drain → encoder flush ----
-    let _ = vdec.send_packet(None);
+    send_decoder_packet(&mut vdec, None, "video")?;
     drain_video(
         &mut vdec,
         &mut vsrc,
@@ -338,7 +366,8 @@ fn export_transcode(
         v_out_tb,
         &mut last_v_secs,
     )?;
-    let _ = vsrc.buffersrc_add_frame(None, None);
+    vsrc.buffersrc_add_frame(None, None)
+        .map_err(|e| format!("video filter flush: {e:?}"))?;
     drain_filtered_video(
         &mut vsink,
         &mut venc,
@@ -351,18 +380,16 @@ fn export_transcode(
 
     // ---- flush audio: decoders → abuffer EOF → drain → encoder flush ----
     if let (Some(ae), Some(asink), Some(ao)) = (aenc.as_mut(), asink_opt.as_mut(), a_out_tb) {
-        if !flushed_audio_srcs {
-            for t in tracks.iter_mut() {
-                let _ = t.dec.send_packet(None);
-                feed_audio_decoder(t);
-                let _ = t.src.buffersrc_add_frame(None, None);
-            }
-            flushed_audio_srcs = true;
+        for t in tracks.iter_mut() {
+            send_decoder_packet(&mut t.dec, None, "audio")?;
+            feed_decoder(&mut t.dec, &mut t.src, "audio")?;
+            t.src
+                .buffersrc_add_frame(None, None)
+                .map_err(|e| format!("audio filter flush: {e:?}"))?;
         }
         drain_audio(asink, ae, &mut octx, a_stream.unwrap(), ao)?;
         encode_audio_frame(ae, None, &mut octx, a_stream.unwrap(), ao)?;
     }
-    let _ = flushed_audio_srcs;
 
     octx.write_trailer()
         .map_err(|e| format!("write_trailer: {e:?}"))?;
@@ -429,7 +456,8 @@ fn export_remux(
 
     if start > 0.0 && in_tb.num != 0 {
         let ts = (start / in_tb_secs) as i64;
-        let _ = ictx.seek(vid_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32);
+        ictx.seek(vid_idx, ts, ffi::AVSEEK_FLAG_BACKWARD as i32)
+            .map_err(|e| format!("seek input: {e:?}"))?;
     }
 
     // Audio: decoders + amix graph + AAC encoder (identical to the transcode path).
@@ -452,11 +480,14 @@ fn export_remux(
 
     // Copy the source video stream's parameters onto a new output stream (no encoder).
     let mut vpar = AVCodecParameters::new();
-    unsafe {
+    let copy_result = unsafe {
         ffi::avcodec_parameters_copy(
             vpar.as_mut_ptr(),
             ictx.streams()[vid_idx as usize].codecpar().as_ptr(),
-        );
+        )
+    };
+    if copy_result < 0 {
+        return Err(format!("copy video parameters: {copy_result}"));
     }
 
     let cout = CString::new(temp_path).map_err(|e| e.to_string())?;
@@ -502,8 +533,8 @@ fn export_remux(
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        match ictx.read_packet() {
-            Ok(Some(mut pkt)) => {
+        match read_export_packet(&mut ictx)? {
+            Some(mut pkt) => {
                 if pkt.stream_index == vid_idx {
                     let pos_secs = if pkt.pts != ffi::AV_NOPTS_VALUE {
                         pkt.pts as f64 * in_tb_secs
@@ -531,8 +562,8 @@ fn export_remux(
                         break;
                     }
                 } else if let Some(t) = tracks.iter_mut().find(|t| t.abs_idx == pkt.stream_index) {
-                    let _ = t.dec.send_packet(Some(&pkt));
-                    feed_audio_decoder(t);
+                    send_decoder_packet(&mut t.dec, Some(&pkt), "audio")?;
+                    feed_decoder(&mut t.dec, &mut t.src, "audio")?;
                     if let (Some(ae), Some(asink), Some(ao)) =
                         (aenc.as_mut(), asink_opt.as_mut(), a_out_tb)
                     {
@@ -540,17 +571,18 @@ fn export_remux(
                     }
                 }
             }
-            Ok(None) => break,
-            Err(_) => break,
+            None => break,
         }
     }
 
     // Flush audio (decoders → abuffer EOF → drain → encoder flush).
     if let (Some(ae), Some(asink), Some(ao)) = (aenc.as_mut(), asink_opt.as_mut(), a_out_tb) {
         for t in tracks.iter_mut() {
-            let _ = t.dec.send_packet(None);
-            feed_audio_decoder(t);
-            let _ = t.src.buffersrc_add_frame(None, None);
+            send_decoder_packet(&mut t.dec, None, "audio")?;
+            feed_decoder(&mut t.dec, &mut t.src, "audio")?;
+            t.src
+                .buffersrc_add_frame(None, None)
+                .map_err(|e| format!("audio filter flush: {e:?}"))?;
         }
         drain_audio(asink, ae, &mut octx, a_stream.unwrap(), ao)?;
         encode_audio_frame(ae, None, &mut octx, a_stream.unwrap(), ao)?;
@@ -635,33 +667,40 @@ fn prime_video(
     src: &mut AVFilterContextMut,
     sink: &mut AVFilterContextMut,
 ) -> Result<AVFrame, String> {
-    let mut flushed = false;
+    let mut source_flushed = false;
     loop {
         match sink.buffersink_get_frame(None) {
             Ok(f) => return Ok(f),
-            Err(RsmpegError::BufferSinkDrainError) => {}
+            Err(RsmpegError::BufferSinkDrainError) if !source_flushed => {}
+            Err(RsmpegError::BufferSinkDrainError | RsmpegError::BufferSinkEofError) => {
+                return Err("prime: input ended before a frame".into());
+            }
             Err(e) => return Err(format!("prime buffersink: {e:?}")),
         }
         match vdec.receive_frame() {
             Ok(f) => {
-                let _ = src.buffersrc_add_frame(Some(f), None);
+                src.buffersrc_add_frame(Some(f), None)
+                    .map_err(|e| format!("prime filter input: {e:?}"))?;
                 continue;
             }
             Err(RsmpegError::DecoderDrainError) => {}
-            Err(_) => return Err("prime: no video frame".into()),
+            Err(RsmpegError::DecoderFlushedError) => {
+                src.buffersrc_add_frame(None, None)
+                    .map_err(|e| format!("prime filter flush: {e:?}"))?;
+                source_flushed = true;
+                continue;
+            }
+            Err(e) => return Err(format!("prime receive_frame: {e:?}")),
         }
-        match input.read_packet() {
-            Ok(Some(pkt)) => {
+        match read_export_packet(input)? {
+            Some(pkt) => {
                 if pkt.stream_index == vid_idx {
-                    let _ = vdec.send_packet(Some(&pkt));
+                    send_decoder_packet(vdec, Some(&pkt), "prime video")?;
                 }
             }
-            Ok(None) if !flushed => {
-                let _ = vdec.send_packet(None);
-                let _ = src.buffersrc_add_frame(None, None);
-                flushed = true;
+            None => {
+                send_decoder_packet(vdec, None, "prime video")?;
             }
-            _ => return Err("prime: input ended before a frame".into()),
         }
     }
 }
@@ -745,9 +784,7 @@ fn drain_video(
     out_tb: ffi::AVRational,
     last_secs: &mut f64,
 ) -> Result<(), String> {
-    while let Ok(frame) = vdec.receive_frame() {
-        let _ = src.buffersrc_add_frame(Some(frame), None);
-    }
+    feed_decoder(vdec, src, "video")?;
     drain_filtered_video(sink, venc, octx, enc_tb, out_tb, last_secs)
 }
 
@@ -766,7 +803,8 @@ fn drain_filtered_video(
                 *last_secs = frame.pts as f64 * tb_secs;
                 encode_video_frame(venc, Some(&frame), octx, enc_tb, out_tb, 0)?;
             }
-            Err(_) => break,
+            Err(RsmpegError::BufferSinkDrainError | RsmpegError::BufferSinkEofError) => break,
+            Err(e) => return Err(format!("video filter output: {e:?}")),
         }
     }
     Ok(())
@@ -934,12 +972,6 @@ fn build_audio_graph<'g>(
     Ok((tracks, asink))
 }
 
-fn feed_audio_decoder(t: &mut TrackDec) {
-    while let Ok(frame) = t.dec.receive_frame() {
-        let _ = t.src.buffersrc_add_frame(Some(frame), None);
-    }
-}
-
 fn drain_audio(
     asink: &mut AVFilterContextMut,
     aenc: &mut AVCodecContext,
@@ -950,7 +982,8 @@ fn drain_audio(
     loop {
         match asink.buffersink_get_frame(None) {
             Ok(frame) => encode_audio_frame(aenc, Some(&frame), octx, stream_index, out_tb)?,
-            Err(_) => break,
+            Err(RsmpegError::BufferSinkDrainError | RsmpegError::BufferSinkEofError) => break,
+            Err(e) => return Err(format!("audio filter output: {e:?}")),
         }
     }
     Ok(())
@@ -982,6 +1015,41 @@ fn encode_audio_frame(
 }
 
 // ---- helpers ----
+
+fn read_export_packet(input: &mut AVFormatContextInput) -> Result<Option<AVPacket>, String> {
+    input
+        .read_packet()
+        .map_err(|e| format!("read input packet: {e:?}"))
+}
+
+fn send_decoder_packet(
+    decoder: &mut AVCodecContext,
+    packet: Option<&AVPacket>,
+    stream: &str,
+) -> Result<(), String> {
+    match decoder.send_packet(packet) {
+        Ok(()) => Ok(()),
+        // Priming may have already sent EOF while waiting for a delayed video frame.
+        Err(RsmpegError::DecoderFlushedError) if packet.is_none() => Ok(()),
+        Err(e) => Err(format!("{stream} send_packet: {e:?}")),
+    }
+}
+
+fn feed_decoder(
+    decoder: &mut AVCodecContext,
+    source: &mut AVFilterContextMut,
+    stream: &str,
+) -> Result<(), String> {
+    loop {
+        match decoder.receive_frame() {
+            Ok(frame) => source
+                .buffersrc_add_frame(Some(frame), None)
+                .map_err(|e| format!("{stream} filter input: {e:?}"))?,
+            Err(RsmpegError::DecoderDrainError | RsmpegError::DecoderFlushedError) => return Ok(()),
+            Err(e) => return Err(format!("{stream} receive_frame: {e:?}")),
+        }
+    }
+}
 
 fn stereo_layout() -> ffi::AVChannelLayout {
     use rsmpeg::avutil::AVChannelLayout;
@@ -1042,6 +1110,235 @@ fn dict_from(opts: &[(&str, String)]) -> Option<AVDictionary> {
 mod tests {
     use super::*;
     use qlipq_core::edit_spec::{AudioTrackSpec, TrimSpec};
+    use rsmpeg::avformat::{AVIOContextContainer, AVIOContextCustom, AVInputFormat};
+    use rsmpeg::avutil::AVMem;
+
+    struct ExportFiles {
+        dir: std::path::PathBuf,
+        output: String,
+        temp: String,
+    }
+
+    impl ExportFiles {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "qlipq-export-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let output = dir.join("clip.mp4").to_string_lossy().into_owned();
+            let temp = temp_export_path(&output, ContainerFormat::Mp4);
+            std::fs::write(&output, b"existing export").unwrap();
+            std::fs::write(&temp, b"new export").unwrap();
+            Self { dir, output, temp }
+        }
+    }
+
+    impl Drop for ExportFiles {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn cancellation_before_promotion_preserves_existing_output() {
+        let files = ExportFiles::new();
+        let progress = Mutex::new(0.9);
+        let result = finalize_export(
+            Ok(()),
+            &files.temp,
+            &files.output,
+            &progress,
+            &AtomicBool::new(true),
+        );
+        assert_eq!(result, Err("cancelled".into()));
+        assert_eq!(std::fs::read(&files.output).unwrap(), b"existing export");
+        assert!(!std::path::Path::new(&files.temp).exists());
+        assert_eq!(*progress.lock().unwrap(), 0.9);
+    }
+
+    #[test]
+    fn failed_export_cannot_promote_partial_output() {
+        let files = ExportFiles::new();
+        let progress = Mutex::new(0.9);
+        let result = finalize_export(
+            Err("read input packet failed".into()),
+            &files.temp,
+            &files.output,
+            &progress,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(result, Err("read input packet failed".into()));
+        assert_eq!(std::fs::read(&files.output).unwrap(), b"existing export");
+        assert!(!std::path::Path::new(&files.temp).exists());
+        assert_eq!(*progress.lock().unwrap(), 0.9);
+    }
+
+    #[test]
+    fn successful_export_promotes_output_and_finishes_progress() {
+        let files = ExportFiles::new();
+        let progress = Mutex::new(0.9);
+        finalize_export(
+            Ok(()),
+            &files.temp,
+            &files.output,
+            &progress,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&files.output).unwrap(), b"new export");
+        assert!(!std::path::Path::new(&files.temp).exists());
+        assert_eq!(*progress.lock().unwrap(), 1.0);
+    }
+
+    fn raw_video_input(end_code: i32) -> (AVFormatContextInput, Arc<AtomicBool>) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let read_stop = stop.clone();
+        let io = AVIOContextCustom::alloc_context(
+            AVMem::new(4),
+            false,
+            vec![],
+            Some(Box::new(move |_, buffer| {
+                if read_stop.load(Ordering::Relaxed) {
+                    return end_code;
+                }
+                buffer.fill(0);
+                buffer.len() as i32
+            })),
+            None,
+            None,
+        );
+        let mut options = Some(
+            AVDictionary::new(c"video_size", c"2x2", 0)
+                .set(c"pixel_format", c"gray", 0)
+                .set(c"framerate", c"1", 0)
+                .set(c"analyzeduration", c"1", 0)
+                .set(c"probesize", c"32", 0),
+        );
+        let input = AVFormatContextInput::builder()
+            .format(&AVInputFormat::find(c"rawvideo").unwrap())
+            .options(&mut options)
+            .io_context(AVIOContextContainer::Custom(io))
+            .open()
+            .unwrap();
+        (input, stop)
+    }
+
+    fn raw_video_decoder(input: &AVFormatContextInput) -> AVCodecContext {
+        let mut decoder =
+            AVCodecContext::new(&AVCodec::find_decoder(ffi::AV_CODEC_ID_RAWVIDEO).unwrap());
+        decoder
+            .apply_codecpar(&input.streams()[0].codecpar())
+            .unwrap();
+        decoder.set_pkt_timebase(input.streams()[0].time_base);
+        decoder
+    }
+
+    #[test]
+    fn input_io_failure_is_not_successful_eof() {
+        let (mut input, stop) = raw_video_input(ffi::AVERROR_INVALIDDATA);
+        stop.store(true, Ordering::Relaxed);
+        // Opening probes and buffers some packets. The failure follows those valid packets.
+        for _ in 0..64 {
+            match read_export_packet(&mut input) {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("input failure was reported as successful EOF"),
+                Err(error) => {
+                    assert!(error.contains("read input packet"), "{error}");
+                    return;
+                }
+            }
+        }
+        panic!("injected I/O error was not reached");
+    }
+
+    #[test]
+    fn input_eof_is_successful() {
+        let (mut input, stop) = raw_video_input(ffi::AVERROR_EOF);
+        stop.store(true, Ordering::Relaxed);
+        for _ in 0..64 {
+            if read_export_packet(&mut input).unwrap().is_none() {
+                return;
+            }
+        }
+        panic!("input EOF was not reached");
+    }
+
+    #[test]
+    fn decoder_failure_is_not_treated_as_drained() {
+        let (input, _) = raw_video_input(ffi::AVERROR_EOF);
+        let mut decoder = raw_video_decoder(&input);
+        let graph = AVFilterGraph::new();
+        let (mut source, _) = build_video_filter(
+            &graph,
+            &decoder,
+            input.streams()[0].time_base,
+            ffi::AVRational { num: 1, den: 1 },
+            "null",
+        )
+        .unwrap();
+        let error = feed_decoder(&mut decoder, &mut source, "video").unwrap_err();
+        assert!(error.contains("video receive_frame"), "{error}");
+    }
+
+    #[test]
+    fn rejected_filter_input_fails_export() {
+        let (mut input, _) = raw_video_input(ffi::AVERROR_EOF);
+        let mut decoder = raw_video_decoder(&input);
+        decoder.open(None).unwrap();
+        let graph = AVFilterGraph::new();
+        let (mut source, _) = build_video_filter(
+            &graph,
+            &decoder,
+            input.streams()[0].time_base,
+            ffi::AVRational { num: 1, den: 1 },
+            "null",
+        )
+        .unwrap();
+        source.buffersrc_add_frame(None, None).unwrap();
+        let packet = read_export_packet(&mut input).unwrap().unwrap();
+        send_decoder_packet(&mut decoder, Some(&packet), "video").unwrap();
+        let error = feed_decoder(&mut decoder, &mut source, "video").unwrap_err();
+        assert!(error.contains("video filter input"), "{error}");
+    }
+
+    #[test]
+    fn decoder_and_filter_drain_and_flush_are_successful() {
+        let (mut input, _) = raw_video_input(ffi::AVERROR_EOF);
+        let mut decoder = raw_video_decoder(&input);
+        decoder.open(None).unwrap();
+        let graph = AVFilterGraph::new();
+        let (mut source, mut sink) = build_video_filter(
+            &graph,
+            &decoder,
+            input.streams()[0].time_base,
+            ffi::AVRational { num: 1, den: 1 },
+            "null",
+        )
+        .unwrap();
+        let packet = read_export_packet(&mut input).unwrap().unwrap();
+        send_decoder_packet(&mut decoder, Some(&packet), "video").unwrap();
+        feed_decoder(&mut decoder, &mut source, "video").unwrap();
+        assert_eq!(sink.buffersink_get_frame(None).unwrap().width, 2);
+        assert!(matches!(
+            sink.buffersink_get_frame(None),
+            Err(RsmpegError::BufferSinkDrainError)
+        ));
+        send_decoder_packet(&mut decoder, None, "video").unwrap();
+        feed_decoder(&mut decoder, &mut source, "video").unwrap();
+        send_decoder_packet(&mut decoder, None, "video").unwrap();
+        source.buffersrc_add_frame(None, None).unwrap();
+        assert!(matches!(
+            sink.buffersink_get_frame(None),
+            Err(RsmpegError::BufferSinkEofError)
+        ));
+    }
 
     #[test]
     fn temp_path_keeps_container_extension() {

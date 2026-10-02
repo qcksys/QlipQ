@@ -40,9 +40,13 @@ jobs:
       - name: Set up LGPL FFmpeg SDK
         uses: ./.github/actions/setup-ffmpeg
 
-      # The pure crates are the correctness gate (encode planning + domain logic).
-      - name: Test shared crates
-        run: cargo test -p qlipq-core -p qlipq-ffmpeg
+      - name: Add FFmpeg DLLs to the test runtime path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: $env:FFMPEG_DLL_DIR | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Test desktop workspace
+        run: cargo test --workspace
 
       # Compile the desktop app against the in-process libav stack (the sole build — no CLI fallback).
       - name: Build desktop app

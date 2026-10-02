@@ -11,7 +11,7 @@ impl App {
             .size(theme::DISPLAY)
             .font(theme::FONT_BOLD)
             .style(|t: &Theme| text::Style { color: Some(t.extended_palette().primary.base.color) });
-        let bar = row![
+        let mut bar = row![
             brand,
             Space::new().width(Length::Fill),
             button(text(format!("Queue ({pending})")).size(theme::LABEL)).style(theme::nav(matches!(self.view, View::Queue))).on_press(Message::ShowQueue),
@@ -21,6 +21,10 @@ impl App {
         .spacing(theme::SM)
         .align_y(iced::Alignment::Center)
         .padding([theme::SM, theme::LG]);
+        if let Some(job) = self.exports.active() {
+            bar = bar.push(text(format!("Exporting {} · {}%", host::base_name(&job.request.source.input), (job.progress() * 100.0) as i32)).size(theme::SMALL))
+                .push(button(text("Cancel export").size(theme::SMALL)).style(theme::btn_danger).on_press(Message::CancelExport));
+        }
         container(bar).width(Length::Fill).style(theme::top_bar).into()
     }
 
@@ -124,6 +128,7 @@ impl App {
 
     fn queue_card(&self, item: &QueueItem) -> Element<'_, Message> {
         let selected = self.selected_id.as_deref() == Some(&item.id);
+        let can_change_file = !self.exports.contains(&item.id) && !self.file_operations.contains(&item.id);
         let status = item.status;
         let mut header = row![
             container(Space::new().width(Length::Fixed(8.0)).height(Length::Fixed(8.0))).style(theme::status_dot(status)),
@@ -160,14 +165,14 @@ impl App {
         }
 
         let actions = row![
-            button(text("Rename").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::RenameOpen(item.id.clone())),
+            button(text("Rename").size(theme::SMALL)).style(theme::btn_secondary).on_press_maybe(can_change_file.then(|| Message::RenameOpen(item.id.clone()))),
             with_tip(
                 button(text("Open").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::RevealItem(item.path.clone())).into(),
                 "Show in file explorer".to_string(),
             ),
             button(text(if item_dismissed(item) { "Restore" } else { "Dismiss" }).size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::Dismiss(item.id.clone())),
             Space::new().width(Length::Fill),
-            button(text("Delete").size(theme::SMALL)).style(theme::btn_danger).on_press(Message::RequestDelete(item.id.clone())),
+            button(text("Delete").size(theme::SMALL)).style(theme::btn_danger).on_press_maybe(can_change_file.then(|| Message::RequestDelete(item.id.clone()))),
         ]
         .spacing(theme::XS);
         card = card.push(actions);
@@ -253,6 +258,8 @@ impl App {
         .spacing(theme::MD);
 
         // Export bar.
+        let job = self.exports.active().filter(|job| job.request.source.item_id == item.id);
+        let exporting = job.is_some();
         let spec = editor_spec(ed);
         let validation = qlipq_core::edit_spec::validate_edit_spec(&spec, media);
         let encode = output_settings_to_encode(&self.effective_output(item), media);
@@ -272,18 +279,18 @@ impl App {
         if let Some(err) = &validation {
             stats = stats.push(text(err.clone()).size(theme::LABEL).style(|t: &Theme| text::Style { color: Some(t.extended_palette().danger.base.color) }));
         }
-        if ed.exporting {
-            stats = stats.push(container(progress_bar(0.0..=1.0, ed.progress_display).style(theme::progress_style)).width(Length::Fixed(160.0)));
+        if let Some(job) = job {
+            stats = stats.push(container(progress_bar(0.0..=1.0, job.progress()).style(theme::progress_style)).width(Length::Fixed(160.0)));
             stats = stats.push(button(text("Cancel").size(theme::LABEL)).style(theme::btn_danger).on_press(Message::CancelExport));
         }
 
         let mut export_bar = row![stats, Space::new().width(Length::Fill)].align_y(iced::Alignment::Center).spacing(theme::SM);
-        if item.export_path.is_some() && !ed.exporting {
+        if item.export_path.is_some() && !exporting {
             export_bar = export_bar.push(button(text("Show file").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::ShowExported));
         }
-        let can_export = validation.is_none() && !ed.exporting && !self.config.output_folder.is_empty();
+        let can_export = validation.is_none() && self.exports.active().is_none() && !self.file_operations.contains(&item.id) && !self.config.output_folder.is_empty();
         let export_btn = button(
-            text(if ed.exporting { format!("Exporting {}%", (ed.progress_display * 100.0) as i32) } else { "Export clip".to_string() })
+            text(if let Some(job) = job { format!("Exporting {}%", (job.progress() * 100.0) as i32) } else { "Export clip".to_string() })
                 .size(theme::BODY)
                 .font(theme::FONT_MEDIUM),
         )
@@ -753,7 +760,7 @@ impl App {
     fn delete_error_modal<'a>(&self, msg: &'a str) -> Element<'a, Message> {
         modal(
             column![
-                text("Couldn't delete file").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
+                text("Couldn't complete operation").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
                 text(msg.to_string()).size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
                 row![
                     Space::new().width(Length::Fill),
@@ -790,7 +797,7 @@ impl App {
         modal(
             column![
                 text("Export complete").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
-                text("What should happen to the original recording?").size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                text(format!("What should happen to {}?", self.after_prompt.as_ref().map(|source| host::base_name(&source.input)).unwrap_or_default())).size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
                 row![
                     button(text("Keep").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::AfterChoice(AfterExportAction::Nothing)),
                     button(text("Rename").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::AfterChoice(AfterExportAction::Rename)),
