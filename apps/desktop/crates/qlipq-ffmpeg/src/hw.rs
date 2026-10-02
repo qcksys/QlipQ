@@ -11,7 +11,9 @@
 //! scale, so we carry the user's CRF straight through as the encoder's CQ/QP and let per-vendor rate
 //! control do the rest. It will not byte-match x264; that's expected for a HW re-encode.
 
-use qlipq_core::config::{OutputSettings, QualityMode, QualityPreset, VideoCodecChoice};
+use qlipq_core::config::{OutputSettings, QualityMode, VideoCodecChoice};
+
+use crate::args::preset_crf;
 
 /// A resolved hardware-encode plan: which encoder to open, its private options, and bitrate caps.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,14 +57,6 @@ fn amf_quality(x264: &str) -> &'static str {
         "ultrafast" | "superfast" | "veryfast" | "faster" => "speed",
         "slow" | "slower" | "veryslow" => "quality",
         _ => "balanced",
-    }
-}
-
-fn preset_crf(p: QualityPreset) -> i64 {
-    match p {
-        QualityPreset::High => 18,
-        QualityPreset::Balanced | QualityPreset::Original => 23,
-        QualityPreset::Small => 28,
     }
 }
 
@@ -138,7 +132,7 @@ fn rate_control(vendor: Vendor, s: &OutputSettings) -> (Vec<(&'static str, Strin
 /// Plan a hardware video encode for these settings. `ten_bit` (HDR or a 10-bit source) forces HEVC —
 /// NVENC H.264 has no 10-bit profile. `usable(name)` reports whether an encoder actually opens on this
 /// machine, so unusable vendors are skipped (NVENC → AMF → QSV). Returns `None` when no HW encoder is
-/// usable, so the caller can keep the CLI/x264 path.
+/// usable; the export reports that no hardware encoder is available.
 pub fn plan_hw_video(s: &OutputSettings, ten_bit: bool, usable: impl Fn(&str) -> bool) -> Option<HwVideo> {
     let want_hevc = ten_bit || s.video_codec == VideoCodecChoice::Libx265;
     let candidates: &[(&str, Vendor)] = if want_hevc {
@@ -154,6 +148,7 @@ pub fn plan_hw_video(s: &OutputSettings, ten_bit: bool, usable: impl Fn(&str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qlipq_core::config::QualityPreset;
 
     fn settings(configure: impl FnOnce(&mut OutputSettings)) -> OutputSettings {
         let mut s = OutputSettings::default();

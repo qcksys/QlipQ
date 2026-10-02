@@ -42,7 +42,9 @@ Set an **Output folder** for exports. The **naming template** controls how expor
 - **Quality** — a named preset, a custom **CRF**, **VBR** (CRF capped by a max bitrate), or a **target bitrate**.
 - **Frame rate**, **resolution** (down to 720p / up to 4K), **codec** (H.264 / H.265), **container** (mp4 / mkv), and **audio bitrate**.
 
-The editor shows an estimated file size for the current clip, and you can override the quality per clip.
+The editor shows an approximate file size for the current clip, and you can override the quality per clip. **Target bitrate** gives the most predictable size, but short clips, encoder rate control, and container overhead can still change the result. **Preset**, **CRF**, and **VBR** size estimates are rough: scene detail, motion, and the hardware encoder can make the actual size substantially different. VBR's bitrate is a ceiling, not a target size.
+
+**Original** copies the source video when no crop, resolution, or frame-rate change requires re-encoding. In that case the source codec is preserved. If an edit requires re-encoding, Original uses the same quality level as **High**. Export frame rate and resolution never increase beyond the source. The audio bitrate applies to the single mixed output track, regardless of how many input tracks are enabled.
 
 ## 4. Edit and export
 
