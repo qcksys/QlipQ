@@ -51,4 +51,18 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, "");
       <li>Open a clip, trim and crop it, choose audio tracks, and export to your output folder.</li>
     </ol>
   </section>
+
+  <section>
+    <h2>Organize your OBS recordings with QlipQRenamer</h2>
+    <p class="prose">
+      Our optional OBS Lua script sorts recordings, saved replays, and screenshots into per-game
+      folders. It can also prefix filenames with the game title. Use it on its own, or let QlipQ
+      watch the organized folders and queue your clips for editing.
+    </p>
+    <p class="prose">Requires OBS 28 or newer. Runs with OBS's bundled Lua runtime — no Python install needed.</p>
+    <p>
+      <a class="btn" href={`${base}/qlipq-renamer.lua`} download="qlipq-renamer.lua">Download QlipQRenamer</a>
+    </p>
+    <p><a href={`${base}/guide/organize-by-game`}>Installation and settings →</a></p>
+  </section>
 </Base>
