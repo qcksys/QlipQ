@@ -8,22 +8,25 @@
 //! (HDR→SDR tonemap) with synced cpal audio ([`libav`]); export decodes → edits → hardware-encodes →
 //! muxes ([`export`]).
 
+mod discovery;
 mod export;
 mod host;
 mod iso;
+mod jobs;
 mod libav;
 mod log_ctx;
+mod persistence;
+mod preview;
 mod seeker;
 mod theme;
 mod video;
 
 // The in-process libav preview player (libplacebo HDR tonemap + synced cpal audio), exposing
 // `poll`/`dimensions`/`fps`/`position`/`try_seek` for the editor below.
-use libav::{start_player, Player as PreviewPlayer, ScrubDecoder};
+use jobs::{AfterExport, ExportRequest, Exports, FileMutation, FileOperation};
+use libav::PlayerHandle as PreviewPlayer;
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iced::widget::{
@@ -344,17 +347,8 @@ struct Editor {
     /// Set while a loop-back warm-seek to the in-point is in flight, so the tick doesn't spam seeks
     /// until the clock re-anchors at the in-point.
     awaiting_loop: bool,
-    /// Warm single-frame decoder for scrubbing/paused preview, opened once per clip (a warm libav
-    /// demuxer+decoder). Behind `Arc<Mutex>` so the blocking scrub task
-    /// can drive it. `None` until the clip is probed, or if the decoder fails to open.
-    scrubber: Option<Arc<Mutex<ScrubDecoder>>>,
-    exporting: bool,
-    progress: Arc<Mutex<f32>>,
-    progress_display: f32,
-    /// Set true to abort the in-process export (the worker polls it). Held so the Cancel button works.
-    export_cancel: Option<Arc<AtomicBool>>,
-    overwrite_target: Option<String>,
-    after_prompt: bool,
+    /// Owns the worker that opens, drives and closes this editor's media handles.
+    preview: preview::Session,
 }
 
 struct RenameState {
@@ -364,6 +358,8 @@ struct RenameState {
 
 struct App {
     config: AppConfig,
+    persistence: persistence::Persistence,
+    reveal_config_after_save: Option<u64>,
     items: Vec<QueueItem>,
     known_paths: HashSet<String>,
     edit_store: host::EditStore,
@@ -376,14 +372,19 @@ struct App {
     filter: QueueFilter,
     presets: host::CapturePresets,
     watcher: Option<host::Watcher>,
+    discovery: discovery::Discovery,
     editor: Option<Editor>,
     audio_defaults: Vec<AudioTrackSpec>,
     rename: Option<RenameState>,
     delete_confirm: Option<String>,
-    /// Set when a delete fails (e.g. the file is still open in another app) to show an error dialog.
+    /// File-operation and persistence failures shown in a modal.
     delete_error: Option<String>,
     new_tag: String,
-    export_target: Option<String>,
+    exports: Exports,
+    pending_export: Option<ExportRequest>,
+    after_prompt: Option<AfterExport>,
+    file_operations: HashSet<String>,
+    retired_previews: Vec<(String, tokio::sync::oneshot::Receiver<()>)>,
     /// Queue card currently under the cursor (whole-card hover styling).
     hovered_card: Option<String>,
     /// The video preview is expanded to fill the window.
@@ -401,12 +402,13 @@ enum Message {
     ShowSettings,
     OpenRepo,
     RescanAll,
-    Scanned(Vec<String>),
+    Scanned(u64, host::ScanResult),
     /// Freshly scanned files classified against the media cache: stats for the list, plus any cached
     /// probe so unchanged files skip re-probing.
-    MediaResolved(Vec<host::MediaResolution>),
+    MediaResolved(u64, Vec<host::MediaResolution>),
     /// A background duration probe finished for a cache miss (`size`/`modified_ms` stamp the cache).
     MediaProbedBg {
+        revision: u64,
         path: String,
         size: i64,
         modified_ms: i64,
@@ -414,8 +416,8 @@ enum Message {
     },
     PresetsDetected(Option<String>, Option<String>),
     SelectItem(String),
-    MediaProbed(String, Result<(MediaInfo, bool), String>),
-    FrameExtracted(String, Option<(u32, u32, Vec<u8>, f64)>),
+    MediaProbed(u64, String, Result<(MediaInfo, bool), String>),
+    PreviewReady(preview::Event),
     Seek(f64),
     Skip(f64),
     ToggleFullscreen,
@@ -454,7 +456,7 @@ enum Message {
     RemoveTag(String),
     Export,
     CancelExport,
-    ExportFinished(String, Result<(), String>),
+    ExportFinished(u64, Result<(), String>),
     AfterChoice(AfterExportAction),
     Overwrite(u8),
     ShowExported,
@@ -468,7 +470,8 @@ enum Message {
     DeleteCancel,
     /// Escape / backdrop click — dismiss whichever modal is open.
     DismissModal,
-    Deleted(String, Result<(), String>),
+    FileOperationFinished(FileOperation, Result<(), String>),
+    MoveFolderPicked(AfterExport, Option<String>),
     Dismiss(String),
     SetTagFilter(Option<String>),
     FilterSearch(String),
@@ -510,7 +513,6 @@ enum Message {
     RenamePrefixChanged(String),
     RenameSuffixChanged(String),
     OpenConfigFile,
-    Ignore,
 }
 
 /// Offload blocking host work onto tokio's blocking pool.
@@ -531,14 +533,35 @@ impl App {
         let config = host::load_config();
         let edit_store = host::load_edit_store();
         let media_cache = host::load_media_cache();
-        let watcher = host::start_watch(&config.watched_folders, &config.video_extensions);
+        let mut app = Self::with_data(
+            config,
+            edit_store,
+            media_cache,
+            persistence::Persistence::new(),
+        );
+        app.watcher = host::start_watch(&app.config.watched_folders, &app.config.video_extensions);
+        let folders = app.config.watched_folders.clone();
+        let scan = app.request_scan(folders);
+        let presets = Task::perform(blocking(host::detect_capture_presets), |p| {
+            Message::PresetsDetected(p.obs, p.nvidia_share)
+        });
+        (app, Task::batch([scan, presets]))
+    }
 
+    fn with_data(
+        config: AppConfig,
+        edit_store: host::EditStore,
+        media_cache: host::MediaCache,
+        persistence: persistence::Persistence,
+    ) -> Self {
         let filter = QueueFilter {
             highlights: HighlightFilter::from_hidden(config.hide_highlights),
             ..Default::default()
         };
-        let app = App {
+        App {
             config,
+            persistence,
+            reveal_config_after_save: None,
             items: Vec::new(),
             known_paths: HashSet::new(),
             edit_store,
@@ -548,30 +571,24 @@ impl App {
             view: View::Queue,
             filter,
             presets: host::CapturePresets::default(),
-            watcher,
+            watcher: None,
+            discovery: discovery::Discovery::default(),
             editor: None,
             audio_defaults: Vec::new(),
             rename: None,
             delete_confirm: None,
             delete_error: None,
             new_tag: String::new(),
-            export_target: None,
+            exports: Exports::default(),
+            pending_export: None,
+            after_prompt: None,
+            file_operations: HashSet::new(),
+            retired_previews: Vec::new(),
             hovered_card: None,
             fullscreen: false,
             preview_scale: 1.0,
             theme: theme::dark(),
-        };
-
-        let folders = app.config.watched_folders.clone();
-        let exts = app.config.video_extensions.clone();
-        let scan = Task::perform(
-            blocking(move || host::scan_folders(&folders, &exts)),
-            Message::Scanned,
-        );
-        let presets = Task::perform(blocking(host::detect_capture_presets), |p| {
-            Message::PresetsDetected(p.obs, p.nvidia_share)
-        });
-        (app, Task::batch([scan, presets]))
+        }
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -582,11 +599,8 @@ impl App {
         let modal = self.rename.is_some()
             || self.delete_confirm.is_some()
             || self.delete_error.is_some()
-            || self
-                .editor
-                .as_ref()
-                .map(|e| e.overwrite_target.is_some() || e.after_prompt)
-                .unwrap_or(false);
+            || self.pending_export.is_some()
+            || self.after_prompt.is_some();
         if self.editor.is_some() && !modal {
             subs.push(iced::event::listen_with(editor_key_event));
         }
@@ -617,24 +631,40 @@ impl App {
         self.theme.clone()
     }
 
-    fn save_config_task(&self) -> Task<Message> {
-        let cfg = self.config.clone();
-        Task::perform(
-            blocking(move || {
-                let _ = host::save_config(&cfg);
-            }),
-            |_| Message::Ignore,
-        )
+    fn save_config_task(&mut self) -> Task<Message> {
+        if let Err(error) = self.persistence.save_config(self.config.clone()) {
+            self.delete_error = Some(error);
+        }
+        Task::none()
     }
 
     fn restart_watch_and_scan(&mut self) -> Task<Message> {
         self.watcher =
             host::start_watch(&self.config.watched_folders, &self.config.video_extensions);
-        let folders = self.config.watched_folders.clone();
+        self.discovery.reset(self.config.watched_folders.clone());
+        self.scan_pending(true)
+    }
+
+    fn request_scan(&mut self, roots: Vec<String>) -> Task<Message> {
+        self.discovery.request(roots);
+        self.scan_pending(true)
+    }
+
+    fn start_pending_scan(&mut self) -> Task<Message> {
+        self.scan_pending(false)
+    }
+
+    fn scan_pending(&mut self, immediate: bool) -> Task<Message> {
+        if !self.file_operations.is_empty() {
+            return Task::none();
+        }
+        let Some((generation, folders)) = self.discovery.begin(immediate) else {
+            return Task::none();
+        };
         let exts = self.config.video_extensions.clone();
         Task::perform(
             blocking(move || host::scan_folders(&folders, &exts)),
-            Message::Scanned,
+            move |scan| Message::Scanned(generation, scan),
         )
     }
 
@@ -648,44 +678,48 @@ impl App {
                     tags: item.tags.clone().filter(|t| !t.is_empty()),
                 },
             );
-            let store = self.edit_store.clone();
-            // Fire-and-forget save (small file).
-            std::thread::spawn(move || host::save_edit_store(&store));
+            if let Err(error) = self.persistence.save_edits(self.edit_store.clone()) {
+                self.delete_error = Some(error);
+            }
         }
     }
 
-    fn add_paths(&mut self, paths: Vec<String>) -> Task<Message> {
-        let mut fresh = Vec::new();
+    fn add_paths(&mut self, generation: u64, paths: Vec<String>) -> Task<Message> {
+        let roots = self.config.watched_folders.clone();
+        let mut refresh = Vec::new();
+        let mut new_items = Vec::new();
         for raw in paths {
             let path = host::to_posix(&raw);
+            if self
+                .items
+                .iter()
+                .any(|item| item.path == path && self.file_operations.contains(&item.id))
+            {
+                continue;
+            }
             if self.known_paths.insert(path.clone()) {
-                fresh.push(path);
+                let mut item = build_item(&path, &roots);
+                if let Some(stored) = self.edit_store.get(&path) {
+                    item.edit = stored.edit.clone();
+                    item.output_override = stored.output_override.clone();
+                    item.tags = stored.tags.clone();
+                }
+                new_items.push(item);
             }
+            refresh.push(path);
         }
-        if fresh.is_empty() {
+        if refresh.is_empty() {
             return Task::none();
-        }
-        let roots = self.config.watched_folders.clone();
-        let mut new_items = Vec::new();
-        for path in &fresh {
-            let mut item = build_item(path, &roots);
-            if let Some(stored) = self.edit_store.get(path) {
-                item.edit = stored.edit.clone();
-                item.output_override = stored.output_override.clone();
-                item.tags = stored.tags.clone();
-            }
-            new_items.push(item);
         }
         // Newest first.
         for item in new_items.into_iter().rev() {
             self.items.insert(0, item);
         }
-        // Stat the fresh files and pair each with its cached probe when unchanged; only misses are
-        // probed (see `Message::MediaResolved`), so a full backlog isn't re-probed on every launch.
+        // Existing recordings are re-statted too: a create event can arrive before recording ends.
         let cache = self.media_cache.clone();
         Task::perform(
-            blocking(move || host::resolve_media(&fresh, &cache)),
-            Message::MediaResolved,
+            blocking(move || host::resolve_media(&refresh, &cache)),
+            move |list| Message::MediaResolved(generation, list),
         )
     }
 
@@ -786,16 +820,39 @@ impl App {
             }
             Message::OpenRepo => host::open_external("https://github.com/qcksys/qlipq"),
             Message::RescanAll => {
-                let folders = self.config.watched_folders.clone();
-                let exts = self.config.video_extensions.clone();
-                return Task::perform(
-                    blocking(move || host::scan_folders(&folders, &exts)),
-                    Message::Scanned,
-                );
+                return self.request_scan(self.config.watched_folders.clone());
             }
-            Message::Scanned(paths) => return self.add_paths(paths),
-            Message::MediaResolved(list) => {
-                let mut to_probe: Vec<(String, i64, i64)> = Vec::new();
+            Message::Scanned(generation, scan) => {
+                if !self.file_operations.is_empty() {
+                    self.discovery.request(self.config.watched_folders.clone());
+                }
+                if !self.discovery.finish(generation) {
+                    return self.start_pending_scan();
+                }
+                let missing = discovery::missing_paths(
+                    self.known_paths.iter(),
+                    &scan.paths,
+                    &scan.complete_roots,
+                );
+                for path in missing {
+                    let id = self
+                        .items
+                        .iter()
+                        .find(|item| item.path == path)
+                        .map(|item| item.id.clone());
+                    if let Some(id) = id {
+                        if !self.file_operations.contains(&id) && !self.exports.contains(&id) {
+                            self.remove_item(&id);
+                        }
+                    }
+                }
+                return self.add_paths(generation, scan.paths);
+            }
+            Message::MediaResolved(generation, list) => {
+                if !self.discovery.is_current(generation) {
+                    return Task::none();
+                }
+                let mut to_probe: Vec<(String, i64, i64, u64)> = Vec::new();
                 for host::MediaResolution {
                     path,
                     size,
@@ -804,46 +861,62 @@ impl App {
                 } in list
                 {
                     if let Some(item) = self.items.iter_mut().find(|i| i.path == path) {
+                        if self.file_operations.contains(&item.id) {
+                            continue;
+                        }
                         item.file_size_bytes = Some(size);
                         item.file_modified_at = Some(iso::from_unix_ms(modified_ms));
+                        let revision =
+                            self.discovery
+                                .probe(&path, size, modified_ms, cached.is_some());
                         if let Some(c) = cached {
                             item.duration_sec = Some(c.media.duration_sec);
-                            continue; // cache hit — no re-probe
+                            continue;
                         }
-                    } else if cached.is_some() {
-                        continue; // item already gone; nothing to probe
+                        item.duration_sec = None;
+                        item.media = None;
+                        if self.media_cache.remove(&path).is_some() {
+                            self.media_cache_dirty = true;
+                        }
+                        if let Some(revision) = revision {
+                            to_probe.push((path, size, modified_ms, revision));
+                        }
                     }
-                    to_probe.push((path, size, modified_ms));
                 }
                 if to_probe.is_empty() {
                     return Task::none();
                 }
                 // Probe only the misses, capped at PROBE_SEM permits so a large folder doesn't
                 // saturate the blocking pool and starve the editor's on-demand probe.
-                return Task::batch(to_probe.into_iter().map(|(path, size, modified_ms)| {
-                    let id_path = path.clone();
-                    Task::perform(
-                        async move {
-                            let _permit = PROBE_SEM.acquire().await;
-                            blocking(move || libav::probe(&path)).await
-                        },
-                        move |result| Message::MediaProbedBg {
-                            path: id_path.clone(),
-                            size,
-                            modified_ms,
-                            result,
-                        },
-                    )
-                }));
+                return Task::batch(to_probe.into_iter().map(
+                    |(path, size, modified_ms, revision)| {
+                        let id_path = path.clone();
+                        Task::perform(
+                            async move {
+                                let _permit = PROBE_SEM.acquire().await;
+                                blocking(move || libav::probe(&path)).await
+                            },
+                            move |result| Message::MediaProbedBg {
+                                path: id_path.clone(),
+                                size,
+                                modified_ms,
+                                revision,
+                                result,
+                            },
+                        )
+                    },
+                ));
             }
             Message::MediaProbedBg {
                 path,
                 size,
                 modified_ms,
+                revision,
                 result,
             } => {
-                // Ignore a probe whose recording was deleted while it was in flight (probes queue
-                // behind PROBE_SEM) — caching it would re-persist app data for a file that's gone.
+                if !self.discovery.finish_probe(&path, revision) {
+                    return Task::none();
+                }
                 if let Ok((media, is_hdr)) = result {
                     if self.known_paths.contains(&path) {
                         if let Some(item) = self.items.iter_mut().find(|i| i.path == path) {
@@ -870,15 +943,15 @@ impl App {
                 };
             }
             Message::SelectItem(id) => return self.select_item(id),
-            Message::MediaProbed(id, result) => {
-                self.on_media_probed(id.clone(), result);
-                // Only react to a probe that still matches the open editor. Probes run on the
-                // multi-threaded blocking pool and can finish out of order, so a stale probe from a
-                // superseded selection must not restart (or re-extract) whatever clip is open now —
-                // that would tear down and rebuild a clip that is already playing.
-                if self.editor.as_ref().map_or(true, |e| e.item_id != id) {
+            Message::MediaProbed(session, id, result) => {
+                if self
+                    .editor
+                    .as_ref()
+                    .is_none_or(|ed| ed.preview.id() != session)
+                {
                     return Task::none();
                 }
+                self.on_media_probed(id, result);
                 // Autoplay the freshly opened clip when enabled; otherwise show a paused first frame.
                 let ready = self
                     .editor
@@ -889,23 +962,38 @@ impl App {
                 }
                 return self.request_frame();
             }
-            Message::FrameExtracted(id, frame) => {
+            Message::PreviewReady(event) => {
                 let mut redo = false;
                 if let Some(ed) = &mut self.editor {
-                    if ed.item_id == id {
-                        ed.extracting = false;
-                        redo = ed.frame_dirty; // position moved again while extracting
-                        if let Some((w, h, rgba, realized)) = frame {
-                            video::push_frame(&ed.shared_frame, w, h, rgba);
-                            ed.has_frame = true;
-                            // Snap the playhead to the frame we actually decoded (frame-accurate
-                            // scrubber) — but not if a newer scrub is pending, where `current_time`
-                            // already holds the new target.
-                            if !redo {
-                                ed.current_time = realized;
-                                sync_time_input(ed);
+                    if !ed.preview.accepts(&event) {
+                        return Task::none();
+                    }
+                    ed.decode_hw = event.decode_hw;
+                    ed.preview_dims = event.dimensions;
+                    match event.outcome {
+                        preview::Outcome::Started(player) => {
+                            if let Some(player) = &player {
+                                for track in &ed.audio {
+                                    player.set_gain(track.index, track.volume);
+                                }
+                            }
+                            ed.playing = player.is_some();
+                            ed.player = player;
+                            redo = !ed.playing;
+                        }
+                        preview::Outcome::Frame(frame) => {
+                            ed.extracting = false;
+                            redo = ed.frame_dirty;
+                            if let Some((w, h, rgba, realized)) = frame {
+                                video::push_frame(&ed.shared_frame, w, h, rgba);
+                                ed.has_frame = true;
+                                if !redo {
+                                    ed.current_time = realized;
+                                    sync_time_input(ed);
+                                }
                             }
                         }
+                        preview::Outcome::Superseded => {}
                     }
                 }
                 if redo {
@@ -1060,6 +1148,8 @@ impl App {
                     if let Some(ed) = &mut self.editor {
                         ed.playing = false;
                         ed.player = None;
+                        ed.preview.stop();
+                        ed.extracting = false;
                     }
                     return self.request_frame(); // crisp, exact frame at the pause point
                 } else {
@@ -1229,30 +1319,25 @@ impl App {
             }
             Message::Export => return self.start_export(false),
             Message::CancelExport => {
-                if let Some(ed) = &self.editor {
-                    if let Some(c) = &ed.export_cancel {
-                        c.store(true, Ordering::Relaxed);
-                    }
-                }
+                self.exports.cancel();
             }
             Message::Overwrite(choice) => {
-                if let Some(ed) = &mut self.editor {
-                    let target = ed.overwrite_target.take();
-                    if let Some(target) = target {
-                        match choice {
-                            0 => return self.run_export_to(target),
-                            1 => return self.run_export_to(append_timestamp(&target)),
-                            _ => {}
+                if let Some(mut request) = self.pending_export.take() {
+                    match choice {
+                        0 => return self.run_export_to(request),
+                        1 => {
+                            request.output_path = append_timestamp(&request.output_path);
+                            return self.run_export_to(request);
                         }
+                        _ => {}
                     }
                 }
             }
             Message::ExportFinished(id, result) => return self.on_export_finished(id, result),
             Message::AfterChoice(action) => {
-                if let Some(ed) = &mut self.editor {
-                    ed.after_prompt = false;
+                if let Some(source) = self.after_prompt.take() {
+                    return self.run_after_action(source, action);
                 }
-                return self.run_after_action(action);
             }
             Message::ShowExported => {
                 if let Some(id) = &self.selected_id {
@@ -1314,29 +1399,25 @@ impl App {
                     self.delete_confirm = None;
                 } else if self.delete_error.is_some() {
                     self.delete_error = None;
-                } else if let Some(ed) = &mut self.editor {
-                    if ed.overwrite_target.is_some() {
-                        ed.overwrite_target = None;
-                    } else {
-                        ed.after_prompt = false;
-                    }
+                } else if self.pending_export.is_some() {
+                    self.pending_export = None;
+                } else {
+                    self.after_prompt = None;
                 }
             }
-            Message::Deleted(id, result) => match result {
-                Ok(()) => self.remove_item(&id),
-                Err(e) => {
-                    // Deletion failed even after we released our handles — usually another app (OBS
-                    // still recording, a media player) holds the file. Tell the user instead of
-                    // silently leaving the clip in the queue.
-                    let name = self
-                        .items
-                        .iter()
-                        .find(|i| i.id == id)
-                        .map(|i| i.file_name.clone())
-                        .unwrap_or_default();
-                    self.delete_error = Some(format!("Couldn't delete {name}.\n\n{e}"));
+            Message::FileOperationFinished(operation, result) => {
+                return self.on_file_operation_finished(operation, result);
+            }
+            Message::MoveFolderPicked(source, folder) => {
+                if let Some(folder) = folder {
+                    let dest = host::join_path(&folder, &host::base_name(&source.input));
+                    return self.start_file_operation(FileOperation {
+                        item_id: source.item_id,
+                        path: source.input,
+                        mutation: FileMutation::Rename(dest),
+                    });
                 }
-            },
+            }
             Message::Dismiss(id) => {
                 if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
                     let tags = item.tags.get_or_insert_with(Vec::new);
@@ -1346,7 +1427,7 @@ impl App {
                         tags.push(DISMISSED_TAG.to_string());
                         if self.selected_id.as_deref() == Some(&id) {
                             self.selected_id = None;
-                            self.editor = None;
+                            self.retire_editor();
                         }
                     }
                 }
@@ -1383,12 +1464,8 @@ impl App {
                 return Task::batch([self.save_config_task(), self.restart_watch_and_scan()]);
             }
             Message::Reprocess(folder) => {
-                let exts = self.config.video_extensions.clone();
                 self.view = View::Queue;
-                return Task::perform(
-                    blocking(move || host::scan_folders(&[folder], &exts)),
-                    Message::Scanned,
-                );
+                return self.request_scan(vec![folder]);
             }
             Message::AddPreset(folder) => return self.add_watched_folder(folder),
             Message::OutputFolderChanged(s) => {
@@ -1510,44 +1587,46 @@ impl App {
                 self.config.after_export.rename_suffix = s;
                 return self.save_config_task();
             }
-            Message::OpenConfigFile => {
-                let cfg = self.config.clone();
-                return Task::perform(
-                    blocking(move || {
-                        let _ = host::save_config(&cfg);
-                        host::reveal(&host::config_path().to_string_lossy());
-                    }),
-                    |_| Message::Ignore,
-                );
-            }
-            Message::Ignore => {}
+            Message::OpenConfigFile => match self.persistence.save_config(self.config.clone()) {
+                Ok(id) => self.reveal_config_after_save = Some(id),
+                Err(error) => self.delete_error = Some(error),
+            },
         }
         Task::none()
     }
 
     fn on_tick(&mut self) -> Task<Message> {
         let mut tasks = Vec::new();
-        // Drain the folder watcher.
         if let Some(w) = &self.watcher {
-            let new = w.drain();
-            if !new.is_empty() {
-                tasks.push(self.add_paths(new));
+            if w.drain() {
+                self.discovery.request(self.config.watched_folders.clone());
             }
         }
-        // Mirror export progress for the bar.
-        if let Some(ed) = &mut self.editor {
-            if ed.exporting {
-                if let Ok(p) = ed.progress.lock() {
-                    ed.progress_display = *p;
+        tasks.push(self.start_pending_scan());
+        self.retired_previews.retain_mut(|(_, release)| {
+            matches!(
+                release.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+        });
+        for completion in self.persistence.take_results() {
+            if completion.id.is_some() && completion.id == self.reveal_config_after_save {
+                self.reveal_config_after_save = None;
+                if completion.result.is_ok() {
+                    host::reveal(&host::config_path().to_string_lossy());
                 }
+            }
+            if let Err(error) = completion.result {
+                self.delete_error = Some(error);
             }
         }
         // Flush new probe results to the media cache, coalesced so a backlog's probe storm is a
         // handful of writes rather than one per file.
         if self.media_cache_dirty {
             self.media_cache_dirty = false;
-            let cache = self.media_cache.clone();
-            std::thread::spawn(move || host::save_media_cache(&cache));
+            if let Err(error) = self.persistence.save_media_cache(self.media_cache.clone()) {
+                self.delete_error = Some(error);
+            }
         }
         Task::batch(tasks)
     }
@@ -1584,6 +1663,7 @@ impl App {
                 }
                 ed.playing = false;
                 ed.player = None;
+                ed.preview.stop();
                 sync_time_input(ed);
                 return;
             }
@@ -1615,6 +1695,7 @@ impl App {
                 ed.current_time = stop_at;
                 ed.playing = false;
                 ed.player = None;
+                ed.preview.stop();
             } else if !ed.awaiting_loop {
                 let looped = ed
                     .player
@@ -1628,6 +1709,7 @@ impl App {
                     ed.current_time = stop_at;
                     ed.playing = false;
                     ed.player = None;
+                    ed.preview.stop();
                 }
             }
         } else {
@@ -1640,145 +1722,89 @@ impl App {
     /// (`hdr_preview_gamma`, `preview_max_height`). Used when a preview-affecting setting changes so
     /// the next extracted frame reflects it.
     fn reopen_scrubber(&mut self) {
-        let Some(ed) = self.editor.as_ref() else {
+        let Some(ed) = self.editor.as_mut() else {
             return;
         };
         let Some(media) = ed.media.as_ref() else {
             return;
         };
-        let (mw, mh, is_hdr, id) = (media.width, media.height, ed.is_hdr, ed.item_id.clone());
-        let path = self
+        let Some(path) = self
             .items
             .iter()
-            .find(|i| i.id == id)
-            .map(|i| i.path.clone());
-        let gamma = self.config.hdr_preview_gamma;
-        let max_h = self.config.preview_max_height;
-        let scrubber = path
-            .and_then(|p| ScrubDecoder::open(&p, mw, mh, is_hdr, gamma, max_h))
-            .map(|s| Arc::new(Mutex::new(s)));
-        if let Some(ed) = self.editor.as_mut() {
-            // Preview size may have changed, so refresh the debug-panel capture too.
-            if let Some(s) = scrubber.as_ref().and_then(|s| s.lock().ok()) {
-                ed.preview_dims = Some(s.preview_dims());
-            }
-            ed.scrubber = scrubber;
-        }
+            .find(|i| i.id == ed.item_id)
+            .map(|i| i.path.clone())
+        else {
+            return;
+        };
+        ed.preview.configure(preview::Settings {
+            path,
+            width: media.width,
+            height: media.height,
+            fps: media.fps,
+            is_hdr: ed.is_hdr,
+            gamma: self.config.hdr_preview_gamma,
+            max_height: self.config.preview_max_height,
+        });
+        ed.player = None;
+        ed.extracting = false;
+        ed.decode_hw = None;
+        ed.preview_dims = None;
     }
 
     /// Extract a single preview frame at the playhead (scrubbing / paused). Coalesces: if an
     /// extraction is already in flight, just mark the frame dirty and re-request on completion.
     fn request_frame(&mut self) -> Task<Message> {
-        let snap = match self.editor.as_ref() {
-            Some(ed) if !ed.playing && ed.media.is_some() => Some((
-                ed.extracting,
-                ed.current_time,
-                ed.item_id.clone(),
-                ed.scrubber.clone(),
-            )),
-            _ => None,
-        };
-        let Some((extracting, sec, id, scrubber)) = snap else {
+        let Some(ed) = self.editor.as_mut() else {
             return Task::none();
         };
-        if extracting {
-            if let Some(ed) = &mut self.editor {
-                ed.frame_dirty = true;
-            }
+        if ed.playing || ed.media.is_none() {
             return Task::none();
         }
-        let Some(scrubber) = scrubber else {
+        if ed.extracting {
+            ed.frame_dirty = true;
             return Task::none();
-        };
-        if let Some(ed) = &mut self.editor {
-            ed.extracting = true;
-            ed.frame_dirty = false;
         }
-        // Drive the warm scrub decoder on the blocking pool; coalescing (extracting/frame_dirty)
-        // keeps at most one in flight, so the Mutex is never contended.
-        Task::perform(
-            blocking(move || scrubber.lock().ok().and_then(|mut s| s.frame_at(sec))),
-            move |frame| Message::FrameExtracted(id.clone(), frame),
-        )
+        ed.extracting = true;
+        ed.frame_dirty = false;
+        Task::perform(ed.preview.frame_at(ed.current_time), Message::PreviewReady)
     }
 
     /// (Re)start the warm streaming decoder from the current playhead and enter the playing state.
     /// Returns a fallback single-frame task if the decoder can't be started (e.g. an unreadable file).
     fn play_from_current(&mut self) -> Task<Message> {
-        let snap = match self.editor.as_ref() {
-            Some(ed) if ed.media.is_some() => {
-                let m = ed.media.as_ref().unwrap();
-                // Enabled tracks (audio-relative index + gain) drive the preview's monitor mixdown.
-                let audio_tracks: Vec<(i64, f64)> = ed
-                    .audio
-                    .iter()
-                    .filter(|r| r.enabled)
-                    .map(|r| (r.index, r.volume))
-                    .collect();
-                Some((
-                    ed.item_id.clone(),
-                    ed.current_time,
-                    m.width,
-                    m.height,
-                    m.fps,
-                    m.duration_sec,
-                    ed.is_hdr,
-                    audio_tracks,
-                    ed.trim_start,
-                    ed.trim_end,
-                ))
-            }
-            _ => None,
-        };
-        let Some((id, cur, mw, mh, mfps, _dur, is_hdr, audio_tracks, trim_start, trim_end)) = snap
-        else {
+        let Some(ed) = self.editor.as_mut().filter(|ed| ed.media.is_some()) else {
             return Task::none();
         };
         // Play only within the in/out window: (re)start at the in-point whenever the playhead sits
         // outside it (before the in-point, or at/after the out-point). `trim_end` is 0 until the media
         // loads, so guard on a real out-point before snapping.
-        let start = if trim_end > 0.0 && (cur < trim_start || cur >= trim_end) {
-            trim_start
+        let start = if ed.trim_end > 0.0
+            && (ed.current_time < ed.trim_start || ed.current_time >= ed.trim_end)
+        {
+            ed.trim_start
         } else {
-            cur
+            ed.current_time
         };
-        let Some(path) = self
-            .items
+        let audio_tracks = ed
+            .audio
             .iter()
-            .find(|i| i.id == id)
-            .map(|i| i.path.clone())
-        else {
-            return Task::none();
-        };
-        let gamma = self.config.hdr_preview_gamma;
-        let max_h = self.config.preview_max_height;
-        let player = start_player(
-            &path,
-            start,
-            mw,
-            mh,
-            mfps,
-            is_hdr,
-            audio_tracks,
-            gamma,
-            max_h,
-        );
-        let started = player.is_some();
-        if let Some(ed) = &mut self.editor {
-            ed.current_time = start;
-            ed.playing = started;
-            ed.player = player;
-            ed.frame_dirty = false;
-            ed.awaiting_loop = false;
-        }
-        if started {
-            Task::none()
-        } else {
-            self.request_frame()
-        }
+            .filter(|r| r.enabled)
+            .map(|r| (r.index, r.volume))
+            .collect();
+        ed.current_time = start;
+        ed.playing = true;
+        ed.player = None;
+        ed.extracting = false;
+        ed.frame_dirty = false;
+        ed.awaiting_loop = false;
+        Task::perform(ed.preview.start(start, audio_tracks), Message::PreviewReady)
     }
 
     fn select_item(&mut self, id: String) -> Task<Message> {
+        if self.file_operations.contains(&id) {
+            return Task::none();
+        }
+        self.retire_editor();
         self.selected_id = Some(id.clone());
         let Some(item) = self.items.iter().find(|i| i.id == id) else {
             return Task::none();
@@ -1812,18 +1838,12 @@ impl App {
             playing: false,
             player: None,
             awaiting_loop: false,
-            scrubber: None,
-            exporting: false,
-            progress: Arc::new(Mutex::new(0.0)),
-            progress_display: 0.0,
-            export_cancel: None,
-            overwrite_target: None,
-            after_prompt: false,
+            preview: preview::Session::new(),
         });
         let path = item.path.clone();
-        Task::perform(blocking(move || libav::probe(&path)), move |r| {
-            Message::MediaProbed(id.clone(), r)
-        })
+        let session = self.editor.as_ref().unwrap().preview.id();
+        let probe = self.editor.as_ref().unwrap().preview.probe(path);
+        Task::perform(probe, move |r| Message::MediaProbed(session, id.clone(), r))
     }
 
     fn on_media_probed(&mut self, id: String, result: Result<(MediaInfo, bool), String>) {
@@ -1900,31 +1920,13 @@ impl App {
                         }
                     })
                     .collect();
-                let (mw, mh) = (media.width, media.height);
                 ed.media = Some(media);
                 // Now that media (and its fps) is set, format the In/Out fields at the real frame rate.
                 sync_inout_inputs(ed);
                 ed.frame_dirty = true;
-                // Open the warm scrub decoder for this clip (synchronous, like `start_player`); it
-                // lives until the next selection drops this Editor.
-                let path = self
-                    .items
-                    .iter()
-                    .find(|i| i.id == id)
-                    .map(|i| i.path.clone());
-                let gamma = self.config.hdr_preview_gamma;
-                let max_h = self.config.preview_max_height;
-                ed.scrubber = path
-                    .and_then(|p| ScrubDecoder::open(&p, mw, mh, is_hdr, gamma, max_h))
-                    .map(|s| Arc::new(Mutex::new(s)));
-                // Capture the decode path + preview size once (the scrubber isn't driven yet, so the
-                // lock is free) for the debug panel — representative of the streaming player too.
-                if let Some(s) = ed.scrubber.as_ref().and_then(|s| s.lock().ok()) {
-                    ed.decode_hw = Some(s.hw_decode());
-                    ed.preview_dims = Some(s.preview_dims());
-                }
             }
         }
+        self.reopen_scrubber();
     }
 
     fn toggle_override(&mut self, on: bool) -> Task<Message> {
@@ -1960,6 +1962,12 @@ impl App {
     }
 
     fn start_export(&mut self, _force: bool) -> Task<Message> {
+        if self.exports.active().is_some()
+            || self.pending_export.is_some()
+            || self.after_prompt.is_some()
+        {
+            return Task::none();
+        }
         let Some(id) = self.selected_id.clone() else {
             return Task::none();
         };
@@ -1969,6 +1977,9 @@ impl App {
         let Some(ed) = &self.editor else {
             return Task::none();
         };
+        if ed.item_id != id || self.file_operations.contains(&id) {
+            return Task::none();
+        }
         let Some(media) = &ed.media else {
             return Task::none();
         };
@@ -1981,51 +1992,51 @@ impl App {
         let (name, _) = rename::split_file_name(&item.file_name);
         let out_name = build_export_name(&self.config, item, &name, output.container.extension());
         let output_path = host::join_path(&self.config.output_folder, &out_name);
-
+        let request = ExportRequest {
+            source: AfterExport {
+                item_id: id,
+                input: item.path.clone(),
+                settings: self.config.after_export.clone(),
+            },
+            output_path: output_path.clone(),
+            spec: editor_spec(ed),
+            output,
+            media: media.clone(),
+            is_hdr: ed.is_hdr,
+            metadata: item
+                .source
+                .clone()
+                .map(|s| vec![("game".into(), s)])
+                .unwrap_or_default(),
+        };
         let exists = host::file_exists(&output_path);
         if exists {
-            if let Some(ed) = &mut self.editor {
-                ed.overwrite_target = Some(output_path);
-            }
+            self.pending_export = Some(request);
             return Task::none();
         }
-        self.run_export_to(output_path)
+        self.run_export_to(request)
     }
 
-    fn run_export_to(&mut self, output_path: String) -> Task<Message> {
-        let Some(id) = self.selected_id.clone() else {
+    fn run_export_to(&mut self, request: ExportRequest) -> Task<Message> {
+        let id = request.source.item_id.clone();
+        if host::same_file(&request.source.input, &request.output_path) {
+            self.delete_error = Some("Choose a different output folder or filename; an export cannot replace its source recording.".into());
+            return Task::none();
+        }
+        if self.file_operations.contains(&id)
+            || !self
+                .items
+                .iter()
+                .any(|i| i.id == id && i.path == request.source.input)
+        {
+            return Task::none();
+        }
+        let Some(job) = self.exports.start(request) else {
             return Task::none();
         };
-        let Some(ed) = &self.editor else {
-            return Task::none();
-        };
-        let Some(media) = ed.media.clone() else {
-            return Task::none();
-        };
-        let is_hdr = ed.is_hdr;
-        let Some(item) = self.items.iter().find(|i| i.id == id).cloned() else {
-            return Task::none();
-        };
-
-        let output = self.effective_output(&item);
-        let spec = editor_spec(ed);
-        let total = qlipq_core::edit_spec::effective_duration(&spec, &media);
-        let metadata = item
-            .source
-            .clone()
-            .map(|s| vec![("game".to_string(), s)])
-            .unwrap_or_default();
-
-        self.export_target = Some(output_path.clone());
-
-        let progress = Arc::new(Mutex::new(0.0_f32));
-        let cancel = Arc::new(AtomicBool::new(false));
-        if let Some(ed) = &mut self.editor {
-            ed.exporting = true;
-            ed.progress_display = 0.0;
-            ed.progress = Arc::clone(&progress);
-            ed.export_cancel = Some(Arc::clone(&cancel));
-            // Stop the preview decoder so it doesn't contend with the export for CPU.
+        if let Some(ed) = self.editor.as_mut().filter(|ed| ed.item_id == id) {
+            ed.preview.stop();
+            ed.extracting = false;
             ed.playing = false;
             ed.player = None;
         }
@@ -2034,68 +2045,32 @@ impl App {
             item.error = None;
         }
 
-        self.spawn_export(
-            id,
-            item.path.clone(),
-            output_path,
-            spec,
-            output,
-            media,
-            total,
-            metadata,
-            is_hdr,
-            progress,
-            cancel,
-        )
-    }
-
-    /// In-process export: decode → edits → hardware encode → mux ([`export::run_export`]). No CLI.
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_export(
-        &self,
-        id: String,
-        input: String,
-        output_path: String,
-        spec: EditSpec,
-        output: OutputSettings,
-        media: MediaInfo,
-        _total: f64,
-        metadata: Vec<(String, String)>,
-        is_hdr: bool,
-        progress: Arc<Mutex<f32>>,
-        cancel: Arc<AtomicBool>,
-    ) -> Task<Message> {
+        let job_id = job.id;
         Task::perform(
             blocking(move || {
+                let request = job.request;
                 export::run_export(
-                    &input,
-                    &output_path,
-                    &spec,
-                    &output,
-                    &media,
-                    is_hdr,
-                    &metadata,
-                    progress,
-                    cancel,
+                    &request.source.input,
+                    &request.output_path,
+                    &request.spec,
+                    &request.output,
+                    &request.media,
+                    request.is_hdr,
+                    &request.metadata,
+                    job.progress,
+                    job.cancel,
                 )
             }),
-            move |result| Message::ExportFinished(id.clone(), result),
+            move |result| Message::ExportFinished(job_id, result),
         )
     }
 
-    fn on_export_finished(&mut self, id: String, result: Result<(), String>) -> Task<Message> {
-        if let Some(ed) = &mut self.editor {
-            if ed.item_id == id {
-                ed.exporting = false;
-                ed.export_cancel = None;
-                ed.progress_display = if result.is_ok() {
-                    1.0
-                } else {
-                    ed.progress_display
-                };
-            }
-        }
-        let export_path = self.export_target.take();
+    fn on_export_finished(&mut self, job_id: u64, result: Result<(), String>) -> Task<Message> {
+        let Some(job) = self.exports.finish(job_id) else {
+            return Task::none();
+        };
+        let source = job.request.source;
+        let id = source.item_id.clone();
         // A user-cancelled export isn't an error: reset the item, don't show an error banner.
         if matches!(&result, Err(e) if e == "cancelled") {
             if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
@@ -2108,17 +2083,15 @@ impl App {
             Ok(()) => {
                 if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
                     item.status = QueueStatus::Done;
-                    item.export_path = export_path;
+                    item.export_path = Some(job.request.output_path);
                 }
                 // After-export.
-                match self.config.after_export.action {
+                match source.settings.action {
                     AfterExportAction::Prompt => {
-                        if let Some(ed) = &mut self.editor {
-                            ed.after_prompt = true;
-                        }
+                        self.after_prompt = Some(source);
                         Task::none()
                     }
-                    action => self.run_after_action(action),
+                    action => self.run_after_action(source, action),
                 }
             }
             Err(e) => {
@@ -2131,26 +2104,19 @@ impl App {
         }
     }
 
-    fn run_after_action(&mut self, action: AfterExportAction) -> Task<Message> {
-        let Some(id) = self.selected_id.clone() else {
-            return Task::none();
-        };
-        let Some(item) = self.items.iter().find(|i| i.id == id).cloned() else {
-            return Task::none();
-        };
+    fn run_after_action(
+        &mut self,
+        source: AfterExport,
+        action: AfterExportAction,
+    ) -> Task<Message> {
         match action {
-            AfterExportAction::Delete => {
-                let path = item.path.clone();
-                Task::perform(
-                    blocking(move || {
-                        let _ = host::delete_file(&path);
-                    }),
-                    |_| Message::Ignore,
-                )
-            }
+            AfterExportAction::Delete => self.start_file_operation(FileOperation {
+                item_id: source.item_id,
+                path: source.input,
+                mutation: FileMutation::Delete,
+            }),
             AfterExportAction::Move => {
-                let folder = self.config.after_export.move_folder.clone();
-                let path = item.path.clone();
+                let folder = source.settings.move_folder.clone();
                 if folder.is_empty() {
                     Task::perform(
                         async move {
@@ -2159,45 +2125,36 @@ impl App {
                                 .await
                                 .map(|h| host::to_posix(&h.path().to_string_lossy()))
                         },
-                        move |opt| match opt {
-                            Some(folder) => Message::FolderPicked(
-                                PickPurpose::MoveFolder,
-                                Some(format!("move::{path}::{folder}")),
-                            ),
-                            None => Message::Ignore,
-                        },
+                        move |opt| Message::MoveFolderPicked(source.clone(), opt),
                     )
                 } else {
-                    let dest = host::join_path(&folder, &host::base_name(&path));
-                    Task::perform(
-                        blocking(move || {
-                            let _ = host::rename_file(&path, &dest);
-                        }),
-                        |_| Message::Ignore,
-                    )
+                    let dest = host::join_path(&folder, &host::base_name(&source.input));
+                    self.start_file_operation(FileOperation {
+                        item_id: source.item_id,
+                        path: source.input,
+                        mutation: FileMutation::Rename(dest),
+                    })
                 }
             }
             AfterExportAction::Rename => {
-                let (name, ext) = rename::split_file_name(&item.file_name);
+                let (name, ext) = rename::split_file_name(&host::base_name(&source.input));
                 let renamed = format!(
                     "{}{}{}{}",
-                    self.config.after_export.rename_prefix,
+                    source.settings.rename_prefix,
                     name,
-                    self.config.after_export.rename_suffix,
+                    source.settings.rename_suffix,
                     if ext.is_empty() {
                         String::new()
                     } else {
                         format!(".{ext}")
                     }
                 );
-                let from = item.path.clone();
-                let to = host::join_path(&host::dir_name(&item.path), &renamed);
-                Task::perform(
-                    blocking(move || {
-                        let _ = host::rename_file(&from, &to);
-                    }),
-                    |_| Message::Ignore,
-                )
+                let to = host::join_path(&host::dir_name(&source.input), &renamed);
+                self.start_file_operation(FileOperation {
+                    item_id: source.item_id,
+                    path: source.input,
+                    mutation: FileMutation::Rename(to),
+                })
             }
             AfterExportAction::Nothing | AfterExportAction::Prompt => Task::none(),
         }
@@ -2221,41 +2178,14 @@ impl App {
             format!("{trimmed}.{ext}")
         };
         let new_path = host::join_path(&host::dir_name(&item.path), &new_name);
-        let from = item.path.clone();
-        let id = r.id.clone();
-        Task::perform(
-            blocking(move || host::rename_file(&from, &new_path)),
-            move |res| {
-                Message::FolderPicked(
-                    PickPurpose::WatchedFolder,
-                    res.ok().map(|p| format!("renamed::{id}::{p}")),
-                )
-            },
-        )
+        self.start_file_operation(FileOperation {
+            item_id: r.id,
+            path: item.path.clone(),
+            mutation: FileMutation::Rename(new_path),
+        })
     }
 
     fn on_folder_picked(&mut self, purpose: PickPurpose, path: String) -> Task<Message> {
-        // Reuse FolderPicked for a few side-channel results encoded in the string.
-        if let Some(rest) = path.strip_prefix("renamed::") {
-            if let Some((id, new_path)) = rest.split_once("::") {
-                self.apply_rename(id, new_path);
-            }
-            return Task::none();
-        }
-        if let Some(rest) = path.strip_prefix("move::") {
-            let parts: Vec<&str> = rest.splitn(2, "::").collect();
-            if parts.len() == 2 {
-                let (from, folder) = (parts[0].to_string(), parts[1].to_string());
-                let dest = host::join_path(&folder, &host::base_name(&from));
-                return Task::perform(
-                    blocking(move || {
-                        let _ = host::rename_file(&from, &dest);
-                    }),
-                    |_| Message::Ignore,
-                );
-            }
-            return Task::none();
-        }
         match purpose {
             PickPurpose::WatchedFolder => self.add_watched_folder(path),
             PickPurpose::OutputFolder => {
@@ -2270,6 +2200,9 @@ impl App {
     }
 
     fn apply_rename(&mut self, id: &str, new_path: &str) {
+        self.discovery.remove(new_path);
+        self.items
+            .retain(|item| item.id == id || item.path != new_path);
         let new_name = host::base_name(new_path);
         let parsed = qlipq_core::obs::parse_obs_filename(&new_name);
         let old_path = self
@@ -2278,6 +2211,7 @@ impl App {
             .find(|i| i.id == id)
             .map(|i| i.path.clone());
         if let Some(old) = &old_path {
+            self.discovery.remove(old);
             self.known_paths.remove(old);
             if let Some(stored) = self.edit_store.remove(old) {
                 self.edit_store.insert(new_path.to_string(), stored);
@@ -2310,8 +2244,6 @@ impl App {
         Task::batch([self.save_config_task(), self.restart_watch_and_scan()])
     }
 
-    /// Delete a clip's file from disk (dropping the queue item follows on [`Message::Deleted`]). Used
-    /// by both the confirm dialog and the immediate Shift+Delete shortcut.
     fn delete_now(&mut self, id: String) -> Task<Message> {
         let Some(path) = self
             .items
@@ -2321,36 +2253,119 @@ impl App {
         else {
             return Task::none();
         };
-        // The preview player + scrub decoder keep the file open, and Windows refuses to delete an open
-        // file. Tear the editor down first so both are dropped — Player::drop joins its decode threads
-        // synchronously, closing the handle — before we attempt the delete below.
-        if self.editor.as_ref().is_some_and(|e| e.item_id == id) {
-            self.selected_id = None;
-            self.editor = None;
-        }
-        Task::perform(blocking(move || host::delete_file(&path)), move |r| {
-            Message::Deleted(id.clone(), r)
+        self.start_file_operation(FileOperation {
+            item_id: id,
+            path,
+            mutation: FileMutation::Delete,
         })
+    }
+
+    fn retire_editor(&mut self) {
+        if let Some(mut editor) = self.editor.take() {
+            let released = editor.preview.release();
+            self.retired_previews.push((editor.item_id, released));
+        }
+    }
+
+    fn start_file_operation(&mut self, operation: FileOperation) -> Task<Message> {
+        let id = &operation.item_id;
+        if self.exports.contains(id) || self.file_operations.contains(id) {
+            self.delete_error = Some(
+                "Wait for this clip's current operation to finish before changing its file.".into(),
+            );
+            return Task::none();
+        }
+        if !self
+            .items
+            .iter()
+            .any(|item| item.id == *id && item.path == operation.path)
+        {
+            self.delete_error =
+                Some("The recording has moved or is no longer in the queue.".into());
+            return Task::none();
+        }
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.item_id == *id)
+        {
+            self.retire_editor();
+        }
+        let mut releases = Vec::new();
+        let mut other = Vec::new();
+        for (item_id, release) in self.retired_previews.drain(..) {
+            if item_id == *id {
+                releases.push(release)
+            } else {
+                other.push((item_id, release))
+            }
+        }
+        self.retired_previews = other;
+        self.file_operations.insert(id.clone());
+        self.discovery.request(self.config.watched_folders.clone());
+        let work = operation.clone();
+        Task::perform(
+            async move {
+                for release in releases {
+                    release.await.map_err(|_| {
+                        "Preview shutdown failed; the recording was not changed.".to_string()
+                    })?;
+                }
+                blocking(move || match work.mutation {
+                    FileMutation::Delete => host::delete_file(&work.path),
+                    FileMutation::Rename(to) => host::rename_file(&work.path, &to).map(|_| ()),
+                })
+                .await
+            },
+            move |result| Message::FileOperationFinished(operation.clone(), result),
+        )
+    }
+
+    fn on_file_operation_finished(
+        &mut self,
+        operation: FileOperation,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        self.file_operations.remove(&operation.item_id);
+        match result {
+            Ok(()) => match operation.mutation {
+                FileMutation::Delete => self.remove_item(&operation.item_id),
+                FileMutation::Rename(path) => self.apply_rename(&operation.item_id, &path),
+            },
+            Err(error) => {
+                self.delete_error = Some(format!(
+                    "Couldn't change {}.\n\n{error}",
+                    host::base_name(&operation.path)
+                ))
+            }
+        }
+        if self.selected_id.as_deref() == Some(&operation.item_id) {
+            return self.select_item(operation.item_id);
+        }
+        Task::none()
     }
 
     fn remove_item(&mut self, id: &str) {
         if let Some(pos) = self.items.iter().position(|i| i.id == id) {
             let path = self.items[pos].path.clone();
+            self.discovery.remove(&path);
             self.known_paths.remove(&path);
             self.items.remove(pos);
             // A deleted recording keeps no persisted app data: drop its edit + cached probe.
             if self.edit_store.remove(&path).is_some() {
-                let store = self.edit_store.clone();
-                std::thread::spawn(move || host::save_edit_store(&store));
+                if let Err(error) = self.persistence.save_edits(self.edit_store.clone()) {
+                    self.delete_error = Some(error);
+                }
             }
             if self.media_cache.remove(&path).is_some() {
-                let cache = self.media_cache.clone();
-                std::thread::spawn(move || host::save_media_cache(&cache));
+                if let Err(error) = self.persistence.save_media_cache(self.media_cache.clone()) {
+                    self.delete_error = Some(error);
+                }
             }
         }
         if self.selected_id.as_deref() == Some(id) {
             self.selected_id = None;
-            self.editor = None;
+            self.retire_editor();
         }
     }
 
@@ -2390,14 +2405,10 @@ impl App {
             Some(self.delete_modal(id))
         } else if let Some(msg) = &self.delete_error {
             Some(self.delete_error_modal(msg))
-        } else if let Some(ed) = &self.editor {
-            if let Some(target) = &ed.overwrite_target {
-                Some(self.overwrite_modal(target))
-            } else if ed.after_prompt {
-                Some(self.after_modal())
-            } else {
-                None
-            }
+        } else if let Some(request) = &self.pending_export {
+            Some(self.overwrite_modal(&request.output_path))
+        } else if self.after_prompt.is_some() {
+            Some(self.after_modal())
         } else {
             None
         };
@@ -2709,6 +2720,281 @@ fn key_token_matches(token: &str, key: &iced::keyboard::Key) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestDirectory(std::path::PathBuf);
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct Fixture {
+        app: App,
+        _directory: TestDirectory,
+    }
+
+    fn fixture() -> Fixture {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("qlipq-workflow-{}", qlipq_core::ids::create_id())),
+        );
+        let mut app = App::with_data(
+            AppConfig::default(),
+            host::EditStore::default(),
+            host::MediaCache::default(),
+            persistence::Persistence::at_path(directory.0.clone()),
+        );
+        app.items = vec![
+            qi("a.mp4", QueueStatus::Exporting, None, &["keep"]),
+            qi("b.mp4", QueueStatus::Pending, None, &[]),
+        ];
+        app.known_paths = app.items.iter().map(|item| item.path.clone()).collect();
+        app.selected_id = Some("b.mp4".into());
+        Fixture {
+            app,
+            _directory: directory,
+        }
+    }
+
+    fn test_export(action: AfterExportAction) -> ExportRequest {
+        ExportRequest {
+            source: AfterExport {
+                item_id: "a.mp4".into(),
+                input: "C:/clips/a.mp4".into(),
+                settings: AfterExportSettings {
+                    action,
+                    ..Default::default()
+                },
+            },
+            output_path: "C:/exports/a.mp4".into(),
+            spec: qlipq_core::edit_spec::default_edit_spec(None),
+            output: OutputSettings::default(),
+            media: MediaInfo {
+                duration_sec: 1.0,
+                width: 16,
+                height: 16,
+                fps: 30.0,
+                video_codec: "h264".into(),
+                audio_streams: vec![],
+                size_bytes: None,
+                encoder: None,
+            },
+            is_hdr: false,
+            metadata: vec![],
+        }
+    }
+
+    #[test]
+    fn changed_existing_recording_reprobes_and_rejects_its_old_result() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        let path = "C:/clips/a.mp4";
+        let media = test_export(AfterExportAction::Nothing).media;
+        app.items[0].duration_sec = Some(media.duration_sec);
+        app.items[0].media = Some(media.clone());
+        app.media_cache.insert(
+            path.into(),
+            host::CachedMedia {
+                size_bytes: 10,
+                modified_ms: 20,
+                media: media.clone(),
+                is_hdr: false,
+            },
+        );
+        let old_revision = app.discovery.probe(path, 10, 20, false).unwrap();
+        app.discovery.request(vec!["C:/clips".into()]);
+        let (generation, _) = app.discovery.begin(true).unwrap();
+        assert!(app.discovery.finish(generation));
+
+        let _ = app.update(Message::MediaResolved(
+            generation,
+            vec![host::MediaResolution {
+                path: path.into(),
+                size: 30,
+                modified_ms: 40,
+                cached: None,
+            }],
+        ));
+
+        assert_eq!(app.items[0].file_size_bytes, Some(30));
+        assert_eq!(app.items[0].file_modified_at, Some(iso::from_unix_ms(40)));
+        assert!(app.items[0].duration_sec.is_none());
+        assert!(app.items[0].media.is_none());
+        assert!(!app.media_cache.contains_key(path));
+        assert!(app.media_cache_dirty);
+        assert!(
+            app.discovery.probe(path, 30, 40, false).is_none(),
+            "replacement probe is already pending"
+        );
+
+        let _ = app.update(Message::MediaProbedBg {
+            path: path.into(),
+            size: 10,
+            modified_ms: 20,
+            revision: old_revision,
+            result: Ok((media, false)),
+        });
+        assert!(app.items[0].duration_sec.is_none());
+        assert!(!app.media_cache.contains_key(path));
+    }
+
+    #[test]
+    fn export_completion_uses_job_source_and_captured_after_settings() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        let job = app
+            .exports
+            .start(test_export(AfterExportAction::Prompt))
+            .unwrap();
+        app.config.after_export.action = AfterExportAction::Delete;
+        let _ = app.update(Message::ExportFinished(job.id, Ok(())));
+        assert_eq!(
+            app.items[0].export_path.as_deref(),
+            Some("C:/exports/a.mp4")
+        );
+        assert_eq!(app.items[1].status, QueueStatus::Pending);
+        assert_eq!(app.after_prompt.as_ref().unwrap().item_id, "a.mp4");
+        assert!(app.file_operations.is_empty());
+        let _ = app.update(Message::AfterChoice(AfterExportAction::Delete));
+        assert!(app.file_operations.contains("a.mp4"));
+        assert!(!app.file_operations.contains("b.mp4"));
+    }
+
+    #[test]
+    fn automatic_after_action_does_not_follow_selection() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        let job = app
+            .exports
+            .start(test_export(AfterExportAction::Delete))
+            .unwrap();
+        let _ = app.update(Message::ExportFinished(job.id, Ok(())));
+        assert!(app.file_operations.contains("a.mp4"));
+        assert!(!app.file_operations.contains("b.mp4"));
+    }
+
+    #[test]
+    fn export_failure_and_cancellation_never_start_after_actions() {
+        for error in ["read packet failed", "cancelled"] {
+            let mut fixture = fixture();
+            let app = &mut fixture.app;
+            let job = app
+                .exports
+                .start(test_export(AfterExportAction::Delete))
+                .unwrap();
+            let _ = app.update(Message::ExportFinished(job.id, Err(error.into())));
+            assert!(app.exports.active().is_none());
+            assert!(app.file_operations.is_empty());
+            assert!(app.after_prompt.is_none());
+            assert!(app.items[0].export_path.is_none());
+            assert_eq!(
+                app.items[0].status,
+                if error == "cancelled" {
+                    QueueStatus::Pending
+                } else {
+                    QueueStatus::Error
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_export_messages_and_file_mutations_cannot_replace_a_job() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        let job = app
+            .exports
+            .start(test_export(AfterExportAction::Nothing))
+            .unwrap();
+        let _ = app.update(Message::Export);
+        let _ = app.delete_now("a.mp4".into());
+        assert_eq!(app.exports.active().unwrap().id, job.id);
+        assert!(app.file_operations.is_empty());
+        let _ = app.update(Message::CancelExport);
+        assert!(job.cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn file_completions_update_queue_edits_and_cache_together() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        let old = "C:/clips/a.mp4";
+        let new = "C:/clips/renamed.mp4";
+        app.edit_store.insert(
+            old.into(),
+            host::StoredEdit {
+                tags: Some(vec!["keep".into()]),
+                ..Default::default()
+            },
+        );
+        app.media_cache.insert(
+            old.into(),
+            host::CachedMedia {
+                size_bytes: 12,
+                modified_ms: 34,
+                media: test_export(AfterExportAction::Nothing).media,
+                is_hdr: false,
+            },
+        );
+        app.file_operations.insert("a.mp4".into());
+        let _ = app.update(Message::FileOperationFinished(
+            FileOperation {
+                item_id: "a.mp4".into(),
+                path: old.into(),
+                mutation: FileMutation::Rename(new.into()),
+            },
+            Ok(()),
+        ));
+        assert_eq!(app.items[0].path, new);
+        assert!(app.known_paths.contains(new));
+        assert!(!app.known_paths.contains(old));
+        assert!(app.edit_store.contains_key(new));
+        assert!(!app.edit_store.contains_key(old));
+        assert!(app.media_cache.contains_key(new));
+        assert!(!app.media_cache.contains_key(old));
+        let _ = app.update(Message::FileOperationFinished(
+            FileOperation {
+                item_id: "a.mp4".into(),
+                path: new.into(),
+                mutation: FileMutation::Delete,
+            },
+            Ok(()),
+        ));
+        assert!(!app.items.iter().any(|item| item.id == "a.mp4"));
+        assert!(!app.edit_store.contains_key(new));
+        assert!(!app.media_cache.contains_key(new));
+    }
+
+    #[test]
+    fn file_failure_preserves_queue_and_surfaces_error() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        let _ = app.update(Message::FileOperationFinished(
+            FileOperation {
+                item_id: "a.mp4".into(),
+                path: "C:/clips/a.mp4".into(),
+                mutation: FileMutation::Delete,
+            },
+            Err("file in use".into()),
+        ));
+        assert!(app.items.iter().any(|item| item.id == "a.mp4"));
+        assert!(app.delete_error.as_ref().unwrap().contains("file in use"));
+    }
+
+    #[test]
+    fn export_cannot_overwrite_its_source_before_after_action() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        let mut request = test_export(AfterExportAction::Delete);
+        request.output_path = request.source.input.clone();
+        let _ = app.run_export_to(request);
+        assert!(app.exports.active().is_none());
+        assert!(app
+            .delete_error
+            .as_ref()
+            .unwrap()
+            .contains("source recording"));
+    }
     use iced::keyboard::{key::Named, Key, Modifiers};
 
     #[test]

@@ -18,6 +18,13 @@ encode-planning logic and are covered by unit tests.
 
 The `cargo test` suites assert exact behaviour, including the encode-planning + rate-control model.
 
+The desktop owns one export job independently of the selected editor (`jobs.rs`). File operations
+return typed completion messages that update the queue, edits, and media cache together. A single
+persistence worker saves snapshots in submission order (`persistence.rs`), and a per-editor preview
+worker opens and closes media handles outside the UI thread (`preview.rs`). Folder reconciliation
+rejects stale scans and probes (`discovery.rs`). CI runs tests for all three crates; the desktop's
+workflow and synthetic media tests do not require a hardware encoder.
+
 ## Build, test & run
 
 Requires a stable Rust toolchain and a shared **FFmpeg 8.x** dev build wired via the (gitignored)
