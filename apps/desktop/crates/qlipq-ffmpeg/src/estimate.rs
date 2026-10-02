@@ -10,7 +10,7 @@ use crate::args::ResolvedEncode;
 #[derive(Debug, Clone, PartialEq)]
 pub struct SizeEstimate {
     pub bytes: f64,
-    /// True when the figure is a quality-model ballpark (CRF/preset), not a hard target.
+    /// True when encoded content, rate control or mux overhead can change the final size.
     pub approximate: bool,
 }
 
@@ -44,7 +44,7 @@ pub fn estimate_export_size(media: &MediaInfo, spec: &EditSpec, encode: &Resolve
     if !reencoding {
         let source_duration = if media.duration_sec != 0.0 { media.duration_sec } else { duration };
         let source_size = media.size_bytes.unwrap_or(0) as f64;
-        return SizeEstimate { bytes: source_size * (duration / source_duration), approximate: false };
+        return SizeEstimate { bytes: source_size * (duration / source_duration), approximate: true };
     }
 
     // Output frame dimensions after crop + downscale.
@@ -68,13 +68,16 @@ pub fn estimate_export_size(media: &MediaInfo, spec: &EditSpec, encode: &Resolve
         }
     };
 
-    let audio_tracks = spec.audio_tracks.iter().filter(|t| t.enabled).count() as f64;
-    let audio_kbps = audio_tracks * parse_int_leading(encode.audio.bitrate.as_deref().unwrap_or("0"));
+    let audio_kbps = if spec.audio_tracks.iter().any(|t| t.enabled) {
+        parse_int_leading(encode.audio.bitrate.as_deref().unwrap_or("0"))
+    } else {
+        0.0
+    };
     let audio_bytes = audio_kbps * 1000.0 * duration / 8.0;
 
     if truthy(video.bitrate_kbps) {
         let bitrate_bytes = video.bitrate_kbps.unwrap() as f64 * 1000.0 * duration / 8.0;
-        return SizeEstimate { bytes: bitrate_bytes + audio_bytes, approximate: false };
+        return SizeEstimate { bytes: bitrate_bytes + audio_bytes, approximate: true };
     }
 
     let base = bpp_at_crf23(video.codec.as_deref().unwrap_or("libx264"));

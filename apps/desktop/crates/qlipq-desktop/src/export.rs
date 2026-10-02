@@ -217,7 +217,7 @@ fn export_transcode(
     let (mut vsrc, mut vsink) = build_video_filter(&vgraph, &vdec, tb_v, sar, &descr)?;
 
     // ---- prime: pull the first filtered frame to learn the output geometry + time base ----
-    let first = prime_video(&mut ictx, &mut vdec, vid_idx, &mut vsrc, &mut vsink)?;
+    let mut first = prime_video(&mut ictx, &mut vdec, vid_idx, &mut vsrc, &mut vsink)?;
     let out_w = first.width;
     let out_h = first.height;
     // The encoder time base is the buffersink's (the frame's own `time_base` field isn't populated).
@@ -234,8 +234,15 @@ fn export_transcode(
     };
 
     // ---- video encoder ----
+    let output_fps = fps
+        .map(|r| ffi::AVRational {
+            num: r as i32,
+            den: 1,
+        })
+        .or_else(|| ictx.streams()[vid_idx as usize].guess_framerate())
+        .unwrap_or_else(|| unsafe { ffi::av_d2q(media.fps, 1_000_000) });
     let mut venc = build_video_encoder(
-        &plan, out_w, out_h, sar, venc_tb, fps, ten_bit, is_hdr, src_color,
+        &plan, out_w, out_h, sar, venc_tb, output_fps, ten_bit, is_hdr, src_color,
     )?;
 
     // ---- audio: decoders + amix graph + AAC encoder ----
@@ -299,7 +306,7 @@ fn export_transcode(
 
     // ---- encode the primed frame, then run the main loop ----
     let venc_tb_secs = venc_tb.num as f64 / venc_tb.den.max(1) as f64;
-    encode_video_frame(&mut venc, Some(&first), &mut octx, venc_tb, v_out_tb, 0)?;
+    encode_video_frame(&mut venc, Some(&mut first), &mut octx, venc_tb, v_out_tb, 0)?;
     let mut last_v_secs = first.pts as f64 * venc_tb_secs;
 
     // Priming returns on the first filtered frame; finish draining its packet before sending more.
@@ -543,7 +550,7 @@ fn export_remux(
                     };
                     // Copy only video within the out-point; keep reading a little past it so the audio
                     // (capped by `atrim`) is complete before we stop.
-                    if pos_secs <= end {
+                    if pos_secs < end {
                         if pkt.pts != ffi::AV_NOPTS_VALUE {
                             pkt.set_pts(pkt.pts - start_ts);
                         }
@@ -712,7 +719,7 @@ fn build_video_encoder(
     h: i32,
     sar: ffi::AVRational,
     time_base: ffi::AVRational,
-    fps: Option<i64>,
+    fps: ffi::AVRational,
     ten_bit: bool,
     is_hdr: bool,
     src_color: (
@@ -735,12 +742,8 @@ fn build_video_encoder(
     });
     enc.set_sample_aspect_ratio(sar);
     enc.set_time_base(time_base);
-    if let Some(r) = fps {
-        enc.set_framerate(ffi::AVRational {
-            num: r as i32,
-            den: 1,
-        });
-    }
+    // The container time base is a timestamp unit, not the source frame interval.
+    enc.set_framerate(fps);
     enc.set_gop_size(120);
     unsafe {
         let p = enc.as_mut_ptr();
@@ -799,9 +802,9 @@ fn drain_filtered_video(
     let tb_secs = enc_tb.num as f64 / enc_tb.den.max(1) as f64;
     loop {
         match sink.buffersink_get_frame(None) {
-            Ok(frame) => {
+            Ok(mut frame) => {
                 *last_secs = frame.pts as f64 * tb_secs;
-                encode_video_frame(venc, Some(&frame), octx, enc_tb, out_tb, 0)?;
+                encode_video_frame(venc, Some(&mut frame), octx, enc_tb, out_tb, 0)?;
             }
             Err(RsmpegError::BufferSinkDrainError | RsmpegError::BufferSinkEofError) => break,
             Err(e) => return Err(format!("video filter output: {e:?}")),
@@ -812,19 +815,31 @@ fn drain_filtered_video(
 
 fn encode_video_frame(
     venc: &mut AVCodecContext,
-    frame: Option<&AVFrame>,
+    mut frame: Option<&mut AVFrame>,
     octx: &mut AVFormatContextOutput,
     enc_tb: ffi::AVRational,
     out_tb: ffi::AVRational,
     stream_index: i32,
 ) -> Result<(), String> {
-    venc.send_frame(frame)
+    if let Some(frame) = frame.as_mut() {
+        // Source I/P/B decisions must not override the output encoder's rate control and GOP.
+        frame.set_pict_type(ffi::AV_PICTURE_TYPE_NONE);
+    }
+    venc.send_frame(frame.as_deref())
         .map_err(|e| format!("video send_frame: {e:?}"))?;
     loop {
         match venc.receive_packet() {
             Ok(mut pkt) => {
                 pkt.set_stream_index(stream_index);
                 pkt.rescale_ts(enc_tb, out_tb);
+                if pkt.duration == 0 && venc.framerate.num > 0 && venc.framerate.den > 0 {
+                    // MP4 needs a duration for the final sample or it can drop the last frame.
+                    let interval = ffi::AVRational {
+                        num: venc.framerate.den,
+                        den: venc.framerate.num,
+                    };
+                    pkt.set_duration(unsafe { ffi::av_rescale_q(1, interval, out_tb) });
+                }
                 octx.interleaved_write_frame(&mut pkt)
                     .map_err(|e| format!("write video: {e:?}"))?;
             }
@@ -1042,9 +1057,12 @@ fn feed_decoder(
 ) -> Result<(), String> {
     loop {
         match decoder.receive_frame() {
-            Ok(frame) => source
-                .buffersrc_add_frame(Some(frame), None)
-                .map_err(|e| format!("{stream} filter input: {e:?}"))?,
+            Ok(frame) => match source.buffersrc_add_frame(Some(frame), None) {
+                Ok(()) => {}
+                // trim/atrim can finish before the decoder; still drain its remaining frames.
+                Err(RsmpegError::AVError(code)) if code == ffi::AVERROR_EOF => {}
+                Err(e) => return Err(format!("{stream} filter input: {e:?}")),
+            },
             Err(RsmpegError::DecoderDrainError | RsmpegError::DecoderFlushedError) => return Ok(()),
             Err(e) => return Err(format!("{stream} receive_frame: {e:?}")),
         }
@@ -1105,6 +1123,10 @@ fn dict_from(opts: &[(&str, String)]) -> Option<AVDictionary> {
     }
     dict
 }
+
+#[cfg(test)]
+#[path = "export_e2e.rs"]
+mod e2e_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1288,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_filter_input_fails_export() {
+    fn closed_filter_input_is_successful_eof() {
         let (mut input, _) = raw_video_input(ffi::AVERROR_EOF);
         let mut decoder = raw_video_decoder(&input);
         decoder.open(None).unwrap();
@@ -1304,8 +1326,8 @@ mod tests {
         source.buffersrc_add_frame(None, None).unwrap();
         let packet = read_export_packet(&mut input).unwrap().unwrap();
         send_decoder_packet(&mut decoder, Some(&packet), "video").unwrap();
-        let error = feed_decoder(&mut decoder, &mut source, "video").unwrap_err();
-        assert!(error.contains("video filter input"), "{error}");
+        feed_decoder(&mut decoder, &mut source, "video").unwrap();
+        assert!(matches!(decoder.receive_frame(), Err(RsmpegError::DecoderDrainError)));
     }
 
     #[test]

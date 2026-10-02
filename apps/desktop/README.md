@@ -40,6 +40,26 @@ cargo build --release -p qlipq-desktop        # the shippable binary (CI bundles
 
 Linux build deps (for the GUI crate): `libxkbcommon-dev libwayland-dev libgtk-3-dev`.
 
+### Export end-to-end test
+
+With the FFmpeg SDK configured and its runtime libraries on `PATH` (Windows) or `LD_LIBRARY_PATH`
+(Linux), run from `apps/desktop/`:
+
+```bash
+cargo test -p qlipq-desktop export_settings_e2e -- --ignored --nocapture
+```
+
+This requires a working hardware encoder and fails if one is unavailable. It generates a six-second
+lossless moving test clip in-process, exports through `run_export`, probes each output and decodes
+every frame. It checks trim duration, frame counts, source/30 fps, downscaling, H.264/H.265, MP4/MKV,
+Original stream-copy, quality changes, the VBR ceiling, and target-bitrate size estimates (25%
+tolerance for the controlled fixture). It also checks that Original forced to re-encode matches High
+and custom quality 18. Quality-based sizes are reported for comparison, not asserted as exact.
+
+Outputs remain in `target/export-e2e/<process-id>/` for inspection. The test is ignored by default
+because ordinary CI runners have no hardware encoder; CI still compiles it. It has been exercised
+on NVIDIA NVENC; AMD/Intel execution requires the corresponding hardware.
+
 ## Media engine (libav)
 
 There is no cross-platform native video widget, so the preview decodes frames itself and uploads them

@@ -32,12 +32,11 @@ pub struct ResolvedEncode {
     pub reencode: bool,
 }
 
-fn preset_crf(preset: QualityPreset) -> i64 {
+pub(crate) fn preset_crf(preset: QualityPreset) -> i64 {
     match preset {
-        QualityPreset::High => 18,
+        QualityPreset::High | QualityPreset::Original => 18,
         QualityPreset::Balanced => 23,
         QualityPreset::Small => 28,
-        QualityPreset::Original => 23,
     }
 }
 
@@ -78,14 +77,9 @@ pub fn output_settings_to_encode(output: &OutputSettings, media: &MediaInfo) -> 
             true
         }
         QualityMode::Preset => {
-            if output.quality_preset == QualityPreset::Original {
-                // Stream-copy by default; this crf only applies if an edit forces a re-encode.
-                video.crf = Some(18);
-                false
-            } else {
-                video.crf = Some(preset_crf(output.quality_preset));
-                true
-            }
+            // Original uses this quality only when an edit forces a re-encode.
+            video.crf = Some(preset_crf(output.quality_preset));
+            output.quality_preset != QualityPreset::Original
         }
     };
 
@@ -93,7 +87,7 @@ pub fn output_settings_to_encode(output: &OutputSettings, media: &MediaInfo) -> 
         video,
         audio: AudioEncodeOptions {
             codec: Some("aac".to_string()),
-            bitrate: Some(format!("{}k", output.audio_bitrate_kbps)),
+            bitrate: Some(format!("{}k", output.audio_bitrate_kbps.max(64))),
         },
         reencode,
     }
