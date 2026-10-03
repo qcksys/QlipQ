@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3](https://github.com/qcksys/QlipQ/compare/v0.1.2...v0.1.3) (2026-10-03)
+
+
+### Features
+
+* add Windows startup and minimized launch options ([#17](https://github.com/qcksys/QlipQ/issues/17)) ([b695925](https://github.com/qcksys/QlipQ/commit/b695925920372bb93326e74a4280c1eef9f4f31b))
+
+
+### Bug Fixes
+
+* align export settings and size estimates ([#16](https://github.com/qcksys/QlipQ/issues/16)) ([9ebe314](https://github.com/qcksys/QlipQ/commit/9ebe31453ec967b86af38b72edfa21b335541b69))
+* isolate desktop jobs and reconcile recording state ([#13](https://github.com/qcksys/QlipQ/issues/13)) ([d94f289](https://github.com/qcksys/QlipQ/commit/d94f28923209d7ccf8369bc41f10a9d38ed40d8d))
+
 ## [0.1.2](https://github.com/qcksys/QlipQ/compare/v0.1.1...v0.1.2) (2026-07-01)
 
 
