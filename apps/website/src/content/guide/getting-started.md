@@ -35,6 +35,10 @@ The editor shows an estimated file size for the current clip, and you can overri
 
 ## 4. Edit and export
 
+Use **Sort** above the clip list to order recordings by **newest/oldest**, **name A–Z/Z–A**, **shortest/longest**, or **largest/smallest**. Newest first is the default and uses the recording date when available, otherwise the file's modified date. Sorting works with the current filters and does not change the selected clip or its edits. The sort choice lasts for the current session; clips whose duration or size is still loading appear after clips with known values.
+
+Each clip has a thumbnail that loads when its card comes into view. **Hover over a clip card** briefly to play a muted preview in its thumbnail; leaving the card restores the still image. Only one hover preview plays at a time, and it loops through the original recording without moving the editor's playhead or changing the selected clip. Clicking the thumbnail opens the clip in the editor as usual.
+
 1. Pick a clip from the **Queue** (each shows its date, length, and size). A **filter bar** is pinned to the top of the queue: search by filename and narrow the list by **status**, **game** (the `{source}` label), **tag**, or **highlights** (all clips / only highlights / hide them). When any filter is active it shows how many clips match and offers **Clear filters** to reset. By default a clip **starts playing** as soon as it's selected — turn this off with **Settings → Playback → Play clips automatically when selected** to open clips paused.
 2. Set the **in/out** points on the timeline — the scrubber highlights the in/out window and marks each endpoint, and **playback loops within it** (pressing play jumps to the in-point and loops back when it reaches the out-point). Each point has an editable timestamp with **±0.5 / ±1 / ±5 s** nudge buttons, or press **Set** (or the **I**/**O** keys) to capture the current playhead. Type a timestamp in the playhead field to jump, drag the scrubber (playback keeps going if it was already playing), or use the −60/−5/−1 / +1/+5/+60 second jump buttons. Timestamps read as frame-accurate timecode — **`h:mm:ss.ff`**, where `ff` is the frame within the second — so a single **←**/**→** step changes the last digits by one.
 3. **Keyboard shortcuts** default to Adobe Premiere Pro — **Space** play/pause, **I**/**O** set in/out, **←**/**→** step a frame, **Shift+←**/**→** jump 5 s, **Home**/**End** go to start/end, **Ctrl+M** export — and are rebindable in **Settings → Editor shortcuts**. With a clip selected, **Delete** removes its file from disk after a confirmation (**Enter** confirms the prompt) and **Shift+Delete** removes it immediately without asking.
@@ -45,5 +49,24 @@ The editor shows an estimated file size for the current clip, and you can overri
 > **Preview vs. export.** The preview decodes frames in-process and tonemaps HDR sources to SDR for display — it's a visual guide, and **exports always use the original file, untouched**. Its sharpness is set by **Settings → Preview quality** (720p / 1080p / 1440p / Source; default 1080p) — higher is sharper but costs more decode/GPU work, so lower it if playback stutters. If an HDR clip (especially a Windows HDR _desktop_ recording) previews too dark, **Settings → HDR preview → Brightness** lifts it with an adjustable gamma (higher = brighter; `1.0` = off; **Reset** restores the default). Both affect the preview only.
 
 > **Diagnosing preview stutter.** If the preview stutters or the audio drops out, enable **Settings → Playback → Show debug panel in the editor**. The panel adds a **Debug** card under the editor showing the clip's details, whether it's decoding on the **GPU (hardware)** or in **software**, and — while playing — live **video/audio buffer** levels, dropped frames, and audio underruns. Software decoding of heavy 1440p/4K AV1/HEVC is the usual cause; it never affects exports.
+
+## Suggest a highlight trim
+
+Highlight suggestions are optional and run through a **local Ollama vision model**. Install [Ollama](https://ollama.com/download), start it, and download the default model:
+
+```sh
+ollama pull qwen3-vl:4b
+```
+
+Qwen3-VL requires Ollama 0.12.7 or newer. You can choose another installed local vision model in **Settings → Highlight suggestions**. QlipQ connects to Ollama at `127.0.0.1:11434`; it does not download models automatically and rejects cloud models.
+
+1. Open a clip and find **Highlight suggestion** below the In/Out controls.
+2. Describe what to find, such as “a multi-kill” or “a successful boss fight”, then click **Suggest highlight**. Playback pauses while analysis starts. Longer recordings are analyzed in overlapping sections; the section count shows progress. **Cancel** or selecting another clip stops analysis.
+3. Review the suggested range and its description. Your current trim stays unchanged until you click **Apply trim**. **Dismiss** keeps your existing edit.
+4. Applying the suggestion adds up to **3 seconds of lead-in** and **2 seconds of aftermath**, bounded by the original clip. Adjust the normal In/Out controls, preview the result, and export when ready. The applied trim is saved like any other edit.
+
+This is an experimental suggestion: analysis samples video at roughly one frame per second in 30-second sections with a 5-second overlap. QlipQ requests a 32K-token context to fit the sampled frames, which needs more memory than a short chat. It does not analyze audio and may miss brief action, jokes, or events that require game-specific context. It may report no clear highlight. Accuracy and speed depend on the model, your hardware, and the recording; review every suggested trim.
+
+If Ollama is unavailable or the model is missing, the editor shows an error with setup instructions. A failed or cancelled analysis leaves your current trim unchanged.
 
 **Next:** [set up the OBS replay buffer](/guide/obs-replay-buffer).

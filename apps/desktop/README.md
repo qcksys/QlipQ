@@ -55,6 +55,23 @@ forced (crop/scale/fps or a non-Original quality), else `export_remux` (lossless
 audio still mixes down via the filtergraph). Enabled audio tracks are summed into one track at the set
 levels (matching the preview monitor mix).
 
+## Highlight suggestions
+
+The editor can suggest an editable trim using a locally installed Ollama vision model (default
+`qwen3-vl:4b`). Start Ollama and run `ollama pull qwen3-vl:4b`; choose a different installed local
+vision model in Settings. No model is bundled or automatically downloaded. The HTTP client connects
+only to `127.0.0.1:11434`, bypasses proxies/redirects, and checks that the model is local and supports
+vision before sending frames.
+
+`highlight.rs` samples frames with the existing in-process `ScrubDecoder`, then sends timestamped
+images to Ollama's `/api/chat` with a response schema derived from the core highlight types. Analysis
+uses 30-second windows with 5-second overlap and roughly one sample per second. The highest-scoring
+event becomes a suggested trim with 3 seconds before and 2 seconds after it. Timing validation,
+window planning, and padding live in `qlipq-core::highlight`. The user must apply the suggestion;
+existing crop/audio edits are preserved. Cancellation or switching clips invalidates pending results.
+
+This initial implementation analyzes visual samples only. Gameplay accuracy has not been benchmarked.
+
 ## Data compatibility
 
 Config and per-clip edits live in the **same** location and format as the other apps —

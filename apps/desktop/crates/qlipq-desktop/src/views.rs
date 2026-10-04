@@ -36,7 +36,7 @@ impl App {
         all_games.sort();
         all_games.dedup();
 
-        let visible: Vec<&QueueItem> = self.items.iter().filter(|i| f.matches(i, self.is_highlight(&i.path))).collect();
+        let visible = self.sorted_queue();
         let active = f.is_active(HighlightFilter::from_hidden(self.config.hide_highlights));
 
         let mut col = column![].spacing(theme::SM).padding(theme::MD);
@@ -82,6 +82,13 @@ impl App {
             }
             header = header.push(selectors);
         }
+        header = header.push(
+            row![
+                text("Sort").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                pick_list(QueueSort::ALL, Some(self.queue_sort), Message::QueueSortChanged)
+                    .style(theme::pick_list_style).width(Length::Fill),
+            ].spacing(theme::SM).align_y(iced::Alignment::Center),
+        );
         if active {
             header = header.push(
                 row![
@@ -112,9 +119,12 @@ impl App {
             col = col.push(container(empty).width(Length::Fill).height(Length::Fill).padding(theme::XL).center_x(Length::Fill).center_y(Length::Fill));
         } else {
             // Right padding keeps the cards (and their Delete buttons) clear of the scrollbar.
-            let mut list = column![].spacing(theme::SM).padding(iced::Padding::from(0.0).right(theme::MD));
+            let mut list = iced::widget::keyed::Column::new().spacing(theme::SM).padding(iced::Padding::from(0.0).right(theme::MD));
             for item in visible {
-                list = list.push(self.queue_card(item));
+                use std::hash::{Hash, Hasher};
+                let mut key = std::hash::DefaultHasher::new();
+                item.id.hash(&mut key);
+                list = list.push(key.finish(), self.queue_card(item));
             }
             col = col.push(scrollable(list).height(Length::Fill));
         }
@@ -136,12 +146,14 @@ impl App {
             header = header.push(chip("Highlight".to_string()));
         }
         let open = button(
-            column![
-                header,
-                text(meta_line(item)).size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
-                text(status_label(status)).size(theme::SMALL).font(theme::FONT_MEDIUM).style(move |t| text::Style { color: Some(theme::status_color(t, status)) }),
-            ]
-            .spacing(theme::XS),
+            row![
+                self.queue_thumbnail(item),
+                column![
+                    header,
+                    text(meta_line(item)).size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                    text(status_label(status)).size(theme::SMALL).font(theme::FONT_MEDIUM).style(move |t| text::Style { color: Some(theme::status_color(t, status)) }),
+                ].spacing(theme::XS).width(Length::Fill),
+            ].spacing(theme::SM).align_y(iced::Alignment::Center),
         )
         .width(Length::Fill)
         .padding([theme::XS, 0.0])
@@ -173,10 +185,36 @@ impl App {
         card = card.push(actions);
 
         let hovered = self.hovered_card.as_deref() == Some(item.id.as_str());
-        mouse_area(container(card).padding(theme::SM).style(theme::queue_card(selected, hovered)))
+        let id = item.id.clone();
+        sensor(mouse_area(container(card).padding(theme::SM).style(theme::queue_card(selected, hovered)))
             .on_enter(Message::HoverCard(item.id.clone()))
-            .on_exit(Message::HoverLeave(item.id.clone()))
+            .on_exit(Message::HoverLeave(item.id.clone())))
+            .key(item.id.clone())
+            .on_show(move |_| Message::CardVisible(id.clone(), true))
+            .on_hide(Message::CardVisible(item.id.clone(), false))
             .into()
+    }
+
+    fn queue_thumbnail(&self, item: &QueueItem) -> Element<'_, Message> {
+        let preview: Element<Message> = if let Some(preview) = self.queue_preview.as_ref()
+            .filter(|preview| preview.id == item.id && preview.has_frame())
+        {
+            let w = queue_preview::WIDTH.min(queue_preview::HEIGHT * preview.aspect);
+            let h = w / preview.aspect;
+            shader(video::VideoProgram::<true>::new(preview.frame.clone()))
+                .width(w).height(h).into()
+        } else if let Some(Some(handle)) = self.thumbnails.get(&item.id) {
+            iced::widget::image(handle.clone())
+                .width(queue_preview::WIDTH).height(queue_preview::HEIGHT)
+                .content_fit(iced::ContentFit::Contain).into()
+        } else {
+            text("Preview").size(theme::SMALL)
+                .style(|t| text::Style { color: Some(theme::muted(t)) }).into()
+        };
+        let thumbnail = container(preview).center_x(queue_preview::WIDTH).center_y(queue_preview::HEIGHT)
+            .style(|_| container::Style { background: Some(iced::Color::BLACK.into()), ..Default::default() })
+            .into();
+        with_tip(thumbnail, "Hover to play a muted preview".into())
     }
 
     fn editor_view(&self) -> Element<'_, Message> {
@@ -242,7 +280,7 @@ impl App {
             length,
         ]
         .spacing(theme::XS);
-        let timeline = column![scrub, time_row, inout].spacing(theme::SM);
+        let timeline = column![scrub, time_row, inout, self.highlight_section(ed)].spacing(theme::SM);
 
         // Options laid out in two columns: media edits (crop, audio) on the left, output + metadata
         // (quality override, tags) on the right. The two toggle cards (Crop, Override) head each column.
@@ -389,6 +427,41 @@ impl App {
             .padding(theme::MD)
             .style(theme::card)
             .into()
+    }
+
+    fn highlight_section<'a>(&self, ed: &'a Editor) -> Element<'a, Message> {
+        let mut query = text_input("Describe the highlight to find", &ed.highlight_query).style(theme::input);
+        if ed.highlight_job.is_none() {
+            query = query.on_input(Message::HighlightQuery);
+        }
+        let mut controls = row![query].spacing(theme::SM).align_y(iced::Alignment::Center);
+        if let Some(job) = &ed.highlight_job {
+            controls = controls.push(button(text("Cancel").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::CancelHighlight));
+            let current = job.section.load(Ordering::Relaxed);
+            let status = if current == 0 { "Checking local model…".into() } else { format!("Analyzing section {current} of {}…", job.total) };
+            return column![text("Highlight suggestion").size(theme::LABEL).font(theme::FONT_MEDIUM), controls, text(status).size(theme::SMALL)]
+                .spacing(theme::XS).into();
+        }
+        controls = controls.push(
+            button(text("Suggest highlight").size(theme::LABEL))
+                .style(theme::btn_secondary)
+                .on_press_maybe((!ed.exporting && !ed.highlight_query.trim().is_empty()).then_some(Message::SuggestHighlight)),
+        );
+        let mut body = column![text("Highlight suggestion").size(theme::LABEL).font(theme::FONT_MEDIUM), controls].spacing(theme::XS);
+        if let Some(suggestion) = &ed.highlight_suggestion {
+            let fps = ed_fps(ed);
+            body = body.push(text(format!("Suggested: {} – {} · {}", format_timestamp(suggestion.trim.start_sec, fps), format_timestamp(suggestion.trim.end_sec, fps), suggestion.reason)).size(theme::LABEL));
+            body = body.push(text("Includes 3 seconds before and 2 seconds after the event, within the clip.").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }));
+            body = body.push(row![
+                button(text("Apply trim").size(theme::LABEL)).style(theme::btn_secondary).on_press_maybe((!ed.exporting).then_some(Message::ApplyHighlight)),
+                button(text("Dismiss").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::DismissHighlight),
+            ].spacing(theme::SM));
+        } else if let Some(status) = &ed.highlight_status {
+            body = body.push(text(status).size(theme::SMALL));
+        } else {
+            body = body.push(text("Uses your local Ollama vision model. Review the suggestion before applying it.").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }));
+        }
+        body.into()
     }
 
     /// The preview expanded to fill the window, with a transport + exit bar pinned to the bottom.
@@ -669,6 +742,12 @@ impl App {
             section("Output defaults", column![quality, encode_row, rate_row].spacing(theme::SM).into()),
             section("Preview quality", preview_quality.into()),
             section("Playback", playback.into()),
+            section("Highlight suggestions", column![
+                text("Local Ollama vision model").size(theme::LABEL),
+                text_input("qwen3-vl:4b", &self.config.highlight_model).on_input(Message::HighlightModelChanged).style(theme::input),
+                text("Install and start Ollama, then run: ollama pull qwen3-vl:4b").size(theme::SMALL),
+                text("Analysis uses sampled video frames on this computer. It can miss fast action and does not listen to audio. Cloud models are not supported.").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+            ].spacing(theme::XS).into()),
             section(
                 "Naming template",
                 column![
@@ -875,7 +954,7 @@ fn preview_pane<'a>(ed: &'a Editor, media: &MediaInfo, height: Length) -> Elemen
         }
         let s = (bounds.width / vw).min(bounds.height / vh);
         let (w, h) = ((vw * s).max(1.0), (vh * s).max(1.0));
-        container(shader(video::VideoProgram::new(frame.clone())).width(Length::Fixed(w)).height(Length::Fixed(h)))
+        container(shader(video::VideoProgram::<false>::new(frame.clone())).width(Length::Fixed(w)).height(Length::Fixed(h)))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into()
