@@ -65,8 +65,11 @@ vision before sending frames.
 
 `highlight.rs` samples frames with the existing in-process `ScrubDecoder`, then sends timestamped
 images to Ollama's `/api/chat` with a response schema derived from the core highlight types. Analysis
-uses 30-second windows with 5-second overlap and roughly one sample per second. The highest-scoring
-event becomes a suggested trim with 3 seconds before and 2 seconds after it. Timing validation,
+uses 30-second windows with 5-second overlap and roughly one sample per second at up to 1280 × 720
+to retain HUD detail. The prompt scores execution quality as well as the event: consecutive aimed
+headshots should outrank routine multi-kills, and cumulative kill-streak banners are not new kills.
+It asks for the complete action sequence. The highest-scoring event becomes a suggested trim with
+3 seconds before and 2 seconds after it. Timing validation,
 window planning, and padding live in `qlipq-core::highlight`. The user must apply the suggestion;
 existing crop/audio edits are preserved. Cancellation or switching clips invalidates pending results.
 
@@ -75,6 +78,15 @@ Requests reserve a 40K-token context and 4,096 output tokens, including any thin
 produce actionable errors instead of being treated as invalid JSON or a negative detection.
 
 This initial implementation analyzes visual samples only. Gameplay accuracy has not been benchmarked.
+The model can still misread HUD details, misdescribe the event, or choose the wrong range.
+
+To evaluate a labelled recording against the local model and the real detection pipeline, set
+`QLIPQ_TEST_INPUT` to its path and `QLIPQ_HIGHLIGHT_EXPECT_START` / `QLIPQ_HIGHLIGHT_EXPECT_END`
+to the expected event's first/last seconds, then run
+`cargo test -p qlipq-desktop local_highlight_covers_expected_event -- --ignored --nocapture`.
+This opt-in test requires Ollama and the default model. It checks that the selected trim contains
+the labelled event without passing simply by selecting the whole recording; it does not validate
+the model's prose or establish accuracy on other clips.
 
 ## Data compatibility
 

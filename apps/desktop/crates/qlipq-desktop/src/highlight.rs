@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use iced::futures::future::{select, Either};
-use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
+use image::{
+    codecs::png::{CompressionType, FilterType, PngEncoder},
+    ExtendedColorType, ImageEncoder,
+};
 use qlipq_core::highlight::{
     analysis_windows, detection_schema, AnalysisWindow, HighlightDetection, HighlightSuggestion,
 };
@@ -176,7 +179,7 @@ fn sample_window(
     cancel: &AtomicBool,
 ) -> Result<Vec<Sample>, String> {
     let max_height =
-        ((512.0 * media.height as f64 / media.width as f64).floor() as i64).clamp(2, 288);
+        ((1280.0 * media.height as f64 / media.width as f64).floor() as i64).clamp(2, 720);
     let mut decoder = crate::libav::ScrubDecoder::open(
         path,
         media.width,
@@ -197,7 +200,7 @@ fn sample_window(
             .frame_at(time)
             .ok_or_else(|| format!("Could not decode a highlight sample at {time:.1}s."))?;
         let mut png = Vec::new();
-        PngEncoder::new(&mut png)
+        PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Sub)
             .write_image(&rgba, w, h, ExtendedColorType::Rgba8)
             .map_err(|e| format!("Could not encode a highlight sample: {e}"))?;
         samples.push(Sample {
@@ -239,7 +242,7 @@ fn chat_body(model: &str, query: &str, window: AnalysisWindow, samples: &[Sample
     let timestamps = samples
         .iter()
         .enumerate()
-        .map(|(i, sample)| format!("image {} = {:.3}s", i + 1, sample.time))
+        .map(|(i, sample)| format!("image {} = {}s", i + 1, sample.time))
         .collect::<Vec<_>>()
         .join(", ");
     json!({
@@ -253,15 +256,22 @@ fn chat_body(model: &str, query: &str, window: AnalysisWindow, samples: &[Sample
             "role": "user",
             "content": format!(
                 "These images are chronological samples from a gameplay recording, one per second. \
-                 This section lasts {:.3} seconds. Image timestamps relative to this section: {timestamps}. \
-                 Find the single most noteworthy visible event matching this request: {query}. \
-                 Return JSON with event=null if there is no visible highlight (menus, waiting, ordinary traversal). \
-                 Otherwise return event with startSec, endSec, score, reason. Times must be seconds relative \
-                 to THIS section, between 0 and {:.3}, with endSec >= startSec. Use equal times for a \
-                 single instant such as a kill notification. Include the event itself; \
-                 do not add lead-in or aftermath. Score interest consistently from 1 to 100: \
-                 20 ordinary action, 50 a clear success, 80 a multi-kill/clutch, 100 an exceptional play. \
-                 Give a brief reason based only on visible evidence. Do not invent off-screen events or audio.",
+                 This section lasts {} seconds. Image timestamps relative to this section: {timestamps}. \
+                 Inspect ALL images before choosing the strongest complete play matching this request: {query}. \
+                 Return JSON with event=null if no highlight is visible. \
+                 Otherwise return event with startSec, endSec, score, reason. Times must be relative \
+                 to THIS section between 0 and {} with endSec >= startSec. Include the whole action sequence from \
+                 the first elimination to the last, not just a notification after the event. \
+                 Do not add lead-in or aftermath. Score interest consistently: \
+                 20 ordinary action, 40 a routine elimination, 60 a routine multi-kill, \
+                 80 multiple precise aimed eliminations such as consecutive headshots, \
+                 90 a decisive clutch or unusually difficult play, 100 an exceptional play. \
+                 Prefer skilled execution over routine or assisted kills even when both show the same multi-kill banner. \
+                 Credit only the POV player's distinct eliminations, not teammate kills, assists, \
+                 or repeated entries in the kill feed. Persistent cumulative kill-streak banners \
+                 do not prove multiple new kills in this section. Do not infer an elimination from aiming or firing alone. \
+                 Give a brief reason based only on visible evidence, including what makes this play stand out. \
+                 Do not invent off-screen events or audio.",
                 window.end_sec - window.start_sec, window.end_sec - window.start_sec
             ),
             "images": samples.iter().map(|s| &s.image).collect::<Vec<_>>()
@@ -317,6 +327,44 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    #[ignore = "requires a local recording, labelled event range, and Ollama"]
+    fn local_highlight_covers_expected_event() {
+        let path = std::env::var("QLIPQ_TEST_INPUT").expect("set QLIPQ_TEST_INPUT");
+        let expected_start: f64 = std::env::var("QLIPQ_HIGHLIGHT_EXPECT_START")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let expected_end: f64 = std::env::var("QLIPQ_HIGHLIGHT_EXPECT_END")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(expected_end > expected_start);
+        let (media, is_hdr) = crate::libav::probe(&path).unwrap();
+        let result = runtime()
+            .block_on(detect(
+                HighlightRequest {
+                    path,
+                    media,
+                    is_hdr,
+                    gamma: 1.0,
+                    model: qlipq_core::config::AppConfig::default().highlight_model,
+                    query: "A multi-kill, clutch, impressive play, or funny gameplay moment".into(),
+                },
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .unwrap()
+            .unwrap();
+        eprintln!("Selected highlight: {result:?}");
+        assert!(result.trim.start_sec <= expected_start, "{result:?}");
+        assert!(result.trim.end_sec >= expected_end, "{result:?}");
+        assert!(
+            result.trim.end_sec - result.trim.start_sec <= expected_end - expected_start + 10.0,
+            "{result:?}"
+        );
+    }
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -483,13 +531,13 @@ mod tests {
             assert!(output_budget >= 4096);
             assert!(
                 body["options"]["num_ctx"].as_u64().unwrap()
-                    >= images.len() as u64 * 1034 + 2048 + output_budget
+                    >= images.len() as u64 * 1100 + 2048 + output_budget
             );
             let png = STANDARD.decode(images[0].as_str().unwrap()).unwrap();
             let image = image::load_from_memory(&png).unwrap();
             assert_eq!((image.width(), image.height()), (64, 36));
             let prompt = body["messages"][0]["content"].as_str().unwrap();
-            assert!(prompt.contains("image 1 = 0.500s"));
+            assert!(prompt.contains("image 1 = 0.5s"));
             assert!(prompt.contains("a multi-kill"));
             let event = if index == 1 {
                 json!({"startSec": 10, "endSec": 11, "score": 60, "reason": "First event"})
@@ -561,6 +609,35 @@ mod tests {
                 None => assert!(result.unwrap().event.is_none()),
             }
         }
+    }
+
+    #[test]
+    fn preserves_hud_detail_in_highlight_samples() {
+        let path =
+            std::env::temp_dir().join(format!("qlipq-highlight-hud-{}.y4m", std::process::id()));
+        let mut video = b"YUV4MPEG2 W1280 H720 F2:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        video.extend(std::iter::repeat_n(128, 1280 * 720 * 3 / 2));
+        std::fs::write(&path, video).unwrap();
+        let mut request = request(path.to_string_lossy().into_owned());
+        request.media.width = 1280;
+        request.media.height = 720;
+        request.media.duration_sec = 0.5;
+        let samples = sample_window(
+            &request.path,
+            &request.media,
+            false,
+            1.0,
+            AnalysisWindow {
+                start_sec: 0.0,
+                end_sec: 0.5,
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(path);
+        let png = STANDARD.decode(&samples[0].image).unwrap();
+        let image = image::load_from_memory(&png).unwrap();
+        assert_eq!((image.width(), image.height()), (1280, 720));
     }
 
     #[test]
