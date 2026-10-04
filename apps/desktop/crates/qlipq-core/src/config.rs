@@ -214,7 +214,7 @@ impl Default for AppConfig {
             autoplay: true,
             debug: false,
             hide_highlights: false,
-            highlight_model: "qwen3-vl:4b".into(),
+            highlight_model: "qwen3-vl:4b-instruct".into(),
             after_export: AfterExportSettings::default(),
             output: OutputSettings::default(),
             keybinds: Keybinds::default(),

@@ -744,8 +744,8 @@ impl App {
             section("Playback", playback.into()),
             section("Highlight suggestions", column![
                 text("Local Ollama vision model").size(theme::LABEL),
-                text_input("qwen3-vl:4b", &self.config.highlight_model).on_input(Message::HighlightModelChanged).style(theme::input),
-                text("Install and start Ollama, then run: ollama pull qwen3-vl:4b").size(theme::SMALL),
+                text_input("qwen3-vl:4b-instruct", &self.config.highlight_model).on_input(Message::HighlightModelChanged).style(theme::input),
+                text("Install and start Ollama, then run: ollama pull qwen3-vl:4b-instruct").size(theme::SMALL),
                 text("Analysis uses sampled video frames on this computer. It can miss fast action and does not listen to audio. Cloud models are not supported.").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
             ].spacing(theme::XS).into()),
             section(

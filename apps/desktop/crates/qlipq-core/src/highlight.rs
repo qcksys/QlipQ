@@ -94,7 +94,7 @@ impl HighlightEvent {
             || !self.start_sec.is_finite()
             || !self.end_sec.is_finite()
             || self.start_sec < 0.0
-            || self.end_sec <= self.start_sec
+            || self.end_sec < self.start_sec
             || self.end_sec > window.end_sec - window.start_sec
             || !(1..=100).contains(&self.score)
             || self.reason.trim().is_empty()

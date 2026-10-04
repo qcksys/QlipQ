@@ -162,7 +162,7 @@ fn validate_model(info: &Value) -> Result<(), String> {
         .as_array()
         .is_some_and(|caps| caps.iter().any(|c| c == "vision"))
     {
-        return Err("The selected Ollama model cannot read images. Install qwen3-vl:4b or choose another local vision model.".into());
+        return Err("The selected Ollama model cannot read images. Install qwen3-vl:4b-instruct or choose another local vision model.".into());
     }
     Ok(())
 }
@@ -216,7 +216,7 @@ async fn post_json(
 ) -> Result<Value, String> {
     let response = client.post(format!("{base}/api/{route}")).json(&body).send().await.map_err(|e| {
         if e.is_connect() {
-            "Cannot reach Ollama. Start Ollama locally, then run `ollama pull qwen3-vl:4b` and try again.".into()
+            "Cannot reach Ollama. Start Ollama locally, then run `ollama pull qwen3-vl:4b-instruct` and try again.".into()
         } else if e.is_timeout() {
             "Ollama took longer than five minutes for one section. Try a smaller vision model or a shorter clip.".into()
         } else {
@@ -247,7 +247,8 @@ fn chat_body(model: &str, query: &str, window: AnalysisWindow, samples: &[Sample
         "stream": false,
         "think": false,
         "format": detection_schema(),
-        "options": { "temperature": 0, "num_ctx": 32768, "num_predict": 512 },
+        // Some local models still emit thinking with think=false; leave room for the final JSON.
+        "options": { "temperature": 0, "num_ctx": 40960, "num_predict": 4096 },
         "messages": [{
             "role": "user",
             "content": format!(
@@ -256,7 +257,8 @@ fn chat_body(model: &str, query: &str, window: AnalysisWindow, samples: &[Sample
                  Find the single most noteworthy visible event matching this request: {query}. \
                  Return JSON with event=null if there is no visible highlight (menus, waiting, ordinary traversal). \
                  Otherwise return event with startSec, endSec, score, reason. Times must be seconds relative \
-                 to THIS section, between 0 and {:.3}, with endSec > startSec. Include the event itself; \
+                 to THIS section, between 0 and {:.3}, with endSec >= startSec. Use equal times for a \
+                 single instant such as a kill notification. Include the event itself; \
                  do not add lead-in or aftermath. Score interest consistently from 1 to 100: \
                  20 ordinary action, 50 a clear success, 80 a multi-kill/clutch, 100 an exceptional play. \
                  Give a brief reason based only on visible evidence. Do not invent off-screen events or audio.",
@@ -283,6 +285,8 @@ async fn query_window(
     struct Response {
         message: Message,
         done: bool,
+        #[serde(default)]
+        done_reason: Option<String>,
     }
 
     let response = post_json(
@@ -297,7 +301,14 @@ async fn query_window(
     if !response.done {
         return Err("Ollama did not finish analyzing this section. Try again.".into());
     }
-    serde_json::from_str(&response.message.content)
+    if response.done_reason.as_deref() == Some("length") {
+        return Err("Ollama reached its output limit before finishing the highlight answer. Try a shorter clip or choose a local non-thinking vision model in Settings → Highlight suggestions.".into());
+    }
+    let content = response.message.content.trim();
+    if content.is_empty() {
+        return Err("Ollama returned an empty answer. Try again or choose another local vision model in Settings → Highlight suggestions.".into());
+    }
+    serde_json::from_str(content)
         .map_err(|e| format!("The model did not return a valid highlight: {e}"))
 }
 
@@ -312,6 +323,71 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn empty_answer_at_output_limit_reports_the_cause_instead_of_json_eof() {
+        let (url, server) = mock_ollama(1, |_, _, _| {
+            (
+                200,
+                json!({
+                    "done": true, "done_reason": "length", "eval_count": 512,
+                    "message": {"role": "assistant", "content": "", "thinking": "Still analyzing the frames"}
+                }),
+            )
+        });
+        let error = runtime()
+            .block_on(query_window(
+                &client().unwrap(),
+                &url,
+                "qwen3-vl:4b",
+                "a highlight",
+                AnalysisWindow {
+                    start_sec: 0.0,
+                    end_sec: 1.0,
+                },
+                &[],
+            ))
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("output limit"), "{error}");
+        assert!(!error.contains("EOF"), "{error}");
+    }
+
+    #[test]
+    fn rejects_empty_and_truncated_answers_without_using_thinking_as_a_highlight() {
+        for (reason, content, expected) in [
+            ("stop", "", "empty answer"),
+            ("stop", " \n\t", "empty answer"),
+            ("length", "{\"event\":", "output limit"),
+            ("length", "{\"event\":null}", "output limit"),
+        ] {
+            let (url, server) = mock_ollama(1, move |_, _, _| {
+                (
+                    200,
+                    json!({
+                        "done": true, "done_reason": reason,
+                        "message": {"content": content, "thinking": "{\"event\":null}"}
+                    }),
+                )
+            });
+            let error = runtime()
+                .block_on(query_window(
+                    &client().unwrap(),
+                    &url,
+                    "test",
+                    "action",
+                    AnalysisWindow {
+                        start_sec: 0.0,
+                        end_sec: 1.0,
+                    },
+                    &[],
+                ))
+                .unwrap_err();
+            server.join().unwrap();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("EOF"), "{error}");
+        }
     }
 
     fn mock_ollama(
@@ -376,7 +452,7 @@ mod tests {
             },
             is_hdr: false,
             gamma: 1.0,
-            model: "qwen3-vl:4b".into(),
+            model: "qwen3-vl:4b-instruct".into(),
             query: "a multi-kill".into(),
         }
     }
@@ -392,7 +468,7 @@ mod tests {
         }
         std::fs::write(&path, video).unwrap();
         let (url, server) = mock_ollama(3, |index, headers, body| {
-            assert_eq!(body["model"], "qwen3-vl:4b");
+            assert_eq!(body["model"], "qwen3-vl:4b-instruct");
             if index == 0 {
                 assert!(headers.starts_with("POST /api/show "));
                 return (200, json!({"capabilities": ["vision", "completion"]}));
@@ -401,9 +477,13 @@ mod tests {
             assert_eq!(body["stream"], false);
             let images = body["messages"][0]["images"].as_array().unwrap();
             assert_eq!(images.len(), if index == 1 { 30 } else { 6 });
-            // Qwen3-VL uses 1024 tokens per image in Ollama, plus the prompt and response.
+            // Measured Qwen3-VL image cost includes delimiters. Reserve the complete output budget
+            // plus prompt overhead, so thinking cannot consume the space needed for the final JSON.
+            let output_budget = body["options"]["num_predict"].as_u64().unwrap();
+            assert!(output_budget >= 4096);
             assert!(
-                body["options"]["num_ctx"].as_u64().unwrap() >= images.len() as u64 * 1024 + 2048
+                body["options"]["num_ctx"].as_u64().unwrap()
+                    >= images.len() as u64 * 1034 + 2048 + output_budget
             );
             let png = STANDARD.decode(images[0].as_str().unwrap()).unwrap();
             let image = image::load_from_memory(&png).unwrap();

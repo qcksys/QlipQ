@@ -58,7 +58,7 @@ levels (matching the preview monitor mix).
 ## Highlight suggestions
 
 The editor can suggest an editable trim using a locally installed Ollama vision model (default
-`qwen3-vl:4b`). Start Ollama and run `ollama pull qwen3-vl:4b`; choose a different installed local
+`qwen3-vl:4b-instruct`). Start Ollama and run `ollama pull qwen3-vl:4b-instruct`; choose a different installed local
 vision model in Settings. No model is bundled or automatically downloaded. The HTTP client connects
 only to `127.0.0.1:11434`, bypasses proxies/redirects, and checks that the model is local and supports
 vision before sending frames.
@@ -69,6 +69,10 @@ uses 30-second windows with 5-second overlap and roughly one sample per second. 
 event becomes a suggested trim with 3 seconds before and 2 seconds after it. Timing validation,
 window planning, and padding live in `qlipq-core::highlight`. The user must apply the suggestion;
 existing crop/audio edits are preserved. Cancellation or switching clips invalidates pending results.
+
+Requests reserve a 40K-token context and 4,096 output tokens, including any thinking emitted despite
+`think: false`. Only the final `message.content` is parsed; `done_reason: "length"` and blank answers
+produce actionable errors instead of being treated as invalid JSON or a negative detection.
 
 This initial implementation analyzes visual samples only. Gameplay accuracy has not been benchmarked.
 

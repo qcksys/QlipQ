@@ -12,7 +12,7 @@ fn parse_fills_in_missing_fields() {
 
 #[test]
 fn highlight_model_defaults_and_round_trips() {
-    assert_eq!(config_json::parse("{}").highlight_model, "qwen3-vl:4b");
+    assert_eq!(config_json::parse("{}").highlight_model, "qwen3-vl:4b-instruct");
     let cfg = config_json::parse(r#"{"highlightModel":"qwen3-vl:8b"}"#);
     assert_eq!(config_json::parse(&config_json::serialize(&cfg)).highlight_model, "qwen3-vl:8b");
     assert!(config_json::schema_json().contains("highlightModel"));
