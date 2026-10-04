@@ -51,4 +51,6 @@ jobs:
           Repair-WinGetPackageManager -AllUsers
       - name: Test and validate WinGet manifests
         shell: pwsh
-        run: ./.github/winget/Test-WinGetManifest.ps1 -ValidateWithWinGet
+        run: |
+          ./.github/winget/Test-WinGetPublicationState.ps1
+          ./.github/winget/Test-WinGetManifest.ps1 -ValidateWithWinGet

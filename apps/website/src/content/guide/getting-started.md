@@ -16,7 +16,7 @@ Every build bundles the FFmpeg libraries QlipQ needs — there's no separate `ff
 
 ### WinGet (Windows)
 
-Stable releases are submitted to the WinGet community repository. Once the package submission is accepted, install or update QlipQ from PowerShell:
+Stable releases are submitted to the WinGet community repository. The first package submission must be accepted before later versions can be submitted. Once the package submission is accepted, install or update QlipQ from PowerShell:
 
 ```powershell
 winget install --id qcksys.qlipq --exact --source winget
