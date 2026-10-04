@@ -14,6 +14,8 @@ mod host;
 mod iso;
 mod libav;
 mod log_ctx;
+mod queue_preview;
+mod queue_sort;
 mod seeker;
 mod theme;
 mod video;
@@ -22,14 +24,15 @@ mod video;
 // `poll`/`dimensions`/`fps`/`position`/`try_seek` for the editor below.
 use libav::{start_player, Player as PreviewPlayer, ScrubDecoder};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::widget::{
     button, center, checkbox, column, container, mouse_area, opaque, pick_list, progress_bar,
-    responsive, row, rule, scrollable, shader, slider, stack, text, text_input, tooltip, Space,
+    responsive, row, rule, scrollable, sensor, shader, slider, stack, text, text_input, tooltip,
+    Space,
 };
 use iced::{Element, Font, Length, Size, Subscription, Task, Theme};
 
@@ -39,6 +42,7 @@ use qlipq_core::media::{audio_stream_label, format_bytes, MediaInfo};
 use qlipq_core::{datetimes, queue::*, rename};
 use qlipq_ffmpeg::args::output_settings_to_encode;
 use qlipq_ffmpeg::estimate::estimate_export_size;
+use queue_sort::QueueSort;
 
 const DISMISSED_TAG: &str = "dismissed";
 const TICK: Duration = Duration::from_millis(250);
@@ -379,6 +383,11 @@ struct App {
     selected_id: Option<String>,
     view: View,
     filter: QueueFilter,
+    queue_sort: QueueSort,
+    thumbnails: HashMap<String, Option<iced::widget::image::Handle>>,
+    visible_cards: HashSet<String>,
+    hover_since: Option<Instant>,
+    queue_preview: Option<queue_preview::HoverPreview>,
     presets: host::CapturePresets,
     watcher: Option<host::Watcher>,
     editor: Option<Editor>,
@@ -427,6 +436,10 @@ enum Message {
     PreviewZoom(f32),
     HoverCard(String),
     HoverLeave(String),
+    QueueSortChanged(QueueSort),
+    CardVisible(String, bool),
+    ThumbnailLoaded(String, u64, Option<iced::widget::image::Handle>),
+    QueuePreviewTick,
     RevealItem(String),
     TimestampEdited(String),
     TimestampSubmit,
@@ -563,6 +576,11 @@ impl App {
             selected_id: None,
             view: View::Queue,
             filter,
+            queue_sort: QueueSort::default(),
+            thumbnails: HashMap::new(),
+            visible_cards: HashSet::new(),
+            hover_since: None,
+            queue_preview: None,
             presets: host::CapturePresets::default(),
             watcher,
             editor: None,
@@ -625,6 +643,11 @@ impl App {
         {
             let dt = Duration::from_secs_f64(1.0 / player.fps().clamp(1.0, 60.0));
             subs.push(iced::time::every(dt).map(|_| Message::PlaybackTick));
+        }
+        if self.queue_preview.is_some() {
+            subs.push(
+                iced::time::every(Duration::from_millis(33)).map(|_| Message::QueuePreviewTick),
+            );
         }
         Subscription::batch(subs)
     }
@@ -826,13 +849,66 @@ impl App {
         self.persist_edit(&id);
     }
 
+    fn sorted_queue(&self) -> Vec<&QueueItem> {
+        let mut items = self
+            .items
+            .iter()
+            .filter(|item| self.filter.matches(item, self.is_highlight(&item.path)))
+            .collect();
+        self.queue_sort.sort(&mut items);
+        items
+    }
+
+    fn queue_preview_source(&self, id: &str) -> Option<queue_preview::Source> {
+        let item = self.items.iter().find(|item| item.id == id)?;
+        let cached = self.media_cache.get(&item.path)?;
+        Some(queue_preview::Source {
+            path: item.path.clone(),
+            media: cached.media.clone(),
+            is_hdr: cached.is_hdr,
+            gamma: self.config.hdr_preview_gamma,
+        })
+    }
+
+    fn request_thumbnail(&mut self, id: &str) -> Task<Message> {
+        if self.thumbnails.contains_key(id) {
+            return Task::none();
+        }
+        let Some(source) = self.queue_preview_source(id) else {
+            return Task::none();
+        };
+        if self.thumbnails.len() >= 128 {
+            self.thumbnails
+                .retain(|id, _| self.visible_cards.contains(id));
+        }
+        self.thumbnails.insert(id.to_string(), None);
+        let id = id.to_string();
+        let gamma = source.gamma.to_bits();
+        Task::perform(queue_preview::thumbnail(source), move |result| {
+            Message::ThumbnailLoaded(id.clone(), gamma, result)
+        })
+    }
+
+    fn stop_queue_preview(&mut self) {
+        self.hovered_card = None;
+        self.hover_since = None;
+        self.queue_preview = None;
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => return self.on_tick(),
+            Message::QueuePreviewTick => {}
             Message::PlaybackTick => self.on_playback_tick(),
             Message::ShowQueue => self.view = View::Queue,
-            Message::ShowSettings => self.view = View::Settings,
-            Message::ToggleFullscreen => self.fullscreen = !self.fullscreen,
+            Message::ShowSettings => {
+                self.stop_queue_preview();
+                self.view = View::Settings;
+            }
+            Message::ToggleFullscreen => {
+                self.stop_queue_preview();
+                self.fullscreen = !self.fullscreen;
+            }
             Message::PreviewZoom(delta) => {
                 self.preview_scale = (self.preview_scale + delta).clamp(0.5, 2.5)
             }
@@ -1377,14 +1453,43 @@ impl App {
                     }
                 }
             }
-            Message::HoverCard(id) => self.hovered_card = Some(id),
+            Message::HoverCard(id) => {
+                if self.hovered_card.as_deref() != Some(&id) {
+                    self.stop_queue_preview();
+                    self.hover_since = Some(Instant::now());
+                    self.hovered_card = Some(id);
+                }
+            }
             Message::HoverLeave(id) => {
                 if self.hovered_card.as_deref() == Some(id.as_str()) {
-                    self.hovered_card = None;
+                    self.stop_queue_preview();
+                }
+            }
+            Message::QueueSortChanged(sort) => {
+                self.stop_queue_preview();
+                self.queue_sort = sort;
+            }
+            Message::CardVisible(id, visible) => {
+                if visible {
+                    self.visible_cards.insert(id.clone());
+                    return self.request_thumbnail(&id);
+                }
+                self.visible_cards.remove(&id);
+                if self.hovered_card.as_deref() == Some(&id) {
+                    self.stop_queue_preview();
+                }
+            }
+            Message::ThumbnailLoaded(id, gamma, thumbnail) => {
+                if gamma == self.config.hdr_preview_gamma.to_bits()
+                    && self.items.iter().any(|item| item.id == id)
+                    && self.thumbnails.contains_key(&id)
+                {
+                    self.thumbnails.insert(id, thumbnail);
                 }
             }
             Message::RevealItem(path) => host::reveal(&path),
             Message::RenameOpen(id) => {
+                self.stop_queue_preview();
                 if let Some(item) = self.items.iter().find(|i| i.id == id) {
                     let (name, _) = rename::split_file_name(&item.file_name);
                     self.rename = Some(RenameState { id, value: name });
@@ -1414,7 +1519,10 @@ impl App {
             }
             Message::RenameConfirm => return self.confirm_rename(),
             Message::RenameCancel => self.rename = None,
-            Message::RequestDelete(id) => self.delete_confirm = Some(id),
+            Message::RequestDelete(id) => {
+                self.stop_queue_preview();
+                self.delete_confirm = Some(id);
+            }
             Message::DeleteConfirm => {
                 if let Some(id) = self.delete_confirm.take() {
                     return self.delete_now(id);
@@ -1452,6 +1560,7 @@ impl App {
                 }
             },
             Message::Dismiss(id) => {
+                self.stop_queue_preview();
                 if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
                     let tags = item.tags.get_or_insert_with(Vec::new);
                     if let Some(pos) = tags.iter().position(|t| t == DISMISSED_TAG) {
@@ -1466,12 +1575,28 @@ impl App {
                 }
                 self.persist_edit(&id);
             }
-            Message::SetTagFilter(t) => self.filter.tag = t,
-            Message::FilterSearch(s) => self.filter.search = s,
-            Message::SetStatusFilter(s) => self.filter.status = s,
-            Message::SetGameFilter(g) => self.filter.game = g,
-            Message::SetHighlightFilter(h) => self.filter.highlights = h,
+            Message::SetTagFilter(t) => {
+                self.stop_queue_preview();
+                self.filter.tag = t;
+            }
+            Message::FilterSearch(s) => {
+                self.stop_queue_preview();
+                self.filter.search = s;
+            }
+            Message::SetStatusFilter(s) => {
+                self.stop_queue_preview();
+                self.filter.status = s;
+            }
+            Message::SetGameFilter(g) => {
+                self.stop_queue_preview();
+                self.filter.game = g;
+            }
+            Message::SetHighlightFilter(h) => {
+                self.stop_queue_preview();
+                self.filter.highlights = h;
+            }
             Message::ClearFilters => {
+                self.stop_queue_preview();
                 self.filter = QueueFilter {
                     highlights: HighlightFilter::from_hidden(self.config.hide_highlights),
                     ..Default::default()
@@ -1563,6 +1688,7 @@ impl App {
             }
             Message::SetHdrPreviewGamma(v) => self.config.hdr_preview_gamma = v.clamp(1.0, 3.0),
             Message::ApplyHdrPreviewGamma => {
+                self.thumbnails.clear();
                 // Rebuild the scrub graph with the new gamma, persist, and refresh what's on screen
                 // (restart playback if playing, else re-extract the current frame).
                 self.reopen_scrubber();
@@ -1575,6 +1701,7 @@ impl App {
                 return Task::batch([save, refresh]);
             }
             Message::ResetHdrPreviewGamma => {
+                self.thumbnails.clear();
                 self.config.hdr_preview_gamma = AppConfig::default().hdr_preview_gamma;
                 self.reopen_scrubber();
                 let save = self.save_config_task();
@@ -1645,6 +1772,47 @@ impl App {
 
     fn on_tick(&mut self) -> Task<Message> {
         let mut tasks = Vec::new();
+        if matches!(self.view, View::Queue) && !self.fullscreen {
+            let visible: Vec<_> = self
+                .visible_cards
+                .iter()
+                .filter(|id| {
+                    self.items.iter().any(|item| {
+                        &item.id == *id && self.filter.matches(item, self.is_highlight(&item.path))
+                    })
+                })
+                .cloned()
+                .collect();
+            self.visible_cards = visible.iter().cloned().collect();
+            if self
+                .hovered_card
+                .as_ref()
+                .is_some_and(|id| !self.visible_cards.contains(id))
+            {
+                self.stop_queue_preview();
+            }
+            for id in visible {
+                tasks.push(self.request_thumbnail(&id));
+            }
+            if self.queue_preview.is_none()
+                && self
+                    .hover_since
+                    .is_some_and(|since| since.elapsed() >= Duration::from_millis(250))
+                && self.rename.is_none()
+                && self.delete_confirm.is_none()
+                && self.delete_error.is_none()
+            {
+                if let Some(id) = self
+                    .hovered_card
+                    .clone()
+                    .filter(|id| self.visible_cards.contains(id))
+                {
+                    if let Some(source) = self.queue_preview_source(&id) {
+                        self.queue_preview = Some(queue_preview::HoverPreview::start(id, source));
+                    }
+                }
+            }
+        }
         // Drain the folder watcher.
         if let Some(w) = &self.watcher {
             let new = w.drain();
@@ -2255,6 +2423,7 @@ impl App {
     }
 
     fn run_after_action(&mut self, action: AfterExportAction) -> Task<Message> {
+        self.stop_queue_preview();
         let Some(id) = self.selected_id.clone() else {
             return Task::none();
         };
@@ -2265,7 +2434,7 @@ impl App {
             AfterExportAction::Delete => {
                 let path = item.path.clone();
                 Task::perform(
-                    blocking(move || {
+                    queue_preview::file_operation(move || {
                         let _ = host::delete_file(&path);
                     }),
                     |_| Message::Ignore,
@@ -2293,7 +2462,7 @@ impl App {
                 } else {
                     let dest = host::join_path(&folder, &host::base_name(&path));
                     Task::perform(
-                        blocking(move || {
+                        queue_preview::file_operation(move || {
                             let _ = host::rename_file(&path, &dest);
                         }),
                         |_| Message::Ignore,
@@ -2316,7 +2485,7 @@ impl App {
                 let from = item.path.clone();
                 let to = host::join_path(&host::dir_name(&item.path), &renamed);
                 Task::perform(
-                    blocking(move || {
+                    queue_preview::file_operation(move || {
                         let _ = host::rename_file(&from, &to);
                     }),
                     |_| Message::Ignore,
@@ -2327,6 +2496,7 @@ impl App {
     }
 
     fn confirm_rename(&mut self) -> Task<Message> {
+        self.stop_queue_preview();
         let Some(r) = self.rename.take() else {
             return Task::none();
         };
@@ -2347,7 +2517,7 @@ impl App {
         let from = item.path.clone();
         let id = r.id.clone();
         Task::perform(
-            blocking(move || host::rename_file(&from, &new_path)),
+            queue_preview::file_operation(move || host::rename_file(&from, &new_path)),
             move |res| {
                 Message::FolderPicked(
                     PickPurpose::WatchedFolder,
@@ -2366,12 +2536,13 @@ impl App {
             return Task::none();
         }
         if let Some(rest) = path.strip_prefix("move::") {
+            self.stop_queue_preview();
             let parts: Vec<&str> = rest.splitn(2, "::").collect();
             if parts.len() == 2 {
                 let (from, folder) = (parts[0].to_string(), parts[1].to_string());
                 let dest = host::join_path(&folder, &host::base_name(&from));
                 return Task::perform(
-                    blocking(move || {
+                    queue_preview::file_operation(move || {
                         let _ = host::rename_file(&from, &dest);
                     }),
                     |_| Message::Ignore,
@@ -2436,6 +2607,7 @@ impl App {
     /// Delete a clip's file from disk (dropping the queue item follows on [`Message::Deleted`]). Used
     /// by both the confirm dialog and the immediate Shift+Delete shortcut.
     fn delete_now(&mut self, id: String) -> Task<Message> {
+        self.stop_queue_preview();
         let Some(path) = self
             .items
             .iter()
@@ -2451,12 +2623,18 @@ impl App {
             self.selected_id = None;
             self.editor = None;
         }
-        Task::perform(blocking(move || host::delete_file(&path)), move |r| {
-            Message::Deleted(id.clone(), r)
-        })
+        Task::perform(
+            queue_preview::file_operation(move || host::delete_file(&path)),
+            move |r| Message::Deleted(id.clone(), r),
+        )
     }
 
     fn remove_item(&mut self, id: &str) {
+        self.thumbnails.remove(id);
+        self.visible_cards.remove(id);
+        if self.hovered_card.as_deref() == Some(id) {
+            self.stop_queue_preview();
+        }
         if let Some(pos) = self.items.iter().position(|i| i.id == id) {
             let path = self.items[pos].path.clone();
             self.known_paths.remove(&path);
@@ -2845,6 +3023,11 @@ mod tests {
             selected_id: None,
             view: View::Queue,
             filter: QueueFilter::default(),
+            queue_sort: QueueSort::default(),
+            thumbnails: HashMap::new(),
+            visible_cards: HashSet::new(),
+            hover_since: None,
+            queue_preview: None,
             presets: host::CapturePresets::default(),
             watcher: None,
             editor: None,
@@ -2892,6 +3075,77 @@ mod tests {
             score: 80,
             reason: "A clutch".into(),
         }
+    }
+
+    #[test]
+    fn queue_sort_and_filters_preserve_selection_and_edits() {
+        let mut app = highlight_test_app();
+        app.items = vec![
+            qi("zulu.mp4", QueueStatus::Ready, None, &[]),
+            qi("alpha.mp4", QueueStatus::Ready, None, &[]),
+            qi("bravo.mp4", QueueStatus::Done, None, &[]),
+        ];
+        let selected = app.selected_id.clone();
+        drop(app.update(Message::SetStatusFilter(Some(QueueStatus::Ready))));
+        drop(app.update(Message::QueueSortChanged(QueueSort::NameAsc)));
+        assert_eq!(
+            app.sorted_queue()
+                .iter()
+                .map(|item| item.file_name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha.mp4", "zulu.mp4"]
+        );
+        assert_eq!(app.selected_id, selected);
+        assert_eq!(app.editor.as_ref().unwrap().trim_start, 2.0);
+        drop(app.update(Message::ClearFilters));
+        assert_eq!(app.queue_sort, QueueSort::NameAsc);
+        assert_eq!(app.sorted_queue().len(), 3);
+    }
+
+    #[test]
+    fn stale_hover_exit_does_not_cancel_new_hover_and_hidden_cards_stop_it() {
+        let mut app = highlight_test_app();
+        let selected = app.selected_id.clone();
+        drop(app.update(Message::HoverCard("one".into())));
+        drop(app.update(Message::HoverCard("two".into())));
+        drop(app.update(Message::HoverLeave("one".into())));
+        assert_eq!(app.hovered_card.as_deref(), Some("two"));
+        drop(app.update(Message::CardVisible("two".into(), false)));
+        assert!(app.hovered_card.is_none());
+        assert!(app.hover_since.is_none());
+        drop(app.update(Message::HoverCard("one".into())));
+        drop(app.update(Message::ShowSettings));
+        assert!(app.hovered_card.is_none());
+        assert_eq!(app.selected_id, selected);
+        assert_eq!(app.editor.as_ref().unwrap().current_time, 0.0);
+    }
+
+    #[test]
+    fn thumbnail_results_for_deleted_clips_and_old_brightness_are_ignored() {
+        let mut app = highlight_test_app();
+        let gamma = app.config.hdr_preview_gamma.to_bits();
+        let image = iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]);
+        drop(app.update(Message::ThumbnailLoaded(
+            "deleted".into(),
+            gamma,
+            Some(image.clone()),
+        )));
+        assert!(app.thumbnails.is_empty());
+        app.items
+            .push(qi("test.mp4", QueueStatus::Ready, None, &[]));
+        app.thumbnails.insert("test.mp4".into(), None);
+        drop(app.update(Message::ThumbnailLoaded(
+            "test.mp4".into(),
+            0,
+            Some(image.clone()),
+        )));
+        assert!(app.thumbnails["test.mp4"].is_none());
+        drop(app.update(Message::ThumbnailLoaded(
+            "test.mp4".into(),
+            gamma,
+            Some(image),
+        )));
+        assert!(app.thumbnails["test.mp4"].is_some());
     }
 
     #[test]

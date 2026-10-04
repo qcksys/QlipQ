@@ -36,7 +36,7 @@ impl App {
         all_games.sort();
         all_games.dedup();
 
-        let visible: Vec<&QueueItem> = self.items.iter().filter(|i| f.matches(i, self.is_highlight(&i.path))).collect();
+        let visible = self.sorted_queue();
         let active = f.is_active(HighlightFilter::from_hidden(self.config.hide_highlights));
 
         let mut col = column![].spacing(theme::SM).padding(theme::MD);
@@ -82,6 +82,13 @@ impl App {
             }
             header = header.push(selectors);
         }
+        header = header.push(
+            row![
+                text("Sort").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                pick_list(QueueSort::ALL, Some(self.queue_sort), Message::QueueSortChanged)
+                    .style(theme::pick_list_style).width(Length::Fill),
+            ].spacing(theme::SM).align_y(iced::Alignment::Center),
+        );
         if active {
             header = header.push(
                 row![
@@ -112,9 +119,12 @@ impl App {
             col = col.push(container(empty).width(Length::Fill).height(Length::Fill).padding(theme::XL).center_x(Length::Fill).center_y(Length::Fill));
         } else {
             // Right padding keeps the cards (and their Delete buttons) clear of the scrollbar.
-            let mut list = column![].spacing(theme::SM).padding(iced::Padding::from(0.0).right(theme::MD));
+            let mut list = iced::widget::keyed::Column::new().spacing(theme::SM).padding(iced::Padding::from(0.0).right(theme::MD));
             for item in visible {
-                list = list.push(self.queue_card(item));
+                use std::hash::{Hash, Hasher};
+                let mut key = std::hash::DefaultHasher::new();
+                item.id.hash(&mut key);
+                list = list.push(key.finish(), self.queue_card(item));
             }
             col = col.push(scrollable(list).height(Length::Fill));
         }
@@ -136,12 +146,14 @@ impl App {
             header = header.push(chip("Highlight".to_string()));
         }
         let open = button(
-            column![
-                header,
-                text(meta_line(item)).size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
-                text(status_label(status)).size(theme::SMALL).font(theme::FONT_MEDIUM).style(move |t| text::Style { color: Some(theme::status_color(t, status)) }),
-            ]
-            .spacing(theme::XS),
+            row![
+                self.queue_thumbnail(item),
+                column![
+                    header,
+                    text(meta_line(item)).size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                    text(status_label(status)).size(theme::SMALL).font(theme::FONT_MEDIUM).style(move |t| text::Style { color: Some(theme::status_color(t, status)) }),
+                ].spacing(theme::XS).width(Length::Fill),
+            ].spacing(theme::SM).align_y(iced::Alignment::Center),
         )
         .width(Length::Fill)
         .padding([theme::XS, 0.0])
@@ -173,10 +185,36 @@ impl App {
         card = card.push(actions);
 
         let hovered = self.hovered_card.as_deref() == Some(item.id.as_str());
-        mouse_area(container(card).padding(theme::SM).style(theme::queue_card(selected, hovered)))
+        let id = item.id.clone();
+        sensor(mouse_area(container(card).padding(theme::SM).style(theme::queue_card(selected, hovered)))
             .on_enter(Message::HoverCard(item.id.clone()))
-            .on_exit(Message::HoverLeave(item.id.clone()))
+            .on_exit(Message::HoverLeave(item.id.clone())))
+            .key(item.id.clone())
+            .on_show(move |_| Message::CardVisible(id.clone(), true))
+            .on_hide(Message::CardVisible(item.id.clone(), false))
             .into()
+    }
+
+    fn queue_thumbnail(&self, item: &QueueItem) -> Element<'_, Message> {
+        let preview: Element<Message> = if let Some(preview) = self.queue_preview.as_ref()
+            .filter(|preview| preview.id == item.id && preview.has_frame())
+        {
+            let w = queue_preview::WIDTH.min(queue_preview::HEIGHT * preview.aspect);
+            let h = w / preview.aspect;
+            shader(video::VideoProgram::<true>::new(preview.frame.clone()))
+                .width(w).height(h).into()
+        } else if let Some(Some(handle)) = self.thumbnails.get(&item.id) {
+            iced::widget::image(handle.clone())
+                .width(queue_preview::WIDTH).height(queue_preview::HEIGHT)
+                .content_fit(iced::ContentFit::Contain).into()
+        } else {
+            text("Preview").size(theme::SMALL)
+                .style(|t| text::Style { color: Some(theme::muted(t)) }).into()
+        };
+        let thumbnail = container(preview).center_x(queue_preview::WIDTH).center_y(queue_preview::HEIGHT)
+            .style(|_| container::Style { background: Some(iced::Color::BLACK.into()), ..Default::default() })
+            .into();
+        with_tip(thumbnail, "Hover to play a muted preview".into())
     }
 
     fn editor_view(&self) -> Element<'_, Message> {
@@ -916,7 +954,7 @@ fn preview_pane<'a>(ed: &'a Editor, media: &MediaInfo, height: Length) -> Elemen
         }
         let s = (bounds.width / vw).min(bounds.height / vh);
         let (w, h) = ((vw * s).max(1.0), (vh * s).max(1.0));
-        container(shader(video::VideoProgram::new(frame.clone())).width(Length::Fixed(w)).height(Length::Fixed(h)))
+        container(shader(video::VideoProgram::<false>::new(frame.clone())).width(Length::Fixed(w)).height(Length::Fixed(h)))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into()
