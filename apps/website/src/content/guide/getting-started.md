@@ -55,18 +55,22 @@ Each clip has a thumbnail that loads when its card comes into view. **Hover over
 Highlight suggestions are optional and run through a **local Ollama vision model**. Install [Ollama](https://ollama.com/download), start it, and download the default model:
 
 ```sh
-ollama pull qwen3-vl:4b
+ollama pull qwen3-vl:4b-instruct
 ```
 
 Qwen3-VL requires Ollama 0.12.7 or newer. You can choose another installed local vision model in **Settings → Highlight suggestions**. QlipQ connects to Ollama at `127.0.0.1:11434`; it does not download models automatically and rejects cloud models.
 
+Use the explicit **`-instruct`** variant. Ollama's `qwen3-vl:4b` tag selects the thinking variant, which can spend the entire output budget reasoning without returning a highlight answer. If you previously configured `qwen3-vl:4b`, download `qwen3-vl:4b-instruct` and select it in **Settings → Highlight suggestions**. Existing model choices are preserved.
+
 1. Open a clip and find **Highlight suggestion** below the In/Out controls.
-2. Describe what to find, such as “a multi-kill” or “a successful boss fight”, then click **Suggest highlight**. Playback pauses while analysis starts. Longer recordings are analyzed in overlapping sections; the section count shows progress. **Cancel** or selecting another clip stops analysis.
+2. Describe what to find, such as “consecutive headshots”, “a multi-kill”, or “a successful boss fight”, then click **Suggest highlight**. Playback pauses while analysis starts. Longer recordings are analyzed in overlapping sections; the section count shows progress. **Cancel** or selecting another clip stops analysis.
 3. Review the suggested range and its description. Your current trim stays unchanged until you click **Apply trim**. **Dismiss** keeps your existing edit.
-4. Applying the suggestion adds up to **3 seconds of lead-in** and **2 seconds of aftermath**, bounded by the original clip. Adjust the normal In/Out controls, preview the result, and export when ready. The applied trim is saved like any other edit.
+4. Applying the suggestion adds up to **3 seconds of lead-in** and **2 seconds of aftermath**, bounded by the original clip. A single-instant event, such as a kill notification, gets the same padding. Adjust the normal In/Out controls, preview the result, and export when ready. The applied trim is saved like any other edit.
 
-This is an experimental suggestion: analysis samples video at roughly one frame per second in 30-second sections with a 5-second overlap. QlipQ requests a 32K-token context to fit the sampled frames, which needs more memory than a short chat. It does not analyze audio and may miss brief action, jokes, or events that require game-specific context. It may report no clear highlight. Accuracy and speed depend on the model, your hardware, and the recording; review every suggested trim.
+QlipQ asks the model to compare complete plays and consider execution quality: consecutive aimed headshots should rank above routine or assisted multi-kills. It also asks the model to distinguish new eliminations from persistent kill-streak banners and repeated kill-feed entries. Suggestions aim to include the action sequence, rather than just the notification that follows it. These judgments still depend on the model; it can misread the HUD, misdescribe a play, or choose the wrong moment.
 
-If Ollama is unavailable or the model is missing, the editor shows an error with setup instructions. A failed or cancelled analysis leaves your current trim unchanged.
+This is an experimental suggestion: analysis samples video at roughly one frame per second, at up to **1280 × 720** to retain HUD detail, in 30-second sections with a 5-second overlap. QlipQ requests a 40K-token context to fit the sampled frames and allow up to 4,096 output tokens, which needs more memory than a short chat. Some models generate thinking text even when asked not to; that uses part of the output budget and can make analysis take longer. QlipQ only uses the final answer. It does not analyze audio and may miss brief action, jokes, or events that require game-specific context. It may report no clear highlight. Accuracy and speed depend on the model, your hardware, and the recording; review every suggested trim.
+
+If Ollama is unavailable or the model is missing, the editor shows an error with setup instructions. An **output limit** error means the model ran out of tokens before finishing its answer; try a shorter clip or a local non-thinking vision model. An **empty answer** error means Ollama finished without returning an answer; retry or choose another local vision model. These errors do not mean that no highlight was found. A failed or cancelled analysis leaves your current trim unchanged.
 
 **Next:** [set up the OBS replay buffer](/guide/obs-replay-buffer).

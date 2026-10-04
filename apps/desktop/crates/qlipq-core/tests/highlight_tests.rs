@@ -81,6 +81,55 @@ fn context_is_clamped_to_source_boundaries() {
 }
 
 #[test]
+fn single_instant_events_receive_a_non_empty_trim_with_context() {
+    for (window, duration, time, expected) in [
+        (
+            AnalysisWindow {
+                start_sec: 25.0,
+                end_sec: 55.0,
+            },
+            80.0,
+            10.5,
+            (32.5, 37.5),
+        ),
+        (
+            AnalysisWindow {
+                start_sec: 0.0,
+                end_sec: 8.0,
+            },
+            8.0,
+            0.0,
+            (0.0, 2.0),
+        ),
+        (
+            AnalysisWindow {
+                start_sec: 0.0,
+                end_sec: 8.0,
+            },
+            8.0,
+            8.0,
+            (5.0, 8.0),
+        ),
+        (
+            AnalysisWindow {
+                start_sec: 0.0,
+                end_sec: 0.05,
+            },
+            0.05,
+            0.0,
+            (0.0, 0.05),
+        ),
+    ] {
+        let suggestion = event(time, time).into_suggestion(window, duration).unwrap();
+        assert_eq!(
+            (suggestion.trim.start_sec, suggestion.trim.end_sec),
+            expected
+        );
+        assert!(suggestion.trim.start_sec < suggestion.trim.end_sec);
+    }
+}
+
+#[test]
 fn rejects_hallucinated_or_invalid_ranges_before_applying_padding() {
     let window = AnalysisWindow {
         start_sec: 25.0,
@@ -88,7 +137,7 @@ fn rejects_hallucinated_or_invalid_ranges_before_applying_padding() {
     };
     for (start, end) in [
         (-1.0, 5.0),
-        (4.0, 4.0),
+        (31.0, 31.0),
         (5.0, 4.0),
         (29.0, 31.0),
         (f64::NAN, 5.0),

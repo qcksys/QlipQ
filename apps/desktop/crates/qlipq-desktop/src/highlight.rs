@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use iced::futures::future::{select, Either};
-use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
+use image::{
+    codecs::png::{CompressionType, FilterType, PngEncoder},
+    ExtendedColorType, ImageEncoder,
+};
 use qlipq_core::highlight::{
     analysis_windows, detection_schema, AnalysisWindow, HighlightDetection, HighlightSuggestion,
 };
@@ -162,7 +165,7 @@ fn validate_model(info: &Value) -> Result<(), String> {
         .as_array()
         .is_some_and(|caps| caps.iter().any(|c| c == "vision"))
     {
-        return Err("The selected Ollama model cannot read images. Install qwen3-vl:4b or choose another local vision model.".into());
+        return Err("The selected Ollama model cannot read images. Install qwen3-vl:4b-instruct or choose another local vision model.".into());
     }
     Ok(())
 }
@@ -176,7 +179,7 @@ fn sample_window(
     cancel: &AtomicBool,
 ) -> Result<Vec<Sample>, String> {
     let max_height =
-        ((512.0 * media.height as f64 / media.width as f64).floor() as i64).clamp(2, 288);
+        ((1280.0 * media.height as f64 / media.width as f64).floor() as i64).clamp(2, 720);
     let mut decoder = crate::libav::ScrubDecoder::open(
         path,
         media.width,
@@ -197,7 +200,7 @@ fn sample_window(
             .frame_at(time)
             .ok_or_else(|| format!("Could not decode a highlight sample at {time:.1}s."))?;
         let mut png = Vec::new();
-        PngEncoder::new(&mut png)
+        PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Sub)
             .write_image(&rgba, w, h, ExtendedColorType::Rgba8)
             .map_err(|e| format!("Could not encode a highlight sample: {e}"))?;
         samples.push(Sample {
@@ -216,7 +219,7 @@ async fn post_json(
 ) -> Result<Value, String> {
     let response = client.post(format!("{base}/api/{route}")).json(&body).send().await.map_err(|e| {
         if e.is_connect() {
-            "Cannot reach Ollama. Start Ollama locally, then run `ollama pull qwen3-vl:4b` and try again.".into()
+            "Cannot reach Ollama. Start Ollama locally, then run `ollama pull qwen3-vl:4b-instruct` and try again.".into()
         } else if e.is_timeout() {
             "Ollama took longer than five minutes for one section. Try a smaller vision model or a shorter clip.".into()
         } else {
@@ -239,7 +242,7 @@ fn chat_body(model: &str, query: &str, window: AnalysisWindow, samples: &[Sample
     let timestamps = samples
         .iter()
         .enumerate()
-        .map(|(i, sample)| format!("image {} = {:.3}s", i + 1, sample.time))
+        .map(|(i, sample)| format!("image {} = {}s", i + 1, sample.time))
         .collect::<Vec<_>>()
         .join(", ");
     json!({
@@ -247,19 +250,28 @@ fn chat_body(model: &str, query: &str, window: AnalysisWindow, samples: &[Sample
         "stream": false,
         "think": false,
         "format": detection_schema(),
-        "options": { "temperature": 0, "num_ctx": 32768, "num_predict": 512 },
+        // Some local models still emit thinking with think=false; leave room for the final JSON.
+        "options": { "temperature": 0, "num_ctx": 40960, "num_predict": 4096 },
         "messages": [{
             "role": "user",
             "content": format!(
                 "These images are chronological samples from a gameplay recording, one per second. \
-                 This section lasts {:.3} seconds. Image timestamps relative to this section: {timestamps}. \
-                 Find the single most noteworthy visible event matching this request: {query}. \
-                 Return JSON with event=null if there is no visible highlight (menus, waiting, ordinary traversal). \
-                 Otherwise return event with startSec, endSec, score, reason. Times must be seconds relative \
-                 to THIS section, between 0 and {:.3}, with endSec > startSec. Include the event itself; \
-                 do not add lead-in or aftermath. Score interest consistently from 1 to 100: \
-                 20 ordinary action, 50 a clear success, 80 a multi-kill/clutch, 100 an exceptional play. \
-                 Give a brief reason based only on visible evidence. Do not invent off-screen events or audio.",
+                 This section lasts {} seconds. Image timestamps relative to this section: {timestamps}. \
+                 Inspect ALL images before choosing the strongest complete play matching this request: {query}. \
+                 Return JSON with event=null if no highlight is visible. \
+                 Otherwise return event with startSec, endSec, score, reason. Times must be relative \
+                 to THIS section between 0 and {} with endSec >= startSec. Include the whole action sequence from \
+                 the first elimination to the last, not just a notification after the event. \
+                 Do not add lead-in or aftermath. Score interest consistently: \
+                 20 ordinary action, 40 a routine elimination, 60 a routine multi-kill, \
+                 80 multiple precise aimed eliminations such as consecutive headshots, \
+                 90 a decisive clutch or unusually difficult play, 100 an exceptional play. \
+                 Prefer skilled execution over routine or assisted kills even when both show the same multi-kill banner. \
+                 Credit only the POV player's distinct eliminations, not teammate kills, assists, \
+                 or repeated entries in the kill feed. Persistent cumulative kill-streak banners \
+                 do not prove multiple new kills in this section. Do not infer an elimination from aiming or firing alone. \
+                 Give a brief reason based only on visible evidence, including what makes this play stand out. \
+                 Do not invent off-screen events or audio.",
                 window.end_sec - window.start_sec, window.end_sec - window.start_sec
             ),
             "images": samples.iter().map(|s| &s.image).collect::<Vec<_>>()
@@ -283,6 +295,8 @@ async fn query_window(
     struct Response {
         message: Message,
         done: bool,
+        #[serde(default)]
+        done_reason: Option<String>,
     }
 
     let response = post_json(
@@ -297,7 +311,14 @@ async fn query_window(
     if !response.done {
         return Err("Ollama did not finish analyzing this section. Try again.".into());
     }
-    serde_json::from_str(&response.message.content)
+    if response.done_reason.as_deref() == Some("length") {
+        return Err("Ollama reached its output limit before finishing the highlight answer. Try a shorter clip or choose a local non-thinking vision model in Settings → Highlight suggestions.".into());
+    }
+    let content = response.message.content.trim();
+    if content.is_empty() {
+        return Err("Ollama returned an empty answer. Try again or choose another local vision model in Settings → Highlight suggestions.".into());
+    }
+    serde_json::from_str(content)
         .map_err(|e| format!("The model did not return a valid highlight: {e}"))
 }
 
@@ -307,11 +328,114 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
+    #[test]
+    #[ignore = "requires a local recording, labelled event range, and Ollama"]
+    fn local_highlight_covers_expected_event() {
+        let path = std::env::var("QLIPQ_TEST_INPUT").expect("set QLIPQ_TEST_INPUT");
+        let expected_start: f64 = std::env::var("QLIPQ_HIGHLIGHT_EXPECT_START")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let expected_end: f64 = std::env::var("QLIPQ_HIGHLIGHT_EXPECT_END")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(expected_end > expected_start);
+        let (media, is_hdr) = crate::libav::probe(&path).unwrap();
+        let result = runtime()
+            .block_on(detect(
+                HighlightRequest {
+                    path,
+                    media,
+                    is_hdr,
+                    gamma: 1.0,
+                    model: qlipq_core::config::AppConfig::default().highlight_model,
+                    query: "A multi-kill, clutch, impressive play, or funny gameplay moment".into(),
+                },
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .unwrap()
+            .unwrap();
+        eprintln!("Selected highlight: {result:?}");
+        assert!(result.trim.start_sec <= expected_start, "{result:?}");
+        assert!(result.trim.end_sec >= expected_end, "{result:?}");
+        assert!(
+            result.trim.end_sec - result.trim.start_sec <= expected_end - expected_start + 10.0,
+            "{result:?}"
+        );
+    }
+
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn empty_answer_at_output_limit_reports_the_cause_instead_of_json_eof() {
+        let (url, server) = mock_ollama(1, |_, _, _| {
+            (
+                200,
+                json!({
+                    "done": true, "done_reason": "length", "eval_count": 512,
+                    "message": {"role": "assistant", "content": "", "thinking": "Still analyzing the frames"}
+                }),
+            )
+        });
+        let error = runtime()
+            .block_on(query_window(
+                &client().unwrap(),
+                &url,
+                "qwen3-vl:4b",
+                "a highlight",
+                AnalysisWindow {
+                    start_sec: 0.0,
+                    end_sec: 1.0,
+                },
+                &[],
+            ))
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("output limit"), "{error}");
+        assert!(!error.contains("EOF"), "{error}");
+    }
+
+    #[test]
+    fn rejects_empty_and_truncated_answers_without_using_thinking_as_a_highlight() {
+        for (reason, content, expected) in [
+            ("stop", "", "empty answer"),
+            ("stop", " \n\t", "empty answer"),
+            ("length", "{\"event\":", "output limit"),
+            ("length", "{\"event\":null}", "output limit"),
+        ] {
+            let (url, server) = mock_ollama(1, move |_, _, _| {
+                (
+                    200,
+                    json!({
+                        "done": true, "done_reason": reason,
+                        "message": {"content": content, "thinking": "{\"event\":null}"}
+                    }),
+                )
+            });
+            let error = runtime()
+                .block_on(query_window(
+                    &client().unwrap(),
+                    &url,
+                    "test",
+                    "action",
+                    AnalysisWindow {
+                        start_sec: 0.0,
+                        end_sec: 1.0,
+                    },
+                    &[],
+                ))
+                .unwrap_err();
+            server.join().unwrap();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("EOF"), "{error}");
+        }
     }
 
     fn mock_ollama(
@@ -376,7 +500,7 @@ mod tests {
             },
             is_hdr: false,
             gamma: 1.0,
-            model: "qwen3-vl:4b".into(),
+            model: "qwen3-vl:4b-instruct".into(),
             query: "a multi-kill".into(),
         }
     }
@@ -392,7 +516,7 @@ mod tests {
         }
         std::fs::write(&path, video).unwrap();
         let (url, server) = mock_ollama(3, |index, headers, body| {
-            assert_eq!(body["model"], "qwen3-vl:4b");
+            assert_eq!(body["model"], "qwen3-vl:4b-instruct");
             if index == 0 {
                 assert!(headers.starts_with("POST /api/show "));
                 return (200, json!({"capabilities": ["vision", "completion"]}));
@@ -401,15 +525,19 @@ mod tests {
             assert_eq!(body["stream"], false);
             let images = body["messages"][0]["images"].as_array().unwrap();
             assert_eq!(images.len(), if index == 1 { 30 } else { 6 });
-            // Qwen3-VL uses 1024 tokens per image in Ollama, plus the prompt and response.
+            // Measured Qwen3-VL image cost includes delimiters. Reserve the complete output budget
+            // plus prompt overhead, so thinking cannot consume the space needed for the final JSON.
+            let output_budget = body["options"]["num_predict"].as_u64().unwrap();
+            assert!(output_budget >= 4096);
             assert!(
-                body["options"]["num_ctx"].as_u64().unwrap() >= images.len() as u64 * 1024 + 2048
+                body["options"]["num_ctx"].as_u64().unwrap()
+                    >= images.len() as u64 * 1100 + 2048 + output_budget
             );
             let png = STANDARD.decode(images[0].as_str().unwrap()).unwrap();
             let image = image::load_from_memory(&png).unwrap();
             assert_eq!((image.width(), image.height()), (64, 36));
             let prompt = body["messages"][0]["content"].as_str().unwrap();
-            assert!(prompt.contains("image 1 = 0.500s"));
+            assert!(prompt.contains("image 1 = 0.5s"));
             assert!(prompt.contains("a multi-kill"));
             let event = if index == 1 {
                 json!({"startSec": 10, "endSec": 11, "score": 60, "reason": "First event"})
@@ -481,6 +609,35 @@ mod tests {
                 None => assert!(result.unwrap().event.is_none()),
             }
         }
+    }
+
+    #[test]
+    fn preserves_hud_detail_in_highlight_samples() {
+        let path =
+            std::env::temp_dir().join(format!("qlipq-highlight-hud-{}.y4m", std::process::id()));
+        let mut video = b"YUV4MPEG2 W1280 H720 F2:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        video.extend(std::iter::repeat_n(128, 1280 * 720 * 3 / 2));
+        std::fs::write(&path, video).unwrap();
+        let mut request = request(path.to_string_lossy().into_owned());
+        request.media.width = 1280;
+        request.media.height = 720;
+        request.media.duration_sec = 0.5;
+        let samples = sample_window(
+            &request.path,
+            &request.media,
+            false,
+            1.0,
+            AnalysisWindow {
+                start_sec: 0.0,
+                end_sec: 0.5,
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(path);
+        let png = STANDARD.decode(&samples[0].image).unwrap();
+        let image = image::load_from_memory(&png).unwrap();
+        assert_eq!((image.width(), image.height()), (1280, 720));
     }
 
     #[test]
