@@ -44,6 +44,9 @@ jobs:
       - name: Test shared crates
         run: cargo test -p qlipq-core -p qlipq-ffmpeg
 
+      - name: Test desktop app
+        run: cargo test -p qlipq-desktop --bin qlipq
+
       # Compile the desktop app against the in-process libav stack (the sole build — no CLI fallback).
       - name: Build desktop app
         run: cargo build -p qlipq-desktop

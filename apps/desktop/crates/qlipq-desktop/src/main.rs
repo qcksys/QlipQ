@@ -9,6 +9,7 @@
 //! muxes ([`export`]).
 
 mod export;
+mod highlight;
 mod host;
 mod iso;
 mod libav;
@@ -355,6 +356,10 @@ struct Editor {
     export_cancel: Option<Arc<AtomicBool>>,
     overwrite_target: Option<String>,
     after_prompt: bool,
+    highlight_query: String,
+    highlight_job: Option<highlight::HighlightJob>,
+    highlight_suggestion: Option<qlipq_core::highlight::HighlightSuggestion>,
+    highlight_status: Option<String>,
 }
 
 struct RenameState {
@@ -438,6 +443,16 @@ enum Message {
     InSubmit,
     OutEdited(String),
     OutSubmit,
+    HighlightQuery(String),
+    SuggestHighlight,
+    CancelHighlight,
+    HighlightFinished(
+        String,
+        Arc<AtomicBool>,
+        Result<Option<qlipq_core::highlight::HighlightSuggestion>, String>,
+    ),
+    ApplyHighlight,
+    DismissHighlight,
     ToggleCrop(bool),
     CropEdited(u8, String),
     AudioToggle(i64, bool),
@@ -503,6 +518,7 @@ enum Message {
     ToggleAutoplay(bool),
     ToggleDebug(bool),
     ToggleHideHighlights(bool),
+    HighlightModelChanged(String),
     /// Copy the given text (the debug panel's diagnostics) to the system clipboard.
     CopyText(String),
     SetAfter(AfterChoice),
@@ -754,6 +770,42 @@ impl App {
             sync_inout_inputs(ed);
         }
         self.commit_spec();
+    }
+
+    fn suggest_highlight(&mut self) -> Task<Message> {
+        let Some(ed) = &mut self.editor else {
+            return Task::none();
+        };
+        if ed.highlight_job.is_some() || ed.exporting {
+            return Task::none();
+        }
+        let Some(media) = ed.media.clone() else {
+            return Task::none();
+        };
+        let Some(item) = self.items.iter().find(|i| i.id == ed.item_id) else {
+            return Task::none();
+        };
+        let request = highlight::HighlightRequest {
+            path: item.path.clone(),
+            media: media.clone(),
+            is_hdr: ed.is_hdr,
+            gamma: self.config.hdr_preview_gamma,
+            model: self.config.highlight_model.clone(),
+            query: ed.highlight_query.clone(),
+        };
+        let job = highlight::HighlightJob::new(media.duration_sec);
+        let token = job.cancel.clone();
+        let progress = job.section.clone();
+        let id = ed.item_id.clone();
+        ed.highlight_job = Some(job);
+        ed.highlight_suggestion = None;
+        ed.highlight_status = None;
+        ed.playing = false;
+        ed.player = None;
+        Task::perform(
+            highlight::detect(request, token.clone(), progress),
+            move |result| Message::HighlightFinished(id.clone(), token.clone(), result),
+        )
     }
 
     /// Whether the clip at `path` is an auto-captured highlight, per its cached `encoder` tag (NVIDIA
@@ -1069,6 +1121,68 @@ impl App {
             Message::SetIn => {
                 if let Some(t) = self.editor.as_ref().map(|e| e.current_time) {
                     self.apply_trim_in(t);
+                }
+            }
+            Message::HighlightQuery(query) => {
+                if let Some(ed) = &mut self.editor {
+                    if ed.highlight_job.is_none() {
+                        ed.highlight_query = query;
+                        ed.highlight_suggestion = None;
+                        ed.highlight_status = None;
+                    }
+                }
+            }
+            Message::SuggestHighlight => return self.suggest_highlight(),
+            Message::CancelHighlight => {
+                if let Some(ed) = &mut self.editor {
+                    ed.highlight_job = None;
+                    ed.highlight_status = Some("Highlight detection cancelled.".into());
+                }
+            }
+            Message::HighlightFinished(id, token, result) => {
+                if let Some(ed) = &mut self.editor {
+                    if ed.item_id == id
+                        && ed
+                            .highlight_job
+                            .as_ref()
+                            .is_some_and(|job| job.matches(&token))
+                    {
+                        ed.highlight_job = None;
+                        match result {
+                            Ok(Some(suggestion)) => ed.highlight_suggestion = Some(suggestion),
+                            Ok(None) => ed.highlight_status = Some("No clear highlight found. Try a more specific description or trim manually.".into()),
+                            Err(error) => ed.highlight_status = Some(error),
+                        }
+                    }
+                }
+            }
+            Message::ApplyHighlight => {
+                let Some(ed) = &mut self.editor else {
+                    return Task::none();
+                };
+                if ed.exporting {
+                    return Task::none();
+                }
+                let Some(suggestion) = ed.highlight_suggestion.take() else {
+                    return Task::none();
+                };
+                ed.trim_start = suggestion.trim.start_sec;
+                ed.trim_end = suggestion.trim.end_sec;
+                ed.current_time = ed.trim_start;
+                ed.editing_time = false;
+                ed.playing = false;
+                ed.player = None;
+                ed.highlight_status =
+                    Some("Highlight trim applied. Adjust the In/Out points as needed.".into());
+                sync_inout_inputs(ed);
+                sync_time_input(ed);
+                self.commit_spec();
+                return self.request_frame();
+            }
+            Message::DismissHighlight => {
+                if let Some(ed) = &mut self.editor {
+                    ed.highlight_suggestion = None;
+                    ed.highlight_status = None;
                 }
             }
             Message::SetOut => {
@@ -1397,6 +1511,10 @@ impl App {
             }
             Message::NamingChanged(s) => {
                 self.config.naming_template = s;
+                return self.save_config_task();
+            }
+            Message::HighlightModelChanged(model) => {
+                self.config.highlight_model = model;
                 return self.save_config_task();
             }
             Message::SetQm(c) => {
@@ -1819,6 +1937,11 @@ impl App {
             export_cancel: None,
             overwrite_target: None,
             after_prompt: false,
+            highlight_query: "A multi-kill, clutch, impressive play, or funny gameplay moment"
+                .into(),
+            highlight_job: None,
+            highlight_suggestion: None,
+            highlight_status: None,
         });
         let path = item.path.clone();
         Task::perform(blocking(move || libav::probe(&path)), move |r| {
@@ -2710,6 +2833,155 @@ fn key_token_matches(token: &str, key: &iced::keyboard::Key) -> bool {
 mod tests {
     use super::*;
     use iced::keyboard::{key::Named, Key, Modifiers};
+
+    fn highlight_test_app() -> App {
+        let mut app = App {
+            config: AppConfig::default(),
+            items: vec![qi("test.mp4", QueueStatus::Ready, None, &[])],
+            known_paths: HashSet::new(),
+            edit_store: host::EditStore::default(),
+            media_cache: host::MediaCache::default(),
+            media_cache_dirty: false,
+            selected_id: None,
+            view: View::Queue,
+            filter: QueueFilter::default(),
+            presets: host::CapturePresets::default(),
+            watcher: None,
+            editor: None,
+            audio_defaults: Vec::new(),
+            rename: None,
+            delete_confirm: None,
+            delete_error: None,
+            new_tag: String::new(),
+            export_target: None,
+            hovered_card: None,
+            fullscreen: false,
+            preview_scale: 1.0,
+            theme: theme::dark(),
+        };
+        drop(app.select_item("test.mp4".into()));
+        // Exercise editor messages without persisting to the user's edits.json or decoding a file.
+        app.items.clear();
+        let ed = app.editor.as_mut().unwrap();
+        ed.trim_start = 2.0;
+        ed.trim_end = 20.0;
+        ed.crop_enabled = true;
+        ed.crop = CropSpec {
+            x: 2,
+            y: 4,
+            width: 100,
+            height: 100,
+        };
+        ed.audio.push(AudioRow {
+            index: 0,
+            label: "Audio".into(),
+            detail: String::new(),
+            enabled: false,
+            volume: 0.5,
+        });
+        ed.highlight_job = Some(highlight::HighlightJob::new(30.0));
+        app
+    }
+
+    fn suggestion() -> qlipq_core::highlight::HighlightSuggestion {
+        qlipq_core::highlight::HighlightSuggestion {
+            trim: TrimSpec {
+                start_sec: 5.0,
+                end_sec: 12.0,
+            },
+            score: 80,
+            reason: "A clutch".into(),
+        }
+    }
+
+    #[test]
+    fn highlight_result_only_changes_trim_when_applied_and_keeps_other_edits() {
+        let mut app = highlight_test_app();
+        let token = app
+            .editor
+            .as_ref()
+            .unwrap()
+            .highlight_job
+            .as_ref()
+            .unwrap()
+            .cancel
+            .clone();
+        drop(app.update(Message::HighlightFinished(
+            "test.mp4".into(),
+            token,
+            Ok(Some(suggestion())),
+        )));
+        let ed = app.editor.as_ref().unwrap();
+        assert_eq!((ed.trim_start, ed.trim_end), (2.0, 20.0));
+        assert!(ed.highlight_suggestion.is_some());
+        drop(app.update(Message::ApplyHighlight));
+        let ed = app.editor.as_ref().unwrap();
+        assert_eq!((ed.trim_start, ed.trim_end), (5.0, 12.0));
+        assert_eq!(ed.current_time, 5.0);
+        assert_eq!(ed.in_input, format_timestamp(5.0, ed_fps(ed)));
+        assert_eq!(ed.out_input, format_timestamp(12.0, ed_fps(ed)));
+        assert!(ed.crop_enabled);
+        assert_eq!(ed.crop.x, 2);
+        assert!(!ed.audio[0].enabled);
+        assert_eq!(ed.audio[0].volume, 0.5);
+    }
+
+    #[test]
+    fn cancelled_and_stale_highlight_results_do_not_change_the_editor() {
+        let mut app = highlight_test_app();
+        let token = app
+            .editor
+            .as_ref()
+            .unwrap()
+            .highlight_job
+            .as_ref()
+            .unwrap()
+            .cancel
+            .clone();
+        drop(app.update(Message::HighlightFinished(
+            "another.mp4".into(),
+            token.clone(),
+            Ok(Some(suggestion())),
+        )));
+        assert!(app.editor.as_ref().unwrap().highlight_suggestion.is_none());
+        drop(app.update(Message::CancelHighlight));
+        app.editor.as_mut().unwrap().highlight_job = Some(highlight::HighlightJob::new(30.0));
+        drop(app.update(Message::HighlightFinished(
+            "test.mp4".into(),
+            token,
+            Ok(Some(suggestion())),
+        )));
+        let ed = app.editor.as_ref().unwrap();
+        assert!(ed.highlight_suggestion.is_none());
+        assert!(ed.highlight_job.is_some());
+        assert_eq!((ed.trim_start, ed.trim_end), (2.0, 20.0));
+    }
+
+    #[test]
+    fn dismissing_suggestion_and_finishing_with_error_preserve_trim() {
+        let mut app = highlight_test_app();
+        app.editor.as_mut().unwrap().highlight_suggestion = Some(suggestion());
+        drop(app.update(Message::DismissHighlight));
+        assert!(app.editor.as_ref().unwrap().highlight_suggestion.is_none());
+        let token = app
+            .editor
+            .as_ref()
+            .unwrap()
+            .highlight_job
+            .as_ref()
+            .unwrap()
+            .cancel
+            .clone();
+        drop(app.update(Message::HighlightFinished(
+            "test.mp4".into(),
+            token,
+            Err("Model unavailable".into()),
+        )));
+        let ed = app.editor.as_ref().unwrap();
+        assert!(ed.highlight_job.is_none());
+        assert_eq!(ed.highlight_status.as_deref(), Some("Model unavailable"));
+        assert_eq!((ed.trim_start, ed.trim_end), (2.0, 20.0));
+    }
 
     #[test]
     fn timecode_formats_as_frames() {

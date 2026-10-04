@@ -242,7 +242,7 @@ impl App {
             length,
         ]
         .spacing(theme::XS);
-        let timeline = column![scrub, time_row, inout].spacing(theme::SM);
+        let timeline = column![scrub, time_row, inout, self.highlight_section(ed)].spacing(theme::SM);
 
         // Options laid out in two columns: media edits (crop, audio) on the left, output + metadata
         // (quality override, tags) on the right. The two toggle cards (Crop, Override) head each column.
@@ -389,6 +389,41 @@ impl App {
             .padding(theme::MD)
             .style(theme::card)
             .into()
+    }
+
+    fn highlight_section<'a>(&self, ed: &'a Editor) -> Element<'a, Message> {
+        let mut query = text_input("Describe the highlight to find", &ed.highlight_query).style(theme::input);
+        if ed.highlight_job.is_none() {
+            query = query.on_input(Message::HighlightQuery);
+        }
+        let mut controls = row![query].spacing(theme::SM).align_y(iced::Alignment::Center);
+        if let Some(job) = &ed.highlight_job {
+            controls = controls.push(button(text("Cancel").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::CancelHighlight));
+            let current = job.section.load(Ordering::Relaxed);
+            let status = if current == 0 { "Checking local model…".into() } else { format!("Analyzing section {current} of {}…", job.total) };
+            return column![text("Highlight suggestion").size(theme::LABEL).font(theme::FONT_MEDIUM), controls, text(status).size(theme::SMALL)]
+                .spacing(theme::XS).into();
+        }
+        controls = controls.push(
+            button(text("Suggest highlight").size(theme::LABEL))
+                .style(theme::btn_secondary)
+                .on_press_maybe((!ed.exporting && !ed.highlight_query.trim().is_empty()).then_some(Message::SuggestHighlight)),
+        );
+        let mut body = column![text("Highlight suggestion").size(theme::LABEL).font(theme::FONT_MEDIUM), controls].spacing(theme::XS);
+        if let Some(suggestion) = &ed.highlight_suggestion {
+            let fps = ed_fps(ed);
+            body = body.push(text(format!("Suggested: {} – {} · {}", format_timestamp(suggestion.trim.start_sec, fps), format_timestamp(suggestion.trim.end_sec, fps), suggestion.reason)).size(theme::LABEL));
+            body = body.push(text("Includes 3 seconds before and 2 seconds after the event, within the clip.").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }));
+            body = body.push(row![
+                button(text("Apply trim").size(theme::LABEL)).style(theme::btn_secondary).on_press_maybe((!ed.exporting).then_some(Message::ApplyHighlight)),
+                button(text("Dismiss").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::DismissHighlight),
+            ].spacing(theme::SM));
+        } else if let Some(status) = &ed.highlight_status {
+            body = body.push(text(status).size(theme::SMALL));
+        } else {
+            body = body.push(text("Uses your local Ollama vision model. Review the suggestion before applying it.").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }));
+        }
+        body.into()
     }
 
     /// The preview expanded to fill the window, with a transport + exit bar pinned to the bottom.
@@ -669,6 +704,12 @@ impl App {
             section("Output defaults", column![quality, encode_row, rate_row].spacing(theme::SM).into()),
             section("Preview quality", preview_quality.into()),
             section("Playback", playback.into()),
+            section("Highlight suggestions", column![
+                text("Local Ollama vision model").size(theme::LABEL),
+                text_input("qwen3-vl:4b", &self.config.highlight_model).on_input(Message::HighlightModelChanged).style(theme::input),
+                text("Install and start Ollama, then run: ollama pull qwen3-vl:4b").size(theme::SMALL),
+                text("Analysis uses sampled video frames on this computer. It can miss fast action and does not listen to audio. Cloud models are not supported.").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+            ].spacing(theme::XS).into()),
             section(
                 "Naming template",
                 column![

@@ -46,4 +46,23 @@ The editor shows an estimated file size for the current clip, and you can overri
 
 > **Diagnosing preview stutter.** If the preview stutters or the audio drops out, enable **Settings → Playback → Show debug panel in the editor**. The panel adds a **Debug** card under the editor showing the clip's details, whether it's decoding on the **GPU (hardware)** or in **software**, and — while playing — live **video/audio buffer** levels, dropped frames, and audio underruns. Software decoding of heavy 1440p/4K AV1/HEVC is the usual cause; it never affects exports.
 
+## Suggest a highlight trim
+
+Highlight suggestions are optional and run through a **local Ollama vision model**. Install [Ollama](https://ollama.com/download), start it, and download the default model:
+
+```sh
+ollama pull qwen3-vl:4b
+```
+
+Qwen3-VL requires Ollama 0.12.7 or newer. You can choose another installed local vision model in **Settings → Highlight suggestions**. QlipQ connects to Ollama at `127.0.0.1:11434`; it does not download models automatically and rejects cloud models.
+
+1. Open a clip and find **Highlight suggestion** below the In/Out controls.
+2. Describe what to find, such as “a multi-kill” or “a successful boss fight”, then click **Suggest highlight**. Playback pauses while analysis starts. Longer recordings are analyzed in overlapping sections; the section count shows progress. **Cancel** or selecting another clip stops analysis.
+3. Review the suggested range and its description. Your current trim stays unchanged until you click **Apply trim**. **Dismiss** keeps your existing edit.
+4. Applying the suggestion adds up to **3 seconds of lead-in** and **2 seconds of aftermath**, bounded by the original clip. Adjust the normal In/Out controls, preview the result, and export when ready. The applied trim is saved like any other edit.
+
+This is an experimental suggestion: analysis samples video at roughly one frame per second in 30-second sections with a 5-second overlap. It does not analyze audio and may miss brief action, jokes, or events that require game-specific context. It may report no clear highlight. Accuracy and speed depend on the model, your hardware, and the recording; review every suggested trim.
+
+If Ollama is unavailable or the model is missing, the editor shows an error with setup instructions. A failed or cancelled analysis leaves your current trim unchanged.
+
 **Next:** [set up the OBS replay buffer](/guide/obs-replay-buffer).
