@@ -247,7 +247,7 @@ fn chat_body(model: &str, query: &str, window: AnalysisWindow, samples: &[Sample
         "stream": false,
         "think": false,
         "format": detection_schema(),
-        "options": { "temperature": 0, "num_ctx": 16384, "num_predict": 512 },
+        "options": { "temperature": 0, "num_ctx": 32768, "num_predict": 512 },
         "messages": [{
             "role": "user",
             "content": format!(
@@ -401,6 +401,10 @@ mod tests {
             assert_eq!(body["stream"], false);
             let images = body["messages"][0]["images"].as_array().unwrap();
             assert_eq!(images.len(), if index == 1 { 30 } else { 6 });
+            // Qwen3-VL uses 1024 tokens per image in Ollama, plus the prompt and response.
+            assert!(
+                body["options"]["num_ctx"].as_u64().unwrap() >= images.len() as u64 * 1024 + 2048
+            );
             let png = STANDARD.decode(images[0].as_str().unwrap()).unwrap();
             let image = image::load_from_memory(&png).unwrap();
             assert_eq!((image.width(), image.height()), (64, 36));

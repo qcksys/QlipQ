@@ -61,7 +61,7 @@ Qwen3-VL requires Ollama 0.12.7 or newer. You can choose another installed local
 3. Review the suggested range and its description. Your current trim stays unchanged until you click **Apply trim**. **Dismiss** keeps your existing edit.
 4. Applying the suggestion adds up to **3 seconds of lead-in** and **2 seconds of aftermath**, bounded by the original clip. Adjust the normal In/Out controls, preview the result, and export when ready. The applied trim is saved like any other edit.
 
-This is an experimental suggestion: analysis samples video at roughly one frame per second in 30-second sections with a 5-second overlap. It does not analyze audio and may miss brief action, jokes, or events that require game-specific context. It may report no clear highlight. Accuracy and speed depend on the model, your hardware, and the recording; review every suggested trim.
+This is an experimental suggestion: analysis samples video at roughly one frame per second in 30-second sections with a 5-second overlap. QlipQ requests a 32K-token context to fit the sampled frames, which needs more memory than a short chat. It does not analyze audio and may miss brief action, jokes, or events that require game-specific context. It may report no clear highlight. Accuracy and speed depend on the model, your hardware, and the recording; review every suggested trim.
 
 If Ollama is unavailable or the model is missing, the editor shows an error with setup instructions. A failed or cancelled analysis leaves your current trim unchanged.
 
