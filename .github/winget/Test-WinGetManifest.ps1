@@ -64,7 +64,52 @@ try {
     } catch { $rejected = $true }
     if (-not $rejected) { throw 'A missing installer must fail generation.' }
 
+    function Invoke-TestWingetCreate {
+        $wingetTest.Arguments = @($args)
+        $global:LASTEXITCODE = $wingetTest.ExitCode
+        if ($wingetTest.ExitCode -ne 0) { return }
+        $output = & $generate -Tag 'v1.2.5' @arguments
+        $localePath = Join-Path $output 'qcksys.qlipq.locale.en-US.yaml'
+        $content = (Get-Content -LiteralPath $localePath -Raw).Replace('Publisher: qcksys', 'Publisher: Accepted publisher')
+        Set-Content -LiteralPath $localePath -Value $content
+        if ($wingetTest.WrongHash) {
+            $installerManifest = Join-Path $output 'qcksys.qlipq.installer.yaml'
+            Set-Content -LiteralPath $installerManifest -Value 'InstallerSha256: incorrect'
+        }
+        Write-Output 'WingetCreate diagnostic output'
+    }
+
+    $wingetTest = @{ ExitCode = 0; WrongHash = $false; Arguments = @() }
+    $updated = & $generate -Tag 'v1.2.5' @arguments -Update -WingetCreatePath Invoke-TestWingetCreate
+    $expectedArguments = @(
+        'update', 'qcksys.qlipq', '--version', '1.2.5',
+        '--urls', 'https://github.com/qcksys/qlipq/releases/download/v1.2.5/qlipq-setup-x64.exe|x64',
+        '--release-notes-url', 'https://github.com/qcksys/qlipq/releases/tag/v1.2.5',
+        '--out', $testDirectory
+    )
+    if (($wingetTest.Arguments -join "`n") -cne ($expectedArguments -join "`n")) { throw 'Incorrect WingetCreate update arguments.' }
+    if ($updated -isnot [string] -or -not (Test-Path -LiteralPath $updated)) { throw 'Update must return only the manifest directory.' }
+    Assert-Contains (Get-Content -LiteralPath (Join-Path $updated 'qcksys.qlipq.locale.en-US.yaml') -Raw) 'Publisher: Accepted publisher'
+    if ($ValidateWithWinGet) {
+        winget validate --manifest $updated --disable-interactivity
+        if ($LASTEXITCODE -ne 0) { throw "Updated manifest validation failed: $LASTEXITCODE" }
+    }
+
+    foreach ($failure in @('CLI failure', 'hash mismatch')) {
+        $wingetTest.ExitCode = if ($failure -eq 'CLI failure') { 1 } else { 0 }
+        $wingetTest.WrongHash = $failure -eq 'hash mismatch'
+        $expectedError = if ($failure -eq 'CLI failure') { 'WingetCreate update failed' } else { 'published installer hash' }
+        $rejected = $false
+        try { & $generate -Tag 'v1.2.5' @arguments -Update -WingetCreatePath Invoke-TestWingetCreate | Out-Null }
+        catch { $rejected = $_.ToString().Contains($expectedError) }
+        if (-not $rejected) { throw "$failure must stop generation without falling back to templates." }
+    }
+
     Write-Host 'WinGet manifest tests passed.'
 } finally {
+    $cleanupPath = (Resolve-Path -LiteralPath $testDirectory).Path
+    if ((Split-Path -Parent $cleanupPath) -ne [System.IO.Path]::GetTempPath().TrimEnd('\', '/')) {
+        throw 'Refusing to remove a test directory outside the temporary directory.'
+    }
     Remove-Item -LiteralPath $testDirectory -Recurse -Force
 }

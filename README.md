@@ -84,10 +84,11 @@ vp run qlipq-website#build      # static build into apps/website/dist
     `main` (crates are internal — not published to crates.io).
   - `qlipq-desktop-release.yml` — on a published `v*` Release, builds and attaches
     the Windows/Linux binaries and the Windows installer, then calls `publish-winget.yml`.
-  - `publish-winget.yml` — downloads the published Windows installer, generates and
-    validates the `qcksys.qlipq` manifests, and submits a PR to
+  - `publish-winget.yml` — downloads the published Windows installer, uses
+    `wingetcreate update` to update the accepted `qcksys.qlipq` manifests, validates
+    them, and submits a PR with `wingetcreate submit` to
     [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs). Supports the
-    first package submission and subsequent stable `vX.Y.Z` releases; drafts and
+    first package submission using local templates and subsequent stable `vX.Y.Z` releases; drafts and
     prereleases are rejected. WinGet availability follows Microsoft's PR review
     and merge, not the GitHub release itself.
 
@@ -103,10 +104,20 @@ requested on the first submission.
 To backfill an existing release or retry submission without rebuilding the app,
 run **Publish to WinGet** in GitHub Actions with its tag. Leave **submit** off to
 validate and download the generated manifests as a workflow artifact; enable it
-to submit the PR. Check for an existing PR/version before retrying a successful
-submission. Missing credentials fail the submission job; the GitHub release
+to submit the PR. The workflow skips submission when that version is already
+accepted or has an open PR. While the first package PR is pending, submissions for
+other versions also wait; rerun the desired release after the first PR merges.
+API failures stop the workflow rather than falling back to a new submission.
+Missing credentials fail the submission job; the GitHub release
 assets remain available.
 
-Manifest templates and their generator live in `.github/winget/`. Run
+WingetCreate is pinned and checksum-verified. Updates start from the latest accepted
+upstream manifests, preserving metadata and moderator corrections; local templates
+are used only before the first version is accepted. Both paths validate the manifests
+and upload them before submission. Installer URLs and release notes use the release tag.
+
+Publication checks, manifest templates, and their generator live in `.github/winget/`. Run
 `pwsh -File .github/winget/Test-WinGetManifest.ps1` for local tests, or add
-`-ValidateWithWinGet` to also run `winget validate` (requires WinGet). CI runs both.
+`-ValidateWithWinGet` to also run `winget validate` (requires WinGet). Run
+`pwsh -File .github/winget/Test-WinGetPublicationState.ps1` for submission guard tests.
+CI runs both test scripts and native validation.
