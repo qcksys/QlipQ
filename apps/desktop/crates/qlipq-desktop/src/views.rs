@@ -13,6 +13,7 @@ impl App {
             .style(|t: &Theme| text::Style { color: Some(t.extended_palette().primary.base.color) });
         let bar = row![
             brand,
+            text("Recording workspace").size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
             Space::new().width(Length::Fill),
             button(text(format!("Queue ({pending})")).size(theme::LABEL)).style(theme::nav(matches!(self.view, View::Queue))).on_press(Message::ShowQueue),
             button(text("Settings").size(theme::LABEL)).style(theme::nav(matches!(self.view, View::Settings))).on_press(Message::ShowSettings),
@@ -20,7 +21,7 @@ impl App {
         ]
         .spacing(theme::SM)
         .align_y(iced::Alignment::Center)
-        .padding([theme::SM, theme::LG]);
+        .padding([theme::MD, theme::XL]);
         container(bar).width(Length::Fill).style(theme::top_bar).into()
     }
 
@@ -30,7 +31,6 @@ impl App {
         let mut all_tags: Vec<String> = self.items.iter().flat_map(|i| i.tags.clone().unwrap_or_default()).collect();
         all_tags.sort();
         all_tags.dedup();
-        all_tags.retain(|t| t != DISMISSED_TAG);
 
         let mut all_games: Vec<String> = self.items.iter().filter_map(|i| i.source.clone()).collect();
         all_games.sort();
@@ -46,19 +46,23 @@ impl App {
         // position in the widget tree; if a conditional sibling above it vanished (e.g. deleting the
         // last tagged clip drops the filter row), the scrollable would shift index and reset to the
         // top — the exact scroll jump we're avoiding on delete.
-        let mut header = column![].spacing(theme::SM);
+        let mut header = column![row![
+            text("Recordings").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
+            Space::new().width(Length::Fill),
+            text(format!("{} clips", visible.len())).size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
+        ].align_y(iced::Alignment::Center)].spacing(theme::SM);
         if !self.config.watched_folders.is_empty() {
             header = header.push(button(text("Rescan all folders").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::RescanAll));
         }
         header = header.push(
-            text_input("Search clips…", &f.search).on_input(Message::FilterSearch).style(theme::input).width(Length::Fill),
+            text_input("Search clips…", &f.search).id("queue-search").on_input(Message::FilterSearch).style(theme::input).width(Length::Fill),
         );
         header = header.push(
             row![
-                pick_list(StatusFilter::ALL.to_vec(), Some(StatusFilter::from_opt(f.status)), |s: StatusFilter| Message::SetStatusFilter(s.to_opt()))
+                container(pick_list(StatusFilter::ALL.to_vec(), Some(StatusFilter::from_opt(f.status)), |s: StatusFilter| Message::SetStatusFilter(s.to_opt()))
                     .style(theme::pick_list_style)
-                    .width(Length::Fill),
-                pick_list(HighlightFilter::ALL.to_vec(), Some(f.highlights), Message::SetHighlightFilter).style(theme::pick_list_style).width(Length::Fill),
+                    .width(Length::Fill)).id("filter-status").width(Length::Fill),
+                container(pick_list(HighlightFilter::ALL.to_vec(), Some(f.highlights), Message::SetHighlightFilter).style(theme::pick_list_style).width(Length::Fill)).id("filter-highlights").width(Length::Fill),
             ]
             .spacing(theme::SM),
         );
@@ -69,7 +73,7 @@ impl App {
                 opts.extend(all_games.iter().cloned());
                 let selected = Some(f.game.clone().unwrap_or_else(|| ALL_GAMES.to_string()));
                 selectors = selectors.push(
-                    pick_list(opts, selected, |s: String| Message::SetGameFilter((s != ALL_GAMES).then_some(s))).style(theme::pick_list_style).width(Length::Fill),
+                    container(pick_list(opts, selected, |s: String| Message::SetGameFilter((s != ALL_GAMES).then_some(s))).style(theme::pick_list_style).width(Length::Fill)).id("filter-game").width(Length::Fill),
                 );
             }
             if !all_tags.is_empty() {
@@ -77,7 +81,7 @@ impl App {
                 opts.extend(all_tags.iter().cloned());
                 let selected = Some(f.tag.clone().unwrap_or_else(|| ALL_TAGS_LABEL.to_string()));
                 selectors = selectors.push(
-                    pick_list(opts, selected, |s: String| Message::SetTagFilter((s != ALL_TAGS_LABEL).then_some(s))).style(theme::pick_list_style).width(Length::Fill),
+                    container(pick_list(opts, selected, |s: String| Message::SetTagFilter((s != ALL_TAGS_LABEL).then_some(s))).style(theme::pick_list_style).width(Length::Fill)).id("filter-tag").width(Length::Fill),
                 );
             }
             header = header.push(selectors);
@@ -85,8 +89,8 @@ impl App {
         header = header.push(
             row![
                 text("Sort").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
-                pick_list(QueueSort::ALL, Some(self.queue_sort), Message::QueueSortChanged)
-                    .style(theme::pick_list_style).width(Length::Fill),
+                container(pick_list(QueueSort::ALL, Some(self.queue_sort), Message::QueueSortChanged)
+                    .style(theme::pick_list_style).width(Length::Fill)).id("queue-sort").width(Length::Fill),
             ].spacing(theme::SM).align_y(iced::Alignment::Center),
         );
         if active {
@@ -137,7 +141,7 @@ impl App {
         let status = item.status;
         let mut header = row![
             container(Space::new().width(Length::Fixed(8.0)).height(Length::Fixed(8.0))).style(theme::status_dot(status)),
-            text(item.file_name.clone()).size(theme::BODY).font(theme::FONT_MEDIUM).width(Length::Fill),
+            text(item.file_name.clone()).size(theme::BODY).font(theme::FONT_MEDIUM).wrapping(text::Wrapping::WordOrGlyph).width(Length::Fill),
         ]
         .spacing(theme::SM)
         .align_y(iced::Alignment::Center);
@@ -158,7 +162,7 @@ impl App {
         .width(Length::Fill)
         .padding([theme::XS, 0.0])
         .style(theme::btn_plain)
-        .on_press(Message::SelectItem(item.id.clone()));
+        .on_press_maybe((!self.editor.as_ref().is_some_and(|ed| ed.exporting)).then(|| Message::SelectItem(item.id.clone())));
 
         let mut card = column![open].spacing(theme::SM);
 
@@ -172,17 +176,19 @@ impl App {
         }
 
         let actions = row![
-            button(text("Rename").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::RenameOpen(item.id.clone())),
+            button(text("Rename").size(theme::SMALL)).style(theme::btn_secondary).on_press_maybe((status != QueueStatus::Exporting).then(|| Message::RenameOpen(item.id.clone()))),
             with_tip(
                 button(text("Open").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::RevealItem(item.path.clone())).into(),
                 "Show in file explorer".to_string(),
             ),
-            button(text(if item_dismissed(item) { "Restore" } else { "Dismiss" }).size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::Dismiss(item.id.clone())),
+            button(text(if item_dismissed(item) { "Restore" } else { "Dismiss" }).size(theme::SMALL)).style(theme::btn_secondary).on_press_maybe((status != QueueStatus::Exporting).then(|| Message::Dismiss(item.id.clone()))),
             Space::new().width(Length::Fill),
-            button(text("Delete").size(theme::SMALL)).style(theme::btn_danger).on_press(Message::RequestDelete(item.id.clone())),
+            button(text("Delete").size(theme::SMALL)).style(theme::btn_ghost).on_press_maybe((status != QueueStatus::Exporting).then(|| Message::RequestDelete(item.id.clone()))),
         ]
         .spacing(theme::XS);
-        card = card.push(actions);
+        if selected {
+            card = card.push(actions);
+        }
 
         let hovered = self.hovered_card.as_deref() == Some(item.id.as_str());
         let id = item.id.clone();
@@ -219,7 +225,11 @@ impl App {
 
     fn editor_view(&self) -> Element<'_, Message> {
         let Some(ed) = &self.editor else {
-            return empty_state("Select a clip from the queue to start editing.");
+            return center(column![
+                text("Make the next clip yours").size(28).font(theme::FONT_SEMIBOLD),
+                text("Select a recording to trim, adjust audio, and export.").size(theme::BODY).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                button(text("Manage watched folders").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::ShowSettings),
+            ].spacing(theme::LG).align_x(iced::Alignment::Center)).padding(theme::XL).into();
         };
         if let Some(err) = &ed.load_error {
             return container(
@@ -240,9 +250,10 @@ impl App {
         };
 
         // Preview pane (scalable; double-click toggles fullscreen) + a zoom / fullscreen toolbar.
-        let preview = preview_pane(ed, media, Length::Fixed(360.0 * self.preview_scale));
+        let preview = preview_pane(ed, media, Length::Fixed(280.0 * self.preview_scale));
         let zoom = (self.preview_scale * 100.0).round() as i32;
         let preview_tools = row![
+            text(item.file_name.clone()).size(theme::HEADING).font(theme::FONT_SEMIBOLD).width(Length::Fill),
             Space::new().width(Length::Fill),
             button(text("−").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::PreviewZoom(-0.25)),
             text(format!("{zoom}%")).size(theme::META).font(Font::MONOSPACE).width(Length::Fixed(44.0)).style(|t| text::Style { color: Some(theme::muted(t)) }),
@@ -259,6 +270,7 @@ impl App {
         let scrub = crate::seeker::seeker(dur, ed.current_time.min(dur), ed.trim_start, ed.trim_end, Message::Seek);
         let time_row = row![
             text_input("0:00.000", &ed.time_input)
+                .id("playhead")
                 .on_input(Message::TimestampEdited)
                 .on_submit(Message::TimestampSubmit)
                 .font(Font::MONOSPACE)
@@ -280,15 +292,17 @@ impl App {
             length,
         ]
         .spacing(theme::XS);
-        let timeline = column![scrub, time_row, inout, self.highlight_section(ed)].spacing(theme::SM);
-
-        // Options laid out in two columns: media edits (crop, audio) on the left, output + metadata
-        // (quality override, tags) on the right. The two toggle cards (Crop, Override) head each column.
-        let options = row![
-            column![self.crop_section(ed, media), self.audio_section(ed)].spacing(theme::MD).width(Length::Fill),
-            column![self.override_section(item), self.editor_tags(item)].spacing(theme::MD).width(Length::Fill),
-        ]
-        .spacing(theme::MD);
+        let timeline = column![container(scrub).id("timeline"), time_row].spacing(theme::SM);
+        let tabs = row![
+            button(text("Trim & highlights").size(theme::LABEL)).style(theme::nav(self.editor_tab == EditorTab::Trim)).on_press(Message::EditorTab(EditorTab::Trim)),
+            button(text("Audio & crop").size(theme::LABEL)).style(theme::nav(self.editor_tab == EditorTab::AudioCrop)).on_press(Message::EditorTab(EditorTab::AudioCrop)),
+            button(text("Output & tags").size(theme::LABEL)).style(theme::nav(self.editor_tab == EditorTab::Output)).on_press(Message::EditorTab(EditorTab::Output)),
+        ].spacing(theme::SM);
+        let options: Element<Message> = match self.editor_tab {
+            EditorTab::Trim => column![inout, self.highlight_section(ed)].spacing(theme::LG).into(),
+            EditorTab::AudioCrop => column![self.audio_section(ed), self.crop_section(ed, media)].spacing(theme::MD).into(),
+            EditorTab::Output => column![self.override_section(item), self.editor_tags(item)].spacing(theme::MD).into(),
+        };
 
         // Export bar.
         let spec = editor_spec(ed);
@@ -300,22 +314,25 @@ impl App {
         } else {
             format!("{}×{}", media.width, media.height)
         };
-        let mut stats = row![
+        let stats = row![
             stat("Duration", datetimes::format_duration(qlipq_core::edit_spec::effective_duration(&spec, media))),
             stat("Resolution", dims),
             stat("Est. size", format!("{}{}", if estimate.approximate { "≈" } else { "" }, format_bytes(estimate.bytes))),
         ]
-        .spacing(theme::XL)
+        .spacing(theme::LG)
         .align_y(iced::Alignment::Center);
+        let mut export_details = column![stats].spacing(theme::SM);
         if let Some(err) = &validation {
-            stats = stats.push(text(err.clone()).size(theme::LABEL).style(|t: &Theme| text::Style { color: Some(t.extended_palette().danger.base.color) }));
+            export_details = export_details.push(text(err.clone()).size(theme::LABEL).style(|t: &Theme| text::Style { color: Some(t.extended_palette().danger.base.color) }));
         }
         if ed.exporting {
-            stats = stats.push(container(progress_bar(0.0..=1.0, ed.progress_display).style(theme::progress_style)).width(Length::Fixed(160.0)));
-            stats = stats.push(button(text("Cancel").size(theme::LABEL)).style(theme::btn_danger).on_press(Message::CancelExport));
+            export_details = export_details.push(progress_bar(0.0..=1.0, ed.progress_display).girth(4).style(theme::progress_style));
         }
 
-        let mut export_bar = row![stats, Space::new().width(Length::Fill)].align_y(iced::Alignment::Center).spacing(theme::SM);
+        let mut export_bar = row![export_details.width(Length::Fill)].align_y(iced::Alignment::Center).spacing(theme::MD);
+        if ed.exporting {
+            export_bar = export_bar.push(button(text("Cancel export").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::CancelExport));
+        }
         if item.export_path.is_some() && !ed.exporting {
             export_bar = export_bar.push(button(text("Show file").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::ShowExported));
         }
@@ -339,14 +356,23 @@ impl App {
 
         let player_zone = column![preview_tools, preview, transport, timeline].spacing(theme::MD);
 
-        let mut body = column![player_zone, rule::horizontal(1), options, rule::horizontal(1), export_bar]
+        let mut body = column![player_zone, tabs, options]
             .spacing(theme::LG)
             .padding(theme::LG);
         if self.config.debug {
             body = body.push(rule::horizontal(1));
             body = body.push(self.debug_section(ed, media, item));
         }
-        scrollable(body).into()
+        if let Some(error) = &item.error {
+            body = body.push(text(error).size(theme::LABEL).style(|t: &Theme| text::Style { color: Some(t.extended_palette().danger.base.color) }));
+        }
+        let mut footer = column![export_bar].spacing(theme::SM);
+        if self.config.output_folder.is_empty() {
+            footer = footer.push(button(text("Choose an output folder in Settings").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::ShowSettings));
+        }
+        column![scrollable(body).id("editor-scroll").height(Length::Fill),
+            container(footer).padding(theme::LG).width(Length::Fill).style(theme::sidebar),
+        ].height(Length::Fill).into()
     }
 
     /// Opt-in developer panel (Settings → Playback → *Show debug panel*): the clip's media details,
@@ -430,7 +456,7 @@ impl App {
     }
 
     fn highlight_section<'a>(&self, ed: &'a Editor) -> Element<'a, Message> {
-        let mut query = text_input("Describe the highlight to find", &ed.highlight_query).style(theme::input);
+        let mut query = text_input("Describe the highlight to find", &ed.highlight_query).id("highlight-query").style(theme::input);
         if ed.highlight_job.is_none() {
             query = query.on_input(Message::HighlightQuery);
         }
@@ -527,6 +553,7 @@ impl App {
                     .align_y(iced::Alignment::Center),
                     row![
                         container(slider(0.0..=2.0, r.volume, move |v| Message::AudioVolume(idx, v)).step(0.05).on_release(Message::AudioVolumeCommit).style(theme::slider_style))
+                            .id(format!("volume-{idx}"))
                             .width(Length::Fixed(180.0)),
                         text(format!("{}%", (r.volume * 100.0) as i32)).size(theme::SMALL).font(Font::MONOSPACE).style(|t| text::Style { color: Some(theme::muted(t)) }),
                     ]
@@ -544,7 +571,7 @@ impl App {
         let mut col = column![checkbox(enabled).label("Override quality for this clip").text_size(theme::LABEL).style(theme::checkbox_style).on_toggle(Message::ToggleOverride)].spacing(theme::SM);
         if enabled {
             let out = self.effective_output(item);
-            let mut fields = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::OverrideQm).style(theme::pick_list_style)]
+            let mut fields = row![container(pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::OverrideQm).style(theme::pick_list_style)).id("override-mode")]
                 .spacing(theme::SM)
                 .align_y(iced::Alignment::End);
             match out.quality_mode {
@@ -575,10 +602,10 @@ impl App {
             let tag = t.clone();
             tags_row = tags_row.push(removable_chip(t, Message::RemoveTag(tag)));
         }
-        let input = text_input("Add tag…", &self.new_tag).on_input(Message::NewTagChanged).on_submit(Message::AddTag).style(theme::input).width(Length::Fixed(160.0));
+        let input = text_input("Add tag…", &self.new_tag).id("new-tag").on_input(Message::NewTagChanged).on_submit(Message::AddTag).style(theme::input).width(Length::Fill);
         container(column![
             text("Tags").size(theme::HEADING).font(theme::FONT_SEMIBOLD),
-            row![tags_row, input].spacing(theme::SM).align_y(iced::Alignment::Center),
+            tags_row, input,
         ]
         .spacing(theme::SM))
         .width(Length::Fill)
@@ -625,18 +652,18 @@ impl App {
 
         // Output folder.
         let output_folder = row![
-            text_input("Where exported clips are saved", &self.config.output_folder).on_input(Message::OutputFolderChanged).style(theme::input).width(Length::Fill),
+            text_input("Where exported clips are saved", &self.config.output_folder).id("output-folder").on_input(Message::OutputFolderChanged).style(theme::input).width(Length::Fill),
             button(text("Browse…").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::PickFolder(PickPurpose::OutputFolder)),
         ]
         .spacing(theme::SM);
 
         // Output defaults. Bottom-align so the mode picker shares a baseline with the numeric field
         // (which carries a label above it) instead of floating above it.
-        let mut quality = row![pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::SetQm).style(theme::pick_list_style)]
+        let mut quality = row![container(pick_list(QmChoice::ALL.to_vec(), Some(QmChoice::from_core(out.quality_mode)), Message::SetQm).style(theme::pick_list_style)).id("quality-mode")]
             .spacing(theme::SM)
             .align_y(iced::Alignment::End);
         match out.quality_mode {
-            QualityMode::Preset => quality = quality.push(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::SetQp).style(theme::pick_list_style)),
+            QualityMode::Preset => quality = quality.push(container(pick_list(QpChoice::ALL.to_vec(), Some(QpChoice::from_core(out.quality_preset)), Message::SetQp).style(theme::pick_list_style)).id("quality-preset")),
             QualityMode::Crf | QualityMode::Vbr => {
                 quality = quality.push(num_field("CRF", out.crf, Message::SetCrf));
                 if out.quality_mode == QualityMode::Vbr {
@@ -647,25 +674,25 @@ impl App {
         }
         let encoder_options: Vec<String> = ENCODER_PRESETS.iter().map(|s| s.to_string()).collect();
         let encode_row = row![
-            pick_list(encoder_options, Some(out.encoder_preset.clone()), Message::SetEncoder).style(theme::pick_list_style),
-            pick_list(CodecChoice::ALL.to_vec(), Some(CodecChoice::from_core(out.video_codec)), Message::SetCodec).style(theme::pick_list_style),
-            pick_list(ContainerChoice::ALL.to_vec(), Some(ContainerChoice::from_core(out.container)), Message::SetContainer).style(theme::pick_list_style),
+            container(pick_list(encoder_options, Some(out.encoder_preset.clone()), Message::SetEncoder).style(theme::pick_list_style)).id("encoder"),
+            container(pick_list(CodecChoice::ALL.to_vec(), Some(CodecChoice::from_core(out.video_codec)), Message::SetCodec).style(theme::pick_list_style)).id("codec"),
+            container(pick_list(ContainerChoice::ALL.to_vec(), Some(ContainerChoice::from_core(out.container)), Message::SetContainer).style(theme::pick_list_style)).id("container"),
         ]
         .spacing(theme::SM);
         let rate_row = row![
-            pick_list(FpsChoice::ALL.to_vec(), Some(FpsChoice::from_core(out.fps)), Message::SetFps).style(theme::pick_list_style),
-            pick_list(ResChoice::ALL.to_vec(), Some(ResChoice::from_core(out.max_height)), Message::SetRes).style(theme::pick_list_style),
-            pick_list(AudioKbpsChoice::ALL.to_vec(), Some(AudioKbpsChoice::from_core(out.audio_bitrate_kbps)), Message::SetAudioKbps).style(theme::pick_list_style),
+            container(pick_list(FpsChoice::ALL.to_vec(), Some(FpsChoice::from_core(out.fps)), Message::SetFps).style(theme::pick_list_style)).id("fps"),
+            container(pick_list(ResChoice::ALL.to_vec(), Some(ResChoice::from_core(out.max_height)), Message::SetRes).style(theme::pick_list_style)).id("resolution"),
+            container(pick_list(AudioKbpsChoice::ALL.to_vec(), Some(AudioKbpsChoice::from_core(out.audio_bitrate_kbps)), Message::SetAudioKbps).style(theme::pick_list_style)).id("audio-bitrate"),
         ]
         .spacing(theme::SM);
 
         // After export.
         let ae = &self.config.after_export;
-        let mut after = column![pick_list(AfterChoice::ALL.to_vec(), Some(AfterChoice::from_core(ae.action)), Message::SetAfter).style(theme::pick_list_style)].spacing(theme::SM);
+        let mut after = column![container(pick_list(AfterChoice::ALL.to_vec(), Some(AfterChoice::from_core(ae.action)), Message::SetAfter).style(theme::pick_list_style)).id("after-export")].spacing(theme::SM);
         if ae.action == AfterExportAction::Move {
             after = after.push(
                 row![
-                    text_input("Destination folder", &ae.move_folder).on_input(Message::MoveFolderChanged).style(theme::input).width(Length::Fill),
+                    text_input("Destination folder", &ae.move_folder).id("move-folder").on_input(Message::MoveFolderChanged).style(theme::input).width(Length::Fill),
                     button(text("Browse…").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::PickFolder(PickPurpose::MoveFolder)),
                 ]
                 .spacing(theme::SM),
@@ -674,8 +701,8 @@ impl App {
         if ae.action == AfterExportAction::Rename {
             after = after.push(
                 row![
-                    text_input("Prefix", &ae.rename_prefix).on_input(Message::RenamePrefixChanged).style(theme::input),
-                    text_input("Suffix", &ae.rename_suffix).on_input(Message::RenameSuffixChanged).style(theme::input),
+                    text_input("Prefix", &ae.rename_prefix).id("rename-prefix").on_input(Message::RenamePrefixChanged).style(theme::input),
+                    text_input("Suffix", &ae.rename_suffix).id("rename-suffix").on_input(Message::RenameSuffixChanged).style(theme::input),
                 ]
                 .spacing(theme::SM),
             );
@@ -698,10 +725,10 @@ impl App {
         }
         let hdr_preview = column![
             brightness_head,
-            slider(1.0..=3.0, gamma, Message::SetHdrPreviewGamma)
+            container(slider(1.0..=3.0, gamma, Message::SetHdrPreviewGamma)
                 .step(0.05)
                 .on_release(Message::ApplyHdrPreviewGamma)
-                .style(theme::slider_style),
+                .style(theme::slider_style)).id("hdr-brightness"),
             text("Brightens HDR clips that preview too dark (HDR sources only; preview only — exports are unaffected). 1.0 = off.")
                 .size(theme::SMALL)
                 .style(|t| text::Style { color: Some(theme::muted(t)) }),
@@ -728,44 +755,54 @@ impl App {
 
         // Preview quality (resolution the preview decodes/tonemaps at — separate from export size).
         let preview_quality = column![
-            pick_list(PreviewResChoice::ALL.to_vec(), Some(PreviewResChoice::from_core(self.config.preview_max_height)), Message::SetPreviewRes).style(theme::pick_list_style),
+            container(pick_list(PreviewResChoice::ALL.to_vec(), Some(PreviewResChoice::from_core(self.config.preview_max_height)), Message::SetPreviewRes).style(theme::pick_list_style)).id("preview-resolution"),
             text("Resolution the preview decodes at (never upscales past the source). Higher is sharper but costs more decode/GPU work — lower it if playback stutters. Preview only; exports are unaffected.")
                 .size(theme::SMALL)
                 .style(|t| text::Style { color: Some(theme::muted(t)) }),
         ]
         .spacing(theme::XS);
 
-        let body = column![
-            text("Settings").size(theme::DISPLAY).font(theme::FONT_BOLD),
-            section("Watched folders", folders.into()),
-            section("Output folder", output_folder.into()),
-            section("Output defaults", column![quality, encode_row, rate_row].spacing(theme::SM).into()),
-            section("Preview quality", preview_quality.into()),
-            section("Playback", playback.into()),
-            section("Highlight suggestions", column![
+        let sections = match self.settings_tab {
+            SettingsTab::Library => column![section("Watched folders", folders.into())],
+            SettingsTab::Export => column![
+                section("Output folder", output_folder.into()),
+                section("Output defaults", column![
+                    text("Quality").size(theme::LABEL), quality,
+                    text("Encoder speed, video codec, and container").size(theme::LABEL), encode_row,
+                    text("Frame rate, resolution, and audio bitrate").size(theme::LABEL), rate_row,
+                ].spacing(theme::SM).into()),
+                section("Naming template", column![
+                    text_input("{date}_{source}_{name}", &self.config.naming_template).id("naming-template").on_input(Message::NamingChanged).style(theme::input),
+                    text("Tokens: {date} {time} {datetime} {source} {name} {index}").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                ].spacing(theme::XS).into()),
+                section("After export", after.into()),
+            ],
+            SettingsTab::Preview => column![
+                section("Playback", playback.into()),
+                section("Preview quality", preview_quality.into()),
+                section("HDR preview", hdr_preview.into()),
+                section("Highlight suggestions", column![
                 text("Local Ollama vision model").size(theme::LABEL),
-                text_input("qwen3-vl:4b-instruct", &self.config.highlight_model).on_input(Message::HighlightModelChanged).style(theme::input),
+                text_input("qwen3-vl:4b-instruct", &self.config.highlight_model).id("highlight-model").on_input(Message::HighlightModelChanged).style(theme::input),
                 text("Install and start Ollama, then run: ollama pull qwen3-vl:4b-instruct").size(theme::SMALL),
                 text("Analysis uses sampled video frames on this computer. It can miss fast action and does not listen to audio. Cloud models are not supported.").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
-            ].spacing(theme::XS).into()),
-            section(
-                "Naming template",
-                column![
-                    text_input("{date}_{source}_{name}", &self.config.naming_template).on_input(Message::NamingChanged).style(theme::input),
-                    text("Tokens: {date} {time} {datetime} {source} {name} {index}").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
-                ]
-                .spacing(theme::XS)
-                .into(),
-            ),
-            section("HDR preview", hdr_preview.into()),
-            section("After export", after.into()),
-            section("Editor shortcuts (Premiere Pro defaults)", self.keybinds_section()),
+                ].spacing(theme::XS).into()),
+            ],
+            SettingsTab::Shortcuts => column![section("Editor shortcuts (Premiere Pro defaults)", self.keybinds_section())],
+        }.spacing(theme::LG);
+        let mut tabs = row![].spacing(theme::SM);
+        for (label, tab) in [("Library", SettingsTab::Library), ("Export", SettingsTab::Export), ("Preview", SettingsTab::Preview), ("Shortcuts", SettingsTab::Shortcuts)] {
+            tabs = tabs.push(button(text(label).size(theme::LABEL)).style(theme::nav(self.settings_tab == tab)).on_press(Message::SettingsTab(tab)));
+        }
+        let header = column![
+            row![text("Settings").size(theme::DISPLAY).font(theme::FONT_BOLD), Space::new().width(Length::Fill),
+                text("Changes save automatically").size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) })].align_y(iced::Alignment::Center),
+            tabs,
+        ].spacing(theme::LG);
+        container(column![header,
+            scrollable(sections).id("settings-scroll").height(Length::Fill),
             button(text("Open config file").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::OpenConfigFile),
-        ]
-        .spacing(theme::LG)
-        .padding(theme::XL);
-
-        scrollable(container(body).max_width(760.0).center_x(Length::Fill)).into()
+        ].spacing(theme::XL).padding(theme::XL)).max_width(900.0).center_x(Length::Fill).height(Length::Fill).into()
     }
 
     fn keybinds_section(&self) -> Element<'_, Message> {
@@ -795,7 +832,8 @@ impl App {
         modal(
             column![
                 text("Rename recording").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
-                text_input("name", &r.value).on_input(Message::RenameValue).on_submit(Message::RenameConfirm).style(theme::input),
+                text_input("name", &r.value).id("rename").on_input(Message::RenameValue).on_submit(Message::RenameConfirm).style(theme::input),
+                text(r.error.as_deref().unwrap_or("")).size(theme::LABEL).style(|t: &Theme| text::Style { color: Some(t.extended_palette().danger.base.color) }),
                 row![
                     button(text("Use template").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::RenameTemplate),
                     Space::new().width(Length::Fill),
@@ -832,7 +870,7 @@ impl App {
     fn delete_error_modal<'a>(&self, msg: &'a str) -> Element<'a, Message> {
         modal(
             column![
-                text("Couldn't delete file").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
+                text("File operation failed").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
                 text(msg.to_string()).size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
                 row![
                     Space::new().width(Length::Fill),
@@ -1037,7 +1075,7 @@ fn trim_row<'a>(
         b("−5", -5.0),
         b("−1", -1.0),
         b("−0.5", -0.5),
-        text_input("0:00.000", value).on_input(on_edit).on_submit(on_submit).font(Font::MONOSPACE).style(theme::input).width(Length::Fixed(100.0)),
+        text_input("0:00.000", value).id(format!("trim-{label}")).on_input(on_edit).on_submit(on_submit).font(Font::MONOSPACE).style(theme::input).width(Length::Fixed(100.0)),
         b("+0.5", 0.5),
         b("+1", 1.0),
         b("+5", 5.0),
@@ -1051,7 +1089,7 @@ fn trim_row<'a>(
 fn num_field<'a>(label: &'a str, value: i64, on_input: impl Fn(String) -> Message + 'a) -> Element<'a, Message> {
     column![
         text(label).size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }),
-        text_input("", &value.to_string()).on_input(on_input).font(Font::MONOSPACE).style(theme::input).width(Length::Fixed(110.0)),
+        text_input("", &value.to_string()).id(format!("number-{label}")).on_input(on_input).font(Font::MONOSPACE).style(theme::input).width(Length::Fixed(110.0)),
     ]
     .spacing(theme::XS)
     .into()
@@ -1060,7 +1098,7 @@ fn num_field<'a>(label: &'a str, value: i64, on_input: impl Fn(String) -> Messag
 fn kb_row<'a>(label: &'a str, value: &'a str, field: KbField) -> Element<'a, Message> {
     row![
         text(label).size(theme::LABEL).width(Length::Fixed(150.0)),
-        text_input("unbound", value).on_input(move |s| Message::SetKeybind(field, s)).style(theme::input).width(Length::Fixed(150.0)),
+        text_input("unbound", value).id(format!("shortcut-{label}")).on_input(move |s| Message::SetKeybind(field, s)).style(theme::input).width(Length::Fixed(150.0)),
     ]
     .spacing(theme::SM)
     .align_y(iced::Alignment::Center)

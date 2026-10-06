@@ -16,22 +16,22 @@ Every build bundles the FFmpeg libraries QlipQ needs — there's no separate `ff
 
 ## 1. Add watched folders
 
-In **Settings → Watched folders**, add the folder(s) where your recordings land (for OBS this is your recording or replay-buffer output path). QlipQ can auto-detect the **OBS** and **NVIDIA Share** output folders and offer them as one-click presets. It scans these folders — including subfolders — on launch and watches for new files while it runs.
+In **Settings → Library → Watched folders**, add the folder(s) where your recordings land (for OBS this is your recording or replay-buffer output path). QlipQ can auto-detect the **OBS** and **NVIDIA Share** output folders and offer them as one-click presets. It scans these folders — including subfolders — on launch and watches for new files while it runs. Loading, scanning and preview preparation run in the background, so you can continue using the controls while recordings load.
 
 Tick **Hide auto-captured highlights** to keep NVIDIA App's automatic **Highlights** out of the queue (they're tagged `NVIDIA APP (Highlights)` in the file, versus `NVIDIA APP` for a manual recording; a clip's encoder is shown in the editor's debug panel). Highlights that aren't hidden are marked with a **Highlight** badge in the queue. This sets the default; the queue's [filter bar](#4-edit-and-export) can override it per session (show all clips, only highlights, or hide them).
 
 ## 2. Choose an output folder and naming template
 
-Set an **Output folder** for exports. The **naming template** controls how exported (and renamed) files are named. Available tokens: `{date}`, `{time}`, `{datetime}`, `{source}`, `{name}`, `{index}`.
+In **Settings → Export**, set an **Output folder** for exports. QlipQ creates the folder when exporting if it does not exist. The **naming template** controls how exported (and renamed) files are named. Available tokens: `{date}`, `{time}`, `{datetime}`, `{source}`, `{name}`, `{index}`.
 
 ## 3. Pick your output quality
 
-**Settings → Output defaults** controls export quality and is applied to every export:
+**Settings → Export → Output defaults** controls export quality and is applied to every export:
 
 - **Quality** — a named preset, a custom **CRF**, **VBR** (CRF capped by a max bitrate), or a **target bitrate**.
 - **Frame rate**, **resolution** (down to 720p / up to 4K), **codec** (H.264 / H.265), **container** (mp4 / mkv), and **audio bitrate**.
 
-The editor shows an estimated file size for the current clip, and you can override the quality per clip.
+The editor shows an estimated file size for the current clip, and **Output & tags** lets you override the quality per clip. Settings are grouped into **Library**, **Export**, **Preview**, and **Shortcuts** and save automatically.
 
 ## 4. Edit and export
 
@@ -39,16 +39,18 @@ Use **Sort** above the clip list to order recordings by **newest/oldest**, **nam
 
 Each clip has a thumbnail that loads when its card comes into view. **Hover over a clip card** briefly to play a muted preview in its thumbnail; leaving the card restores the still image. Only one hover preview plays at a time, and it loops through the original recording without moving the editor's playhead or changing the selected clip. Clicking the thumbnail opens the clip in the editor as usual.
 
-1. Pick a clip from the **Queue** (each shows its date, length, and size). A **filter bar** is pinned to the top of the queue: search by filename and narrow the list by **status**, **game** (the `{source}` label), **tag**, or **highlights** (all clips / only highlights / hide them). When any filter is active it shows how many clips match and offers **Clear filters** to reset. By default a clip **starts playing** as soon as it's selected — turn this off with **Settings → Playback → Play clips automatically when selected** to open clips paused.
-2. Set the **in/out** points on the timeline — the scrubber highlights the in/out window and marks each endpoint, and **playback loops within it** (pressing play jumps to the in-point and loops back when it reaches the out-point). Each point has an editable timestamp with **±0.5 / ±1 / ±5 s** nudge buttons, or press **Set** (or the **I**/**O** keys) to capture the current playhead. Type a timestamp in the playhead field to jump, drag the scrubber (playback keeps going if it was already playing), or use the −60/−5/−1 / +1/+5/+60 second jump buttons. Timestamps read as frame-accurate timecode — **`h:mm:ss.ff`**, where `ff` is the frame within the second — so a single **←**/**→** step changes the last digits by one.
-3. **Keyboard shortcuts** default to Adobe Premiere Pro — **Space** play/pause, **I**/**O** set in/out, **←**/**→** step a frame, **Shift+←**/**→** jump 5 s, **Home**/**End** go to start/end, **Ctrl+M** export — and are rebindable in **Settings → Editor shortcuts**. With a clip selected, **Delete** removes its file from disk after a confirmation (**Enter** confirms the prompt) and **Shift+Delete** removes it immediately without asking.
-4. Optionally enable **crop** and adjust the rectangle.
-5. Toggle **audio tracks** and set their levels (your selection carries to the next clip); changes are reflected in the preview as you make them. On **export**, the enabled tracks are **mixed together into one track** at the levels you set.
-6. Click **Export clip**. If a file with the same name already exists you can **overwrite** it or **append a timestamp** to keep both, and the **After export** setting decides what happens to the original (keep, delete, move, rename, or prompt). Use **Show file** to reveal the exported clip.
+1. Pick a clip from the **Recordings** list in **Queue** (each shows its date, length, and size). A **filter bar** is pinned above the recordings: search by filename and narrow the list by **status**, **game** (the `{source}` label), **tag**, or **highlights** (all clips / only highlights / hide them). When any filter is active it shows how many clips match and offers **Clear filters** to reset. By default a clip **starts playing** as soon as it's selected — turn this off with **Settings → Preview → Play clips automatically when selected** to open clips paused.
+2. In **Trim & highlights**, set the **in/out** points — the timeline highlights the in/out window and marks each endpoint. Playback loops within a trim that ends before the recording's end; reaching the original end stops playback. Each point has an editable timestamp with **±0.5 / ±1 / ±5 s** nudge buttons, or press **Set** (or the **I**/**O** keys) to capture the current playhead. Type a timestamp in the playhead field to jump, drag the scrubber (playback keeps going if it was already playing), or use the −60/−5/−1 / +1/+5/+60 second jump buttons. Timestamps read as frame-accurate timecode — **`h:mm:ss.ff`**, where `ff` is the frame within the second — so a single **←**/**→** step changes the last digits by one.
+3. **Keyboard shortcuts** default to Adobe Premiere Pro — **Space** play/pause, **I**/**O** set in/out, **←**/**→** step a frame, **Shift+←**/**→** jump 5 s, **Home**/**End** go to start/end, **Ctrl+M** export — and are rebindable in **Settings → Shortcuts**. Editor shortcuts are inactive in Settings and while typing into a text field. With a clip selected, **Delete** removes its file from disk after a confirmation (**Enter** confirms the prompt) and **Shift+Delete** removes it immediately without asking. **Escape** closes a dialog or exits the fullscreen preview.
+4. In **Audio & crop**, optionally enable **crop** and adjust the rectangle.
+5. In the same tab, toggle **audio tracks** and set their levels (your selection carries to the next clip); changes are reflected in the preview as you make them. On **export**, the enabled tracks are **mixed together into one track** at the levels you set.
+6. Click **Export clip** in the footer, which stays visible as you scroll the editor. It also shows duration, resolution and estimated size. If a file with the same name already exists you can **overwrite** it or **append a timestamp** to keep both, and **Settings → Export → After export** decides what happens to the original (keep, delete, move, rename, or prompt). During export, the selected recording stays open and its rename, dismiss and delete actions are disabled; **Cancel export** remains available. Use **Show file** to reveal the exported clip.
 
-> **Preview vs. export.** The preview decodes frames in-process and tonemaps HDR sources to SDR for display — it's a visual guide, and **exports always use the original file, untouched**. Its sharpness is set by **Settings → Preview quality** (720p / 1080p / 1440p / Source; default 1080p) — higher is sharper but costs more decode/GPU work, so lower it if playback stutters. If an HDR clip (especially a Windows HDR _desktop_ recording) previews too dark, **Settings → HDR preview → Brightness** lifts it with an adjustable gamma (higher = brighter; `1.0` = off; **Reset** restores the default). Both affect the preview only.
+The selected recording's card shows **Rename**, **Open**, **Dismiss**, and **Delete**. Dismiss hides a recording without deleting its file; choose the **dismissed** tag filter and use **Restore** to bring it back. Add or remove your own tags in **Output & tags**. If a file operation fails, QlipQ shows the error; a failed rename keeps the dialog open so you can correct the name.
 
-> **Diagnosing preview stutter.** If the preview stutters or the audio drops out, enable **Settings → Playback → Show debug panel in the editor**. The panel adds a **Debug** card under the editor showing the clip's details, whether it's decoding on the **GPU (hardware)** or in **software**, and — while playing — live **video/audio buffer** levels, dropped frames, and audio underruns. Software decoding of heavy 1440p/4K AV1/HEVC is the usual cause; it never affects exports.
+> **Preview vs. export.** The preview decodes frames in-process and tonemaps HDR sources to SDR for display — it's a visual guide, and **exports use the original media as their input**. Its sharpness is set by **Settings → Preview → Preview quality** (720p / 1080p / 1440p / Source; default 1080p) — higher is sharper but costs more decode/GPU work, so lower it if playback stutters. If an HDR clip (especially a Windows HDR _desktop_ recording) previews too dark, **Settings → Preview → HDR preview → Brightness** lifts it with an adjustable gamma (higher = brighter; `1.0` = off; **Reset** restores the default). Both affect the preview only.
+
+> **Diagnosing preview stutter.** If the preview stutters or the audio drops out, enable **Settings → Preview → Show debug panel in the editor**. The panel adds a **Debug** card under the editor showing the clip's details, whether it's decoding on the **GPU (hardware)** or in **software**, and — while playing — live **video/audio buffer** levels, dropped frames, and audio underruns. Use **Copy** to copy the diagnostics. Software decoding of heavy 1440p/4K AV1/HEVC is the usual cause; it never affects exports.
 
 ## Suggest a highlight trim
 
@@ -58,11 +60,11 @@ Highlight suggestions are optional and run through a **local Ollama vision model
 ollama pull qwen3-vl:4b-instruct
 ```
 
-Qwen3-VL requires Ollama 0.12.7 or newer. You can choose another installed local vision model in **Settings → Highlight suggestions**. QlipQ connects to Ollama at `127.0.0.1:11434`; it does not download models automatically and rejects cloud models.
+Qwen3-VL requires Ollama 0.12.7 or newer. You can choose another installed local vision model in **Settings → Preview → Highlight suggestions**. QlipQ connects to Ollama at `127.0.0.1:11434`; it does not download models automatically and rejects cloud models.
 
-Use the explicit **`-instruct`** variant. Ollama's `qwen3-vl:4b` tag selects the thinking variant, which can spend the entire output budget reasoning without returning a highlight answer. If you previously configured `qwen3-vl:4b`, download `qwen3-vl:4b-instruct` and select it in **Settings → Highlight suggestions**. Existing model choices are preserved.
+Use the explicit **`-instruct`** variant. Ollama's `qwen3-vl:4b` tag selects the thinking variant, which can spend the entire output budget reasoning without returning a highlight answer. If you previously configured `qwen3-vl:4b`, download `qwen3-vl:4b-instruct` and select it in **Settings → Preview → Highlight suggestions**. Existing model choices are preserved.
 
-1. Open a clip and find **Highlight suggestion** below the In/Out controls.
+1. Open a clip and find **Highlight suggestion** in **Trim & highlights**, below the In/Out controls.
 2. Describe what to find, such as “consecutive headshots”, “a multi-kill”, or “a successful boss fight”, then click **Suggest highlight**. Playback pauses while analysis starts. Longer recordings are analyzed in overlapping sections; the section count shows progress. **Cancel** or selecting another clip stops analysis.
 3. Review the suggested range and its description. Your current trim stays unchanged until you click **Apply trim**. **Dismiss** keeps your existing edit.
 4. Applying the suggestion adds up to **3 seconds of lead-in** and **2 seconds of aftermath**, bounded by the original clip. A single-instant event, such as a kill notification, gets the same padding. Adjust the normal In/Out controls, preview the result, and export when ready. The applied trim is saved like any other edit.

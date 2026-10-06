@@ -63,8 +63,17 @@ pub async fn detect(
     cancel: Arc<AtomicBool>,
     section: Arc<AtomicUsize>,
 ) -> Result<Option<HighlightSuggestion>, String> {
+    #[cfg(test)]
+    let test_endpoint = TEST_ENDPOINT.lock().unwrap().clone();
+    #[cfg(test)]
+    if let Some(base) = test_endpoint {
+        return detect_at(request, cancel, section, &base).await;
+    }
     detect_at(request, cancel, section, OLLAMA_URL).await
 }
+
+#[cfg(test)]
+pub static TEST_ENDPOINT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 async fn detect_at(
     request: HighlightRequest,
@@ -178,6 +187,7 @@ fn sample_window(
     window: AnalysisWindow,
     cancel: &AtomicBool,
 ) -> Result<Vec<Sample>, String> {
+    let _lease = crate::background::read_media(path);
     let max_height =
         ((1280.0 * media.height as f64 / media.width as f64).floor() as i64).clamp(2, 720);
     let mut decoder = crate::libav::ScrubDecoder::open(
@@ -323,7 +333,7 @@ async fn query_window(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -438,7 +448,7 @@ mod tests {
         }
     }
 
-    fn mock_ollama(
+    pub(crate) fn mock_ollama(
         count: usize,
         respond: impl Fn(usize, &str, Value) -> (u16, Value) + Send + 'static,
     ) -> (String, std::thread::JoinHandle<()>) {

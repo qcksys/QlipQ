@@ -100,7 +100,7 @@ impl<const HOVER: bool> shader::Primitive for VideoPrimitive<HOVER> {
         _bounds: &Rectangle,
         _viewport: &Viewport,
     ) {
-        if let Ok(slot) = self.frame.lock() {
+        if let Ok(slot) = self.frame.try_lock() {
             let expected = (slot.width as usize) * (slot.height as usize) * 4;
             if slot.width > 0 && slot.height > 0 && slot.data.len() >= expected {
                 pipeline.upload(
@@ -129,6 +129,7 @@ pub struct VideoPipeline<const HOVER: bool> {
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     texture_layout: wgpu::BindGroupLayout,
+    texture_format: wgpu::TextureFormat,
     texture: Option<wgpu::Texture>,
     bind_group: Option<wgpu::BindGroup>,
     size: (u32, u32),
@@ -157,7 +158,7 @@ impl<const HOVER: bool> VideoPipeline<HOVER> {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: self.texture_format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
@@ -300,6 +301,8 @@ impl<const HOVER: bool> shader::Pipeline for VideoPipeline<HOVER> {
             pipeline,
             sampler,
             texture_layout,
+            // Decode sRGB only when the render target will encode it again on output.
+            texture_format: if format.is_srgb() { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm },
             texture: None,
             bind_group: None,
             size: (0, 0),

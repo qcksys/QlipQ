@@ -20,21 +20,21 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
         a: 1.0,
     }
 }
-const C_CANVAS: Color = rgb(0x0e, 0x0f, 0x13); // app background (deepest)
-const C_SIDEBAR: Color = rgb(0x14, 0x15, 0x1c); // sidebar / top bar
-const C_PANEL: Color = rgb(0x17, 0x19, 0x21); // flat inset panels
-const C_SURFACE: Color = rgb(0x1c, 0x1e, 0x28); // raised cards / inputs
-const C_SURFACE_HI: Color = rgb(0x24, 0x27, 0x33); // hover / pressed surface
-const C_DIALOG: Color = rgb(0x20, 0x23, 0x2e); // modal surface
-const C_BORDER: Color = rgb(0x2b, 0x2e, 0x3a); // hairline border
-const C_BORDER_STRONG: Color = rgb(0x3b, 0x40, 0x50); // stronger border / unfilled rail
-const C_TEXT: Color = rgb(0xe7, 0xe9, 0xee);
-const C_MUTED: Color = rgb(0x9a, 0xa3, 0xb6); // solid muted text (≥4.5:1 on the surfaces above)
+const C_CANVAS: Color = rgb(0x12, 0x1a, 0x23);
+const C_SIDEBAR: Color = rgb(0x17, 0x22, 0x2d);
+const C_PANEL: Color = rgb(0x19, 0x25, 0x31);
+const C_SURFACE: Color = rgb(0x21, 0x30, 0x3e);
+const C_SURFACE_HI: Color = rgb(0x2c, 0x3e, 0x4e);
+const C_DIALOG: Color = rgb(0x24, 0x34, 0x43);
+const C_BORDER: Color = rgb(0x33, 0x45, 0x55);
+const C_BORDER_STRONG: Color = rgb(0x57, 0x6f, 0x82);
+const C_TEXT: Color = rgb(0xed, 0xf3, 0xf8);
+const C_MUTED: Color = rgb(0xac, 0xbd, 0xcc);
 
 // ---- Radii ----
-pub const RADIUS: f32 = 10.0;
-pub const RADIUS_SM: f32 = 7.0;
-pub const RADIUS_LG: f32 = 14.0;
+pub const RADIUS: f32 = 8.0;
+pub const RADIUS_SM: f32 = 5.0;
+pub const RADIUS_LG: f32 = 12.0;
 pub const RADIUS_PILL: f32 = 999.0;
 
 // ---- Spacing scale (4px base) ----
@@ -86,7 +86,7 @@ pub fn dark() -> Theme {
         Palette {
             background: C_CANVAS,
             text: C_TEXT,
-            primary: rgb(0x7c, 0x93, 0xff),
+            primary: rgb(0x8c, 0xc8, 0xf1),
             success: rgb(0x4f, 0xd1, 0x9a),
             warning: rgb(0xe7, 0xb4, 0x55),
             danger: rgb(0xf0, 0x71, 0x71),
@@ -116,7 +116,6 @@ pub fn sidebar(_theme: &Theme) -> container::Style {
 pub fn top_bar(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(C_SIDEBAR)),
-        shadow: shadow(0.35, 2.0, 10.0),
         ..container::Style::default()
     }
 }
@@ -130,7 +129,6 @@ pub fn card(_theme: &Theme) -> container::Style {
             width: 1.0,
             radius: Radius::from(RADIUS),
         },
-        shadow: shadow(0.22, 2.0, 8.0),
         ..container::Style::default()
     }
 }

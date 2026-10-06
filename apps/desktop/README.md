@@ -31,7 +31,36 @@ cargo run -p qlipq-desktop                    # launch the app (in-process libav
 cargo build --release -p qlipq-desktop        # the shippable binary (CI bundles the FFmpeg shared libs)
 ```
 
-Linux build deps (for the GUI crate): `libxkbcommon-dev libwayland-dev libgtk-3-dev`.
+Linux build deps (for the GUI crate): `libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev`.
+
+## Native UI tests
+
+Run from `apps/desktop/` after configuring the FFmpeg SDK:
+
+```bash
+cargo test                                      # domain, media, background-work and UI tests
+cargo test -p qlipq-desktop --bin qlipq ui_e2e    # native UI workflows only
+cargo test -p qlipq-desktop --bin qlipq ui_e2e_hardware_crop_export -- --ignored
+```
+
+The UI suite drives the real Iced widget tree with mouse, keyboard, scroll and picker events,
+including event subscriptions and asynchronous tasks. It renders through the headless GPU renderer,
+generates deterministic two-track recordings with libav, and reads the actual exported media and
+persisted files. It covers queue filters/sorting, watching folders, playback and seeking, trim/audio/crop,
+tags, rename/delete, settings, shortcuts, highlights, export/cancellation/overwrite, after-export actions,
+errors, and the minimum 960 × 660 window. Screenshot checks include preview luminance and the pinned
+export controls. The hardware crop test is opt-in because it requires NVENC, AMF or QSV; ordinary tests
+use Original video stream-copy with real AAC mixing.
+
+Tests isolate configuration and media in temporary directories. Folder-picker results, OS launch and
+clipboard requests, and Ollama responses are controlled at their external boundaries. Native OS dialog
+appearance, audible device output, HDR hardware and model accuracy still need device-level validation.
+No test launches Explorer, changes the user's settings, or downloads a model.
+
+Screenshots are written to `target/ui-test-artifacts/` and uploaded by the Windows/Linux Desktop CI job.
+Headless Linux needs `libvulkan1 mesa-vulkan-drivers` (software Vulkan is sufficient); no display server
+is required. See [the UI-thread audit](docs/ui-thread-audit.md) for the execution boundaries and
+responsiveness checks.
 
 ## Media engine (libav)
 

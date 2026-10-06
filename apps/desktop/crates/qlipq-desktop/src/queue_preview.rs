@@ -28,6 +28,7 @@ impl Source {
     }
 
     fn thumbnail(&self) -> Option<Handle> {
+        let _lease = crate::background::read_media(&self.path);
         let mut decoder = libav::ScrubDecoder::open(
             &self.path,
             self.media.width,
@@ -72,6 +73,7 @@ impl HoverPreview {
         let stop = cancel.clone();
         let aspect = source.media.width.max(1) as f32 / source.media.height.max(1) as f32;
         let worker = std::thread::spawn(move || {
+            let _lease = crate::background::read_media(&source.path);
             while !stop.load(Ordering::Relaxed) {
                 let Some(player) = libav::start_player(
                     &source.path,
@@ -125,7 +127,7 @@ impl Drop for HoverPreview {
         self.cancel.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
             worker.thread().unpark();
-            let _ = worker.join();
+            std::thread::spawn(move || { let _ = worker.join(); });
         }
     }
 }
@@ -178,6 +180,6 @@ mod tests {
         let stopped = video::frame_sample(&frame);
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(video::frame_sample(&frame), stopped);
-        std::fs::remove_file(path).unwrap();
+        crate::host::delete_file(path.to_str().unwrap()).unwrap();
     }
 }

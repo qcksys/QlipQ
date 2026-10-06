@@ -33,7 +33,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev libvulkan1 mesa-vulkan-drivers
 
       # The app links FFmpeg's libraries in process (libav) — the only media path now. Pull the LGPL
       # FFmpeg SDK and export the FFMPEG_* env the build needs (mirrors the local .cargo/config.toml).
@@ -45,7 +45,19 @@ jobs:
         run: cargo test -p qlipq-core -p qlipq-ffmpeg
 
       - name: Test desktop app
-        run: cargo test -p qlipq-desktop --bin qlipq
+        run: cargo test -p qlipq-desktop --bin qlipq -- --skip ui_e2e
+
+      - name: Test native UI end to end
+        timeout-minutes: 5
+        run: cargo test -p qlipq-desktop --bin qlipq ui_e2e
+
+      - name: Upload UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-ui-${{ matrix.os }}
+          path: apps/desktop/target/ui-test-artifacts/*.png
+          if-no-files-found: warn
 
       # Compile the desktop app against the in-process libav stack (the sole build — no CLI fallback).
       - name: Build desktop app
