@@ -27,6 +27,8 @@ mod startup;
 mod theme;
 mod video;
 #[cfg(test)]
+mod test_media;
+#[cfg(test)]
 mod ui_tests;
 
 // The in-process libav preview player (libplacebo HDR tonemap + synced cpal audio), exposing
