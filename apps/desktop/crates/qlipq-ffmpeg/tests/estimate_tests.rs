@@ -38,7 +38,7 @@ fn crf(configure: impl FnOnce(&mut VideoEncodeOptions)) -> ResolvedEncode {
 fn stream_copy_scales_by_kept_duration() {
     let full = estimate_export_size(&media(), &one_audio(), &copy());
     assert!((full.bytes - 1_000_000_000.0).abs() < 500.0);
-    assert!(!full.approximate);
+    assert!(full.approximate);
 
     let half = estimate_export_size(
         &media(),
@@ -49,7 +49,7 @@ fn stream_copy_scales_by_kept_duration() {
 }
 
 #[test]
-fn bitrate_mode_is_exact() {
+fn bitrate_mode_estimates_the_target_but_is_not_a_size_guarantee() {
     let enc = ResolvedEncode {
         video: VideoEncodeOptions { bitrate_kbps: Some(8000), ..Default::default() },
         audio: AudioEncodeOptions { codec: None, bitrate: Some("0k".into()) },
@@ -57,7 +57,7 @@ fn bitrate_mode_is_exact() {
     };
     let r = estimate_export_size(&media(), &EditSpec { trim: None, crop: None, audio_tracks: vec![] }, &enc);
     assert!((r.bytes - 8000.0 * 1000.0 * 100.0 / 8.0).abs() < 500.0);
-    assert!(!r.approximate);
+    assert!(r.approximate);
 }
 
 #[test]
@@ -87,4 +87,19 @@ fn zero_length_estimates_zero() {
         &copy(),
     );
     assert_eq!(r.bytes, 0.0);
+}
+
+#[test]
+fn enabled_audio_tracks_are_estimated_as_one_mixdown() {
+    let mut spec = one_audio();
+    let encode = crf(|v| v.bitrate_kbps = Some(8000));
+    let one = estimate_export_size(&media(), &spec, &encode);
+    spec.audio_tracks.push(AudioTrackSpec { index: 1, enabled: true, volume: 1.0 });
+    let mixed = estimate_export_size(&media(), &spec, &encode);
+    assert_eq!(mixed.bytes, one.bytes);
+    for track in &mut spec.audio_tracks {
+        track.enabled = false;
+    }
+    let silent = estimate_export_size(&media(), &spec, &encode);
+    assert_eq!(one.bytes - silent.bytes, 192.0 * 1000.0 * 100.0 / 8.0);
 }

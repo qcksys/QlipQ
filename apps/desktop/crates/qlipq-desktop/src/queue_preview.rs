@@ -48,12 +48,6 @@ pub async fn thumbnail(source: Source) -> Option<Handle> {
     crate::blocking(move || source.thumbnail()).await
 }
 
-// File mutations wait for thumbnail decoders to release their Windows file handles.
-pub async fn file_operation<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    let _permits = THUMBNAIL_SEM.acquire_many(2).await.unwrap();
-    crate::blocking(f).await
-}
-
 pub struct HoverPreview {
     pub id: String,
     pub frame: video::SharedFrame,

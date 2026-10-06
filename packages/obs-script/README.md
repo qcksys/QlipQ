@@ -87,11 +87,33 @@ When **Write game name into file metadata** is on, the script runs
 (no re-encode), so it's fast and lossless, and writes the same `game=` tag qlipq
 stamps on export. Caveats:
 
+- When no game is detected, the tag uses **Fallback folder name** (by default,
+  `game=Any Recording`). This also applies with **Move clips into per-game folders** off.
+- **AV1 recordings in MKV are supported**: metadata tagging copies the encoded video
+  and all audio tracks without decoding or re-encoding them.
 - Needs **ffmpeg** available (set the path if it isn't on `PATH`).
 - Runs **synchronously** and, on Windows, briefly flashes a console window per clip.
 - **mp4** has limited metadata support; **mkv** stores the `game=` tag most reliably.
 - The original is never destroyed — ffmpeg writes a temp file first and any failure
   falls back to a plain move (or leaves the file untouched).
+
+The temporary file keeps the container extension (e.g. `clip.qqtmp.mkv`) so ffmpeg
+can select the output format. The Script Log reports `tagged + moved` or
+`tagged in place` only after success; `moved (untagged)` means no metadata was written.
+
+### Metadata regression tests
+
+From the repository root, with LuaJIT, ffmpeg (including `libaom-av1`), and ffprobe
+on `PATH`, run:
+
+```sh
+luajit packages/obs-script/tests/metadata.lua
+```
+
+The tests invoke the script's OBS event callback with generated AV1/MKV clips and
+two AAC tracks. They check default/custom fallback tags, detected titles, tagging
+in place (including OBS's forward-slash Windows paths), and preservation of every
+encoded packet, plus a failed-ffmpeg fallback.
 
 ## Differences from the Python original (intentional)
 

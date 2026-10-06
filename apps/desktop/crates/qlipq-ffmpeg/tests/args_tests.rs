@@ -51,3 +51,20 @@ fn encode_fps_maxheight_clamp_against_source() {
     assert_eq!(down.video.fps, Some(30));
     assert_eq!(down.video.scale_height, Some(1080));
 }
+
+#[test]
+fn original_with_edits_uses_the_estimated_quality_for_export() {
+    let output = settings(|s| {
+        s.quality_preset = QualityPreset::Original;
+        s.max_height = 1080;
+    });
+    let resolved = output_settings_to_encode(&output, &media());
+    let plan = qlipq_ffmpeg::hw::plan_hw_video(&output, false, |_| true).unwrap();
+    assert!(plan.opts.contains(&("qp", resolved.video.crf.unwrap().to_string())));
+}
+
+#[test]
+fn resolved_audio_bitrate_matches_export_minimum() {
+    let resolved = output_settings_to_encode(&settings(|s| s.audio_bitrate_kbps = 0), &media());
+    assert_eq!(resolved.audio.bitrate.as_deref(), Some("64k"));
+}

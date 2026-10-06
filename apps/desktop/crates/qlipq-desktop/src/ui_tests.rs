@@ -25,6 +25,8 @@ struct Ui {
     pending: usize,
     max_update: Duration,
     clipboard: Option<String>,
+    window: window::Id,
+    minimized: bool,
 }
 
 impl Ui {
@@ -55,6 +57,8 @@ impl Ui {
             pending: 0,
             max_update: Duration::ZERO,
             clipboard: None,
+            window: window::Id::unique(),
+            minimized: false,
         };
         ui.track();
         ui.run(task);
@@ -110,6 +114,18 @@ impl Ui {
                     contents,
                     ..
                 })) => self.clipboard = Some(contents),
+                Output::Action(runtime::Action::Window(runtime::window::Action::GetLatest(
+                    reply,
+                ))) => {
+                    let _ = reply.send(Some(self.window));
+                }
+                Output::Action(runtime::Action::Window(runtime::window::Action::Minimize(
+                    id,
+                    minimized,
+                ))) => {
+                    assert_eq!(id, self.window);
+                    self.minimized = minimized;
+                }
                 Output::Action(other) => panic!("Unhandled runtime action: {other:?}"),
             }
         }
@@ -119,7 +135,7 @@ impl Ui {
         let until = Instant::now() + Duration::from_secs(20);
         loop {
             self.pump();
-            if self.pending == 0 {
+            if self.pending == 0 && self.app.persistence.is_idle() {
                 break;
             }
             assert!(Instant::now() < until, "UI tasks timed out");
@@ -377,6 +393,37 @@ fn fixture() -> tempfile::TempDir {
 }
 
 #[test]
+fn ui_e2e_startup_settings_and_minimized_launch() {
+    let _serial = UI_SUITE.lock().unwrap_or_else(|e| e.into_inner());
+    let _fixture = fixture();
+    let mut ui = Ui::new(Size::new(1200.0, 900.0));
+    assert!(!ui.minimized);
+    ui.click("Settings");
+    ui.click("Start minimized");
+    assert!(host::load_config().start_minimized);
+    assert!(!ui.minimized);
+    #[cfg(windows)]
+    {
+        ui.click("Start with Windows");
+        assert!(startup::TEST_ENABLED.load(Ordering::Relaxed));
+        assert!(host::load_config().start_with_windows);
+    }
+    drop(ui);
+    let mut ui = Ui::new(Size::new(1200.0, 900.0));
+    assert!(ui.minimized);
+    assert_eq!(ui.app.items.len(), 2);
+    ui.click("Settings");
+    ui.click("Start minimized");
+    #[cfg(windows)]
+    {
+        ui.click("Start with Windows");
+        assert!(!startup::TEST_ENABLED.load(Ordering::Relaxed));
+        assert!(!host::load_config().start_with_windows);
+    }
+    assert!(!host::load_config().start_minimized);
+}
+
+#[test]
 fn ui_e2e_recording_workflow() {
     let _serial = UI_SUITE.lock().unwrap_or_else(|e| e.into_inner());
     let _fixture = fixture();
@@ -463,13 +510,13 @@ fn ui_e2e_recording_workflow() {
     }
     ui.click("Export clip");
     ui.screenshot("overwrite");
-    assert!(ui.app.editor.as_ref().unwrap().overwrite_target.is_some());
+    assert!(ui.app.pending_export.is_some());
     ui.click("Cancel");
-    assert!(ui.app.editor.as_ref().unwrap().overwrite_target.is_none());
+    assert!(ui.app.pending_export.is_none());
     ui.click("Export clip");
     ui.confirm("Overwrite");
     assert!(std::path::Path::new(&output).is_file());
-    assert!(ui.app.editor.as_ref().unwrap().overwrite_target.is_none());
+    assert!(ui.app.pending_export.is_none());
     assert!(
         ui.max_update < Duration::from_millis(100),
         "UI update blocked for {:?}",
@@ -685,7 +732,7 @@ fn ui_e2e_trim_audio_validation_and_edit_persistence() {
     ui.click("Enable crop (160×90 source)");
     ui.fill("number-W", "999");
     ui.click("Export clip");
-    assert!(!ui.app.editor.as_ref().unwrap().exporting);
+    assert!(ui.app.exports.active().is_none());
     assert!(qlipq_core::edit_spec::validate_edit_spec(
         &editor_spec(ui.app.editor.as_ref().unwrap()),
         ui.app.editor.as_ref().unwrap().media.as_ref().unwrap()
@@ -853,32 +900,48 @@ fn ui_e2e_export_cancellation_keeps_ui_responsive() {
     let selected = ui.app.selected_id.clone();
     let (entered, receive) = std::sync::mpsc::channel();
     let (resume, worker) = std::sync::mpsc::channel();
-    *export::TEST_PAUSE.lock().unwrap() = Some((entered, worker));
+    *export::TEST_PAUSE.lock().unwrap() = Some((
+        ui.app
+            .items
+            .iter()
+            .find(|item| Some(&item.id) == selected.as_ref())
+            .unwrap()
+            .path
+            .clone(),
+        entered,
+        worker,
+    ));
     let point = ui.bounds("Export clip").center();
     ui.click_at(point);
-    ui.wait_for(|app| app.editor.as_ref().unwrap().exporting);
+    ui.wait_for(|app| app.exports.active().is_some());
     receive.recv_timeout(Duration::from_secs(5)).unwrap();
-    let point = ui.bounds("Raid_2026-10-06_13-00-00.mkv").center();
-    ui.click_at(point);
-    assert_eq!(ui.app.selected_id, selected);
     for label in ["Dismiss", "Rename", "Delete"] {
         let point = ui.bounds(label).center();
         ui.click_at(point);
         assert_eq!(ui.app.selected_id, selected);
         assert!(ui.app.rename.is_none() && ui.app.delete_confirm.is_none());
     }
-    let point = ui.bounds("Cancel export").center();
+    let point = ui.bounds("Raid_2026-10-06_13-00-00.mkv").center();
+    ui.click_at(point);
+    assert_ne!(ui.app.selected_id, selected);
+    assert_eq!(
+        ui.app.exports.active().unwrap().request.source.item_id,
+        selected.clone().unwrap()
+    );
+    ui.size = Size::new(960.0, 660.0);
+    let cancel_bounds = ui.bounds("Cancel export");
+    assert!(cancel_bounds.x >= 0.0 && cancel_bounds.x + cancel_bounds.width <= ui.size.width);
+    ui.screenshot("exporting-minimum");
+    let point = cancel_bounds.center();
     let before = Instant::now();
     ui.click_at(point);
     assert!(before.elapsed() < Duration::from_millis(100));
     assert!(ui
         .app
-        .editor
-        .as_ref()
+        .exports
+        .active()
         .unwrap()
-        .export_cancel
-        .as_ref()
-        .unwrap()
+        .cancel
         .load(Ordering::Relaxed));
     resume.send(()).unwrap();
     ui.settle();
@@ -938,7 +1001,7 @@ fn ui_e2e_after_export_actions_update_files_and_queue() {
                 .join("captures/done_Arena_2026-10-06_12-00-00.mkv")
                 .is_file()),
             AfterExportAction::Prompt => {
-                assert!(ui.app.editor.as_ref().unwrap().after_prompt);
+                assert!(ui.app.after_prompt.is_some());
                 ui.confirm("Keep");
                 assert!(source.is_file());
                 ui.click("Show file");

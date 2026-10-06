@@ -18,6 +18,13 @@ encode-planning logic and are covered by unit tests.
 
 The `cargo test` suites assert exact behaviour, including the encode-planning + rate-control model.
 
+The desktop owns one export job independently of the selected editor (`jobs.rs`). File operations
+return typed completion messages that update the queue, edits, and media cache together. A single
+persistence worker saves snapshots in submission order (`persistence.rs`), and a per-editor preview
+worker opens and closes media handles outside the UI thread (`preview.rs`). Folder reconciliation
+rejects stale scans and probes (`discovery.rs`). CI runs tests for all three crates; the desktop's
+workflow and synthetic media tests do not require a hardware encoder.
+
 ## Build, test & run
 
 Requires a stable Rust toolchain and a shared **FFmpeg 8.x** dev build wired via the (gitignored)
@@ -61,6 +68,26 @@ Screenshots are written to `target/ui-test-artifacts/` and uploaded by the Windo
 Headless Linux needs `libvulkan1 mesa-vulkan-drivers` (software Vulkan is sufficient); no display server
 is required. See [the UI-thread audit](docs/ui-thread-audit.md) for the execution boundaries and
 responsiveness checks.
+
+### Export end-to-end test
+
+With the FFmpeg SDK configured and its runtime libraries on `PATH` (Windows) or `LD_LIBRARY_PATH`
+(Linux), run from `apps/desktop/`:
+
+```bash
+cargo test -p qlipq-desktop export_settings_e2e -- --ignored --nocapture
+```
+
+This requires a working hardware encoder and fails if one is unavailable. It generates a six-second
+lossless moving test clip in-process, exports through `run_export`, probes each output and decodes
+every frame. It checks trim duration, frame counts, source/30 fps, downscaling, H.264/H.265, MP4/MKV,
+Original stream-copy, quality changes, the VBR ceiling, and target-bitrate size estimates (25%
+tolerance for the controlled fixture). It also checks that Original forced to re-encode matches High
+and custom quality 18. Quality-based sizes are reported for comparison, not asserted as exact.
+
+Outputs remain in `target/export-e2e/<process-id>/` for inspection. The test is ignored by default
+because ordinary CI runners have no hardware encoder; CI still compiles it. It has been exercised
+on NVIDIA NVENC; AMD/Intel execution requires the corresponding hardware.
 
 ## Media engine (libav)
 

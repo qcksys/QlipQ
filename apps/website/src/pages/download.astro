@@ -4,7 +4,7 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const repo = "https://github.com/qcksys/qlipq";
 ---
 
-<Base title="Download QlipQ" description="Download QlipQ, a clip editor for gameplay capture on Windows and Linux.">
+<Base title="Download QlipQ" description="Download the QlipQ desktop clip editor and QlipQRenamer, an optional OBS script for organizing recordings by game.">
   <h1>Download QlipQ</h1>
   <p class="lead" style="color:var(--muted)">
     QlipQ is a native desktop app for Windows and Linux (Windows-first) built with Rust and
@@ -31,4 +31,26 @@ const repo = "https://github.com/qcksys/qlipq";
     Prefer to build from source? See the <a href={`${base}/guide/getting-started`}>getting started</a>
     guide.
   </p>
+
+  <section>
+    <h2>QlipQRenamer for OBS</h2>
+    <p class="prose">
+      Automatically sort recordings, saved replays, and screenshots into per-game folders, with
+      optional game-title prefixes for filenames. This companion script runs inside OBS and works
+      without the QlipQ desktop app.
+    </p>
+    <p class="prose">
+      Requires OBS 28 or newer on Windows, macOS, or Linux. Uses OBS's bundled Lua runtime, so no
+      Python install is needed. Sorting and renaming need no additional software; the optional
+      metadata tagging feature requires a separate FFmpeg install.
+    </p>
+    <p>
+      <a class="btn" href={`${base}/qlipq-renamer.lua`} download="qlipq-renamer.lua">Download QlipQRenamer (.lua)</a>
+    </p>
+    <p class="prose">
+      In OBS, open <strong>Tools → Scripts</strong>, click <strong>+</strong>, and select
+      <code>qlipq-renamer.lua</code>. See the
+      <a href={`${base}/guide/organize-by-game`}>installation and settings guide</a> for the full setup.
+    </p>
+  </section>
 </Base>

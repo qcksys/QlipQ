@@ -206,7 +206,7 @@ local function log_naming(kind, src_path, raw, method, game, fallback, layout, d
     lines[#lines + 1] = ("  prefix: filename prefixed with '%s'"):format(game)
   end
   if state.write_metadata then
-    lines[#lines + 1] = ("  metadata: game = '%s' (embedded via ffmpeg)"):format(game)
+    lines[#lines + 1] = ("  metadata: game = '%s' (requested via ffmpeg)"):format(game)
   end
   lines[#lines + 1] = "  result: " .. dest_path
   obs.script_log(obs.LOG_INFO, table.concat(lines, "\n"))
@@ -241,7 +241,9 @@ end
 -- (or leaves the file untouched).
 local function tag_and_place(src, dest, dest_dir, game)
   obs.os_mkdirs(dest_dir)
-  local tmp = dest .. ".qqtmp"
+  -- FFmpeg infers the output container from the final extension.
+  local stem, extension = dest:match("^(.*)(%.[^./\\]+)$")
+  local tmp = (stem or dest) .. ".qqtmp" .. (extension or "")
   obs.os_unlink(tmp)
   if not write_with_metadata(src, tmp, game) or not obs.os_file_exists(tmp) then
     obs.os_unlink(tmp)
@@ -311,6 +313,7 @@ local function move_file(src_path, kind)
   local dest_dir = state.move_to_folders and build_dest_dir(base_dir, game, kind) or base_dir
   local out_name = state.title_as_prefix and (game .. " - " .. filename) or filename
   local dest_path = dest_dir .. SEP .. out_name
+  if not state.move_to_folders and not state.title_as_prefix then dest_path = src_path end
   local layout = dest_dir:sub(#base_dir + 2) -- subfolder structure under the recording dir
 
   log_naming(kind, src_path, raw, method, game, fallback, layout, dest_path)

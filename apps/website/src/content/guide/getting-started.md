@@ -14,9 +14,30 @@ Grab the latest build from [GitHub Releases](https://github.com/qcksys/qlipq/rel
 
 Every build bundles the FFmpeg libraries QlipQ needs — there's no separate `ffmpeg` to install.
 
+### WinGet (Windows)
+
+Stable releases are submitted to the WinGet community repository. The first package submission must be accepted before later versions can be submitted. Once the package submission is accepted, install or update QlipQ from PowerShell:
+
+```powershell
+winget install --id qcksys.qlipq --exact --source winget
+winget upgrade --id qcksys.qlipq --exact --source winget
+```
+
+WinGet uses the same Windows installer and may request administrator permission. A new release can appear on GitHub before it is accepted into WinGet; if the package or version isn't available yet, use the GitHub installer above.
+
+## Startup options
+
+In **Settings → Library → Startup**, both options are off by default:
+
+- **Start with Windows** (Windows only) — launch QlipQ when you sign in to your Windows account. Turn it off to remove QlipQ's sign-in startup entry. If you move the portable app, launch it from its new location to update the entry.
+- **Start minimized** — minimize QlipQ to the taskbar on every launch, including sign-in startup. Restore it from the taskbar when you want to edit; watched folders continue scanning and watching while minimized. Changes apply on the next launch.
+
+These options are independent: enable both to have QlipQ watch for recordings automatically after sign-in with its window minimized.
+
 ## 1. Add watched folders
 
-In **Settings → Library → Watched folders**, add the folder(s) where your recordings land (for OBS this is your recording or replay-buffer output path). QlipQ can auto-detect the **OBS** and **NVIDIA Share** output folders and offer them as one-click presets. It scans these folders — including subfolders — on launch and watches for new files while it runs. Loading, scanning and preview preparation run in the background, so you can continue using the controls while recordings load.
+In **Settings → Library → Watched folders**, add the folder(s) where your recordings land (for OBS this is your recording or replay-buffer output path). QlipQ can auto-detect the **OBS** and **NVIDIA Share** output folders and offer them as one-click presets. It scans these folders — including subfolders — on launch and refreshes the queue when recordings are created, changed, moved, renamed, or removed. Updates settle briefly before scanning, so a recording can finish writing before its details are refreshed. **Rescan all folders** also refreshes recordings already in the queue; an unavailable folder keeps its existing entries until it can be scanned again.
+Loading, scanning and preview preparation run in the background, so you can continue using the controls while recordings load.
 
 Tick **Hide auto-captured highlights** to keep NVIDIA App's automatic **Highlights** out of the queue (they're tagged `NVIDIA APP (Highlights)` in the file, versus `NVIDIA APP` for a manual recording; a clip's encoder is shown in the editor's debug panel). Highlights that aren't hidden are marked with a **Highlight** badge in the queue. This sets the default; the queue's [filter bar](#4-edit-and-export) can override it per session (show all clips, only highlights, or hide them).
 
@@ -31,7 +52,11 @@ In **Settings → Export**, set an **Output folder** for exports. QlipQ creates 
 - **Quality** — a named preset, a custom **CRF**, **VBR** (CRF capped by a max bitrate), or a **target bitrate**.
 - **Frame rate**, **resolution** (down to 720p / up to 4K), **codec** (H.264 / H.265), **container** (mp4 / mkv), and **audio bitrate**.
 
-The editor shows an estimated file size for the current clip, and **Output & tags** lets you override the quality per clip. Settings are grouped into **Library**, **Export**, **Preview**, and **Shortcuts** and save automatically.
+The editor shows an approximate file size for the current clip, and you can override the quality per clip. **Target bitrate** gives the most predictable size, but short clips, encoder rate control, and container overhead can still change the result. **Preset**, **CRF**, and **VBR** size estimates are rough: scene detail, motion, and the hardware encoder can make the actual size substantially different. VBR's bitrate is a ceiling, not a target size.
+
+**Original** copies the source video when no crop, resolution, or frame-rate change requires re-encoding. In that case the source codec is preserved. If an edit requires re-encoding, Original uses the same quality level as **High**. Export frame rate and resolution never increase beyond the source. The audio bitrate applies to the single mixed output track, regardless of how many input tracks are enabled.
+
+Use **Output & tags** to override quality per clip. Settings are grouped into **Library**, **Export**, **Preview**, and **Shortcuts** and save automatically.
 
 ## 4. Edit and export
 
@@ -44,9 +69,11 @@ Each clip has a thumbnail that loads when its card comes into view. **Hover over
 3. **Keyboard shortcuts** default to Adobe Premiere Pro — **Space** play/pause, **I**/**O** set in/out, **←**/**→** step a frame, **Shift+←**/**→** jump 5 s, **Home**/**End** go to start/end, **Ctrl+M** export — and are rebindable in **Settings → Shortcuts**. Editor shortcuts are inactive in Settings and while typing into a text field. With a clip selected, **Delete** removes its file from disk after a confirmation (**Enter** confirms the prompt) and **Shift+Delete** removes it immediately without asking. **Escape** closes a dialog or exits the fullscreen preview.
 4. In **Audio & crop**, optionally enable **crop** and adjust the rectangle.
 5. In the same tab, toggle **audio tracks** and set their levels (your selection carries to the next clip); changes are reflected in the preview as you make them. On **export**, the enabled tracks are **mixed together into one track** at the levels you set.
-6. Click **Export clip** in the footer, which stays visible as you scroll the editor. It also shows duration, resolution and estimated size. If a file with the same name already exists you can **overwrite** it or **append a timestamp** to keep both, and **Settings → Export → After export** decides what happens to the original (keep, delete, move, rename, or prompt). During export, the selected recording stays open and its rename, dismiss and delete actions are disabled; **Cancel export** remains available. Use **Show file** to reveal the exported clip.
+6. Click **Export clip** in the footer, which stays visible as you scroll the editor. It also shows duration, resolution and estimated size. Choose an output folder or filename different from the source recording. If a file with the same name already exists you can **overwrite** it or **append a timestamp** to keep both. One export runs at a time; you can select another clip while it runs and use **Cancel export** in the top bar. The export keeps the settings chosen when it starts, including **Settings → Export → After export** (keep, delete, move, rename, or prompt). That action always applies to the exported clip's original recording. Failed or cancelled exports leave the original in place. Its rename, dismiss and delete actions are disabled until export finishes. Use **Show file** to reveal the exported clip.
 
 The selected recording's card shows **Rename**, **Open**, **Dismiss**, and **Delete**. Dismiss hides a recording without deleting its file; choose the **dismissed** tag filter and use **Restore** to bring it back. Add or remove your own tags in **Output & tags**. If a file operation fails, QlipQ shows the error; a failed rename keeps the dialog open so you can correct the name.
+
+When you rename, move, or delete a recording, its queue entry and saved edits are updated too. QlipQ waits for its preview to close before changing the file. Settings and edits are saved in order, and save failures appear in a dialog.
 
 > **Preview vs. export.** The preview decodes frames in-process and tonemaps HDR sources to SDR for display — it's a visual guide, and **exports use the original media as their input**. Its sharpness is set by **Settings → Preview → Preview quality** (720p / 1080p / 1440p / Source; default 1080p) — higher is sharper but costs more decode/GPU work, so lower it if playback stutters. If an HDR clip (especially a Windows HDR _desktop_ recording) previews too dark, **Settings → Preview → HDR preview → Brightness** lifts it with an adjustable gamma (higher = brighter; `1.0` = off; **Reset** restores the default). Both affect the preview only.
 

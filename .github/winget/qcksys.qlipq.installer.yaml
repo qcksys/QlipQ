@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: qcksys.qlipq
+PackageVersion: "{{VERSION}}"
+InstallerType: inno
+Scope: machine
+UpgradeBehavior: install
+ProductCode: "{36C074CA-3CDE-4FD8-A823-778FF2B56CCB}_is1"
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/qcksys/qlipq/releases/download/{{TAG}}/qlipq-setup-x64.exe
+    InstallerSha256: "{{SHA256}}"
+ManifestType: installer
+ManifestVersion: 1.6.0

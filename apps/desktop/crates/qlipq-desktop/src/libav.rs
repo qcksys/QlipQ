@@ -223,6 +223,7 @@ struct Shared {
 
 enum Command {
     Seek(f64),
+    Stop,
 }
 
 /// What ended a decode segment, so a thread knows whether to restart (seek) or exit.
@@ -235,11 +236,17 @@ enum SegEnd {
 /// A warm in-process decoder feeding [`crate::video::SharedFrame`]. Provides `poll`/`dimensions`/`fps`
 /// plus `position()`/`try_seek()` for live playback control.
 pub struct Player {
+    handle: PlayerHandle,
+    video_thread: Option<JoinHandle<()>>,
+    audio_thread: Option<JoinHandle<()>>,
+}
+
+/// Non-owning playback controls and diagnostics. Decoder shutdown belongs to the media worker.
+#[derive(Clone)]
+pub struct PlayerHandle {
     shared: Arc<Shared>,
     video_cmd: Option<Sender<Command>>,
     audio_cmd: Option<Sender<Command>>,
-    video_thread: Option<JoinHandle<()>>,
-    audio_thread: Option<JoinHandle<()>>,
     width: u32,
     height: u32,
     fps: f64,
@@ -249,6 +256,26 @@ pub struct Player {
 }
 
 impl Player {
+    pub fn handle(&self) -> PlayerHandle {
+        self.handle.clone()
+    }
+}
+
+impl std::ops::Deref for Player {
+    type Target = PlayerHandle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.handle
+    }
+}
+
+impl std::fmt::Debug for PlayerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlayerHandle").finish_non_exhaustive()
+    }
+}
+
+impl PlayerHandle {
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
     }
@@ -354,9 +381,13 @@ impl Player {
 impl Drop for Player {
     fn drop(&mut self) {
         crate::background::assert_worker();
-        // Dropping the senders disconnects the command channels; the decode threads see that and exit.
-        self.video_cmd.take();
-        self.audio_cmd.take();
+        // UI handles may still hold sender clones; explicitly stop before joining the decoders.
+        if let Some(tx) = self.handle.video_cmd.take() {
+            let _ = tx.send(Command::Stop);
+        }
+        if let Some(tx) = self.handle.audio_cmd.take() {
+            let _ = tx.send(Command::Stop);
+        }
         if let Some(handle) = self.video_thread.take() {
             let _ = handle.join();
         }
@@ -456,15 +487,17 @@ pub fn start_player(
     };
 
     Some(Player {
-        shared,
-        video_cmd: Some(video_cmd),
-        audio_cmd,
+        handle: PlayerHandle {
+            shared,
+            video_cmd: Some(video_cmd),
+            audio_cmd,
+            width: dims.0,
+            height: dims.1,
+            fps,
+            gains,
+        },
         video_thread: Some(video_thread),
         audio_thread,
-        width: dims.0,
-        height: dims.1,
-        fps,
-        gains,
     })
 }
 
@@ -1322,6 +1355,7 @@ fn mix_and_push(
 fn poll_cmd(cmd_rx: &Receiver<Command>) -> Option<SegEnd> {
     match cmd_rx.try_recv() {
         Ok(Command::Seek(t)) => Some(SegEnd::Seek(t)),
+        Ok(Command::Stop) => Some(SegEnd::Stopped),
         Err(TryRecvError::Disconnected) => Some(SegEnd::Stopped),
         Err(TryRecvError::Empty) => None,
     }
@@ -1703,4 +1737,53 @@ fn frame_to_rgba(frame: &AVFrame) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_shutdown_stops_decoders_while_ui_handle_is_retained() {
+        let (video_cmd, commands) = channel();
+        let (stopped, completed) = channel();
+        let player = Player {
+            handle: PlayerHandle {
+                shared: Arc::new(Shared {
+                    video: Mutex::new(VecDeque::new()),
+                    ended: AtomicBool::new(false),
+                    video_ready: AtomicBool::new(false),
+                    gamma: 1.0,
+                    video_pix_fmt: 0,
+                    stats: Arc::new(PlayerStats::default()),
+                    clock: Clock {
+                        use_audio: AtomicBool::new(false),
+                        base: Mutex::new(0.0),
+                        played: Arc::new(AtomicU64::new(0)),
+                        rate: AtomicU64::new(0),
+                        wall: Mutex::new(None),
+                    },
+                }),
+                video_cmd: Some(video_cmd),
+                audio_cmd: None,
+                width: 1,
+                height: 1,
+                fps: 30.0,
+                gains: Vec::new(),
+            },
+            video_thread: Some(std::thread::spawn(move || {
+                assert!(matches!(commands.recv(), Ok(Command::Stop)));
+            })),
+            audio_thread: None,
+        };
+        let ui = player.handle();
+        let shutdown = std::thread::spawn(move || {
+            drop(player);
+            stopped.send(()).unwrap();
+        });
+        let result = completed.recv_timeout(Duration::from_secs(5));
+        drop(ui);
+        shutdown.join().unwrap();
+        assert!(result.is_ok(), "decoder shutdown waited for the UI handle");
+    }
 }

@@ -1,0 +1,110 @@
+name: Publish to WinGet
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+      submit:
+        type: boolean
+        default: true
+    secrets:
+      WINGET_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published stable release tag (e.g. v0.1.2)"
+        type: string
+        required: true
+      submit:
+        description: "Submit a PR to microsoft/winget-pkgs (false only validates and uploads manifests)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winget-qcksys-qlipq
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'qcksys/QlipQ'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check WinGet publication state
+        id: publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $state = ./.github/winget/Get-WinGetPublicationState.ps1 -Tag $env:RELEASE_TAG
+          "update=$($state.Update.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "submit=$($state.Submit.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          if ($state.Reason) { $state.Reason | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append }
+
+      - name: Download published installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh release view $env:RELEASE_TAG --repo qcksys/qlipq --json isDraft,isPrerelease | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read release.' }
+          if ($release.isDraft -or $release.isPrerelease) { throw 'WinGet requires a published stable release.' }
+          gh release download $env:RELEASE_TAG --repo qcksys/qlipq --pattern qlipq-setup-x64.exe --dir dist/winget
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the Windows installer.' }
+
+      - name: Set up WinGet
+        run: |
+          Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery
+          Repair-WinGetPackageManager -AllUsers
+
+      - name: Set up WingetCreate
+        run: |
+          Invoke-WebRequest https://github.com/microsoft/winget-create/releases/download/v1.12.13.0/wingetcreate.exe -OutFile dist/winget/wingetcreate.exe
+          if ((Get-FileHash dist/winget/wingetcreate.exe -Algorithm SHA256).Hash -ne '24042BD37915805615E6CF969AC57C6439124C3FE85823327F5F3FB24BD9FFEA') {
+            throw 'WingetCreate checksum mismatch.'
+          }
+
+      - name: Generate manifests
+        id: manifest
+        env:
+          WINGET_CREATE_GITHUB_TOKEN: ${{ github.token }}
+          UPDATE_MANIFEST: ${{ steps.publication.outputs.update }}
+        run: |
+          $directory = ./.github/winget/New-WinGetManifest.ps1 -Tag $env:RELEASE_TAG -InstallerPath dist/winget/qlipq-setup-x64.exe -OutputDirectory dist/winget -Update:($env:UPDATE_MANIFEST -eq 'true')
+          "directory=$directory" >> $env:GITHUB_OUTPUT
+
+      - name: Validate manifests
+        env:
+          MANIFEST_DIRECTORY: ${{ steps.manifest.outputs.directory }}
+        run: |
+          winget validate --manifest $env:MANIFEST_DIRECTORY --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { throw "WinGet validation failed: $LASTEXITCODE" }
+
+      - name: Upload manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: winget-${{ inputs.tag }}
+          path: dist/winget/manifests
+          if-no-files-found: error
+
+      - name: Submit to WinGet
+        if: inputs.submit && steps.publication.outputs.submit == 'true'
+        env:
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          MANIFEST_DIRECTORY: ${{ steps.manifest.outputs.directory }}
+        run: |
+          if (-not $env:WINGET_CREATE_GITHUB_TOKEN) { throw 'Set the WINGET_TOKEN repository secret to a classic PAT with public_repo scope.' }
+          ./dist/winget/wingetcreate.exe submit $env:MANIFEST_DIRECTORY --no-open
+          if ($LASTEXITCODE -ne 0) { throw "WinGet submission failed: $LASTEXITCODE" }

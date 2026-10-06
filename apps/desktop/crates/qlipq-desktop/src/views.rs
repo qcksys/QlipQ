@@ -11,7 +11,7 @@ impl App {
             .size(theme::DISPLAY)
             .font(theme::FONT_BOLD)
             .style(|t: &Theme| text::Style { color: Some(t.extended_palette().primary.base.color) });
-        let bar = row![
+        let mut bar = row![
             brand,
             text("Recording workspace").size(theme::META).style(|t| text::Style { color: Some(theme::muted(t)) }),
             Space::new().width(Length::Fill),
@@ -22,6 +22,10 @@ impl App {
         .spacing(theme::SM)
         .align_y(iced::Alignment::Center)
         .padding([theme::MD, theme::XL]);
+        if let Some(job) = self.exports.active() {
+            bar = bar.push(with_tip(text(format!("Exporting {}%", (job.progress() * 100.0) as i32)).size(theme::SMALL).into(), host::base_name(&job.request.source.input)))
+                .push(button(text("Cancel export").size(theme::SMALL)).style(theme::btn_danger).on_press(Message::CancelExport));
+        }
         container(bar).width(Length::Fill).style(theme::top_bar).into()
     }
 
@@ -138,6 +142,7 @@ impl App {
 
     fn queue_card(&self, item: &QueueItem) -> Element<'_, Message> {
         let selected = self.selected_id.as_deref() == Some(&item.id);
+        let can_change_file = !self.exports.contains(&item.id) && !self.file_operations.contains(&item.id);
         let status = item.status;
         let mut header = row![
             container(Space::new().width(Length::Fixed(8.0)).height(Length::Fixed(8.0))).style(theme::status_dot(status)),
@@ -162,7 +167,7 @@ impl App {
         .width(Length::Fill)
         .padding([theme::XS, 0.0])
         .style(theme::btn_plain)
-        .on_press_maybe((!self.editor.as_ref().is_some_and(|ed| ed.exporting)).then(|| Message::SelectItem(item.id.clone())));
+        .on_press_maybe((!self.file_operations.contains(&item.id)).then(|| Message::SelectItem(item.id.clone())));
 
         let mut card = column![open].spacing(theme::SM);
 
@@ -176,14 +181,14 @@ impl App {
         }
 
         let actions = row![
-            button(text("Rename").size(theme::SMALL)).style(theme::btn_secondary).on_press_maybe((status != QueueStatus::Exporting).then(|| Message::RenameOpen(item.id.clone()))),
+            button(text("Rename").size(theme::SMALL)).style(theme::btn_secondary).on_press_maybe(can_change_file.then(|| Message::RenameOpen(item.id.clone()))),
             with_tip(
                 button(text("Open").size(theme::SMALL)).style(theme::btn_secondary).on_press(Message::RevealItem(item.path.clone())).into(),
                 "Show in file explorer".to_string(),
             ),
             button(text(if item_dismissed(item) { "Restore" } else { "Dismiss" }).size(theme::SMALL)).style(theme::btn_secondary).on_press_maybe((status != QueueStatus::Exporting).then(|| Message::Dismiss(item.id.clone()))),
             Space::new().width(Length::Fill),
-            button(text("Delete").size(theme::SMALL)).style(theme::btn_ghost).on_press_maybe((status != QueueStatus::Exporting).then(|| Message::RequestDelete(item.id.clone()))),
+            button(text("Delete").size(theme::SMALL)).style(theme::btn_ghost).on_press_maybe(can_change_file.then(|| Message::RequestDelete(item.id.clone()))),
         ]
         .spacing(theme::XS);
         if selected {
@@ -305,6 +310,8 @@ impl App {
         };
 
         // Export bar.
+        let job = self.exports.active().filter(|job| job.request.source.item_id == item.id);
+        let exporting = job.is_some();
         let spec = editor_spec(ed);
         let validation = qlipq_core::edit_spec::validate_edit_spec(&spec, media);
         let encode = output_settings_to_encode(&self.effective_output(item), media);
@@ -325,20 +332,20 @@ impl App {
         if let Some(err) = &validation {
             export_details = export_details.push(text(err.clone()).size(theme::LABEL).style(|t: &Theme| text::Style { color: Some(t.extended_palette().danger.base.color) }));
         }
-        if ed.exporting {
-            export_details = export_details.push(progress_bar(0.0..=1.0, ed.progress_display).girth(4).style(theme::progress_style));
+        if exporting {
+            export_details = export_details.push(progress_bar(0.0..=1.0, job.map_or(0.0, |job| job.progress())).girth(4).style(theme::progress_style));
         }
 
         let mut export_bar = row![export_details.width(Length::Fill)].align_y(iced::Alignment::Center).spacing(theme::MD);
-        if ed.exporting {
+        if exporting {
             export_bar = export_bar.push(button(text("Cancel export").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::CancelExport));
         }
-        if item.export_path.is_some() && !ed.exporting {
+        if item.export_path.is_some() && !exporting {
             export_bar = export_bar.push(button(text("Show file").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::ShowExported));
         }
-        let can_export = validation.is_none() && !ed.exporting && !self.config.output_folder.is_empty();
+        let can_export = validation.is_none() && self.exports.active().is_none() && !self.file_operations.contains(&item.id) && !self.config.output_folder.is_empty();
         let export_btn = button(
-            text(if ed.exporting { format!("Exporting {}%", (ed.progress_display * 100.0) as i32) } else { "Export clip".to_string() })
+            text(if let Some(job) = job { format!("Exporting {}%", (job.progress() * 100.0) as i32) } else { "Export clip".to_string() })
                 .size(theme::BODY)
                 .font(theme::FONT_MEDIUM),
         )
@@ -471,7 +478,7 @@ impl App {
         controls = controls.push(
             button(text("Suggest highlight").size(theme::LABEL))
                 .style(theme::btn_secondary)
-                .on_press_maybe((!ed.exporting && !ed.highlight_query.trim().is_empty()).then_some(Message::SuggestHighlight)),
+                .on_press_maybe((!self.exports.contains(&ed.item_id) && !ed.highlight_query.trim().is_empty()).then_some(Message::SuggestHighlight)),
         );
         let mut body = column![text("Highlight suggestion").size(theme::LABEL).font(theme::FONT_MEDIUM), controls].spacing(theme::XS);
         if let Some(suggestion) = &ed.highlight_suggestion {
@@ -479,7 +486,7 @@ impl App {
             body = body.push(text(format!("Suggested: {} – {} · {}", format_timestamp(suggestion.trim.start_sec, fps), format_timestamp(suggestion.trim.end_sec, fps), suggestion.reason)).size(theme::LABEL));
             body = body.push(text("Includes 3 seconds before and 2 seconds after the event, within the clip.").size(theme::SMALL).style(|t| text::Style { color: Some(theme::muted(t)) }));
             body = body.push(row![
-                button(text("Apply trim").size(theme::LABEL)).style(theme::btn_secondary).on_press_maybe((!ed.exporting).then_some(Message::ApplyHighlight)),
+                    button(text("Apply trim").size(theme::LABEL)).style(theme::btn_secondary).on_press_maybe((!self.exports.contains(&ed.item_id)).then_some(Message::ApplyHighlight)),
                 button(text("Dismiss").size(theme::LABEL)).style(theme::btn_ghost).on_press(Message::DismissHighlight),
             ].spacing(theme::SM));
         } else if let Some(status) = &ed.highlight_status {
@@ -735,6 +742,30 @@ impl App {
         ]
         .spacing(theme::XS);
 
+        let startup = column![].spacing(theme::SM);
+        #[cfg(windows)]
+        let startup = startup
+            .push(checkbox(self.config.start_with_windows)
+                .label("Start with Windows")
+                .text_size(theme::LABEL)
+                .style(theme::checkbox_style)
+                .on_toggle(Message::ToggleStartWithWindows))
+            .push(text("Launch QlipQ when you sign in to Windows.")
+                .size(theme::SMALL)
+                .style(|t| text::Style { color: Some(theme::muted(t)) }));
+        let mut startup = startup
+            .push(checkbox(self.config.start_minimized)
+                .label("Start minimized")
+                .text_size(theme::LABEL)
+                .style(theme::checkbox_style)
+                .on_toggle(Message::ToggleStartMinimized))
+            .push(text("Minimize the window on the next launch. Watched folders stay active; restore QlipQ from the taskbar.")
+                .size(theme::SMALL)
+                .style(|t| text::Style { color: Some(theme::muted(t)) }));
+        if let Some(error) = &self.startup_error {
+            startup = startup.push(text(error).size(theme::SMALL).style(text::danger));
+        }
+
         // Playback + developer toggles.
         let playback = column![
             checkbox(self.config.autoplay)
@@ -763,7 +794,7 @@ impl App {
         .spacing(theme::XS);
 
         let sections = match self.settings_tab {
-            SettingsTab::Library => column![section("Watched folders", folders.into())],
+            SettingsTab::Library => column![section("Startup", startup.into()), section("Watched folders", folders.into())],
             SettingsTab::Export => column![
                 section("Output folder", output_folder.into()),
                 section("Output defaults", column![
@@ -907,7 +938,7 @@ impl App {
         modal(
             column![
                 text("Export complete").size(theme::TITLE).font(theme::FONT_SEMIBOLD),
-                text("What should happen to the original recording?").size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
+                text(format!("What should happen to {}?", self.after_prompt.as_ref().map(|source| host::base_name(&source.input)).unwrap_or_default())).size(theme::LABEL).style(|t| text::Style { color: Some(theme::muted(t)) }),
                 row![
                     button(text("Keep").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::AfterChoice(AfterExportAction::Nothing)),
                     button(text("Rename").size(theme::LABEL)).style(theme::btn_secondary).on_press(Message::AfterChoice(AfterExportAction::Rename)),

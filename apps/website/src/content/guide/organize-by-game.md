@@ -1,16 +1,18 @@
 ---
-title: Auto-organize OBS recordings by game
-description: A companion OBS Lua script that sorts recordings, replays, and screenshots into per-game folders QlipQ reads automatically.
+title: QlipQRenamer — auto-organize OBS recordings by game
+description: Download and set up QlipQRenamer, an OBS Lua script that sorts recordings, replays, and screenshots into per-game folders.
 order: 3
 ---
 
 OBS writes every recording into one flat folder. **QlipQRenamer** is an optional companion script that sorts each finished recording, saved replay, and screenshot into a folder named after the game you were capturing — the same per-game layout NVIDIA ShadowPlay uses, and one QlipQ already understands. It runs on the LuaJIT runtime bundled with OBS, so there is no Python to install.
 
+The script works independently of the QlipQ desktop app. Use it just to organize your OBS files, or add your recording folder to QlipQ to queue the clips for editing. Sorting and renaming need no additional software; only the optional metadata tagging setting requires a separate FFmpeg install.
+
 > Based on the [original OBS Studio script](https://obsproject.com/forum/resources/recorder.1926/) by **oxypatic**, reimplemented in Lua. All credit for the original idea goes to its author.
 
 ## 1. Install the script
 
-1. Download [`qlipq-renamer.lua`](/qlipq-renamer.lua).
+1. Download <a href="/qlipq-renamer.lua" download="qlipq-renamer.lua">`qlipq-renamer.lua`</a> and keep it in a permanent folder.
 2. In OBS, open **Tools → Scripts**.
 3. On the **Lua Scripts** tab, click **+** and select `qlipq-renamer.lua`.
 
@@ -34,6 +36,8 @@ The script reads the game from your scene's **Game Capture** (or **Window Captur
 | Screenshot subfolder name                            | `screenshot`    | Name of that subfolder.                                                   |
 
 **Folders vs. metadata are independent.** You can move into folders, embed the game as a `game=` metadata tag, both, or neither — whatever suits your workflow. The metadata tag uses ffmpeg to stream-copy the file (no re-encode); **mkv** stores it most reliably (mp4's metadata support is limited), and on Windows it briefly flashes a console window per clip. qlipq already writes this same `game=` tag when you export, so the metadata option is mainly for tagging the original recordings.
+
+When no game is detected, metadata uses your **Fallback folder name** — `game=Any Recording` by default — even when moving into folders is off. **AV1 recordings in MKV are supported**: tagging copies the existing video and all audio tracks without re-encoding.
 
 > The capture source must be **visible** in your current scene for the script to read the hooked game. Keep your Game/Window Capture source enabled.
 
@@ -98,6 +102,8 @@ Prefer the game name baked into the filenames (e.g. you sync clips elsewhere)? A
 ## Troubleshooting
 
 - **Clips land in "Any Recording."** No app was detected at capture time. Make sure your **Game Capture** (or **Window Capture**) source is in the current scene, visible, and actually capturing. On **macOS/Linux**, **Display Capture** can't report a game, so those clips always use the fallback folder.
+- **Metadata failed, then the clip moved untagged.** Download the current script and reload it in OBS: older versions used a temporary filename ending in `.qqtmp`, which prevented ffmpeg from choosing the output container, including for AV1/MKV. If it still fails, check **ffmpeg path (for metadata)**. Successful writes log `tagged + moved` or `tagged in place`; `moved (untagged)` means the recording was preserved without a new tag.
+- **Metadata-only mode says "destination exists."** Reload the current script. It preserves OBS's original path when no move or filename prefix is requested, so Windows path separator differences don't cause tagging to be skipped.
 - **The game folder name looks stripped** (e.g. _Tom Clancys Rainbow Six Siege_). Titles are reduced to letters, numbers, and spaces, so punctuation like `:`, `®`, or `'` is removed — matching how the original script names folders.
 - **A split recording wasn't fully sorted.** With OBS automatic file splitting, only the **final** segment is moved; earlier segments stay in the root folder.
 - **Nothing moved at all.** The script acts when a file is finalized — **Recording Stopped**, **Replay Buffer Saved**, or **Screenshot Taken** — not while recording is still running.

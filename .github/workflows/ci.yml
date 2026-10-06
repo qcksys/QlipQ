@@ -31,7 +31,26 @@ jobs:
       - name: Format, lint & type check
         run: vp check
 
-      # No JS/TS tests in the pnpm workspace (website + OBS script) — the correctness gate is the
-      # Rust `cargo test` in build-desktop.yml. Re-add a test step here if JS tests are introduced.
+      - name: Test OBS metadata tagging
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit ffmpeg
+          luajit packages/obs-script/tests/metadata.lua
+
       - name: Build website
         run: vp run -r build
+
+  winget:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up WinGet
+        shell: pwsh
+        run: |
+          Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery
+          Repair-WinGetPackageManager -AllUsers
+      - name: Test and validate WinGet manifests
+        shell: pwsh
+        run: |
+          ./.github/winget/Test-WinGetPublicationState.ps1
+          ./.github/winget/Test-WinGetManifest.ps1 -ValidateWithWinGet

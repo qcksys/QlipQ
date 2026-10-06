@@ -19,6 +19,38 @@ fn highlight_model_defaults_and_round_trips() {
 }
 
 #[test]
+fn startup_options_default_off_for_existing_configs() {
+    for cfg in [AppConfig::default(), config_json::parse(r#"{"outputFolder":"D:/out"}"#)] {
+        assert!(!cfg.start_with_windows);
+        assert!(!cfg.start_minimized);
+    }
+}
+
+#[test]
+fn startup_options_round_trip_independently() {
+    for start_with_windows in [false, true] {
+        for start_minimized in [false, true] {
+            let json = format!(
+                r#"{{"startWithWindows":{start_with_windows},"startMinimized":{start_minimized}}}"#
+            );
+            let cfg = config_json::parse(&json);
+            assert_eq!(cfg.start_with_windows, start_with_windows);
+            assert_eq!(cfg.start_minimized, start_minimized);
+            assert_eq!(config_json::parse(&config_json::serialize(&cfg)), cfg);
+        }
+    }
+}
+
+#[test]
+fn startup_options_are_in_the_derived_schema() {
+    let schema = config_json::config_schema();
+    for name in ["startWithWindows", "startMinimized"] {
+        assert_eq!(schema["properties"][name]["type"], "boolean");
+        assert_eq!(schema["properties"][name]["default"], false);
+    }
+}
+
+#[test]
 fn autoplay_defaults_on_and_debug_off() {
     let cfg = AppConfig::default();
     assert!(cfg.autoplay);

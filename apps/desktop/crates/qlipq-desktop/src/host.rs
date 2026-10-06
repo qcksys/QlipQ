@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(not(test))]
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use qlipq_core::config::AppConfig;
@@ -65,6 +65,7 @@ pub fn load_config() -> AppConfig {
     }
 }
 
+#[cfg(test)]
 pub fn save_config(cfg: &AppConfig) -> std::io::Result<()> {
     crate::background::assert_worker();
     let path = config_path();
@@ -73,7 +74,6 @@ pub fn save_config(cfg: &AppConfig) -> std::io::Result<()> {
     }
     std::fs::write(path, config_json::serialize(cfg))
 }
-
 /// Write the JSON Schema for `config.json` next to it, so editors validate the config against the
 /// relative `$schema` ref the app stamps. Called on startup; cheap to refresh.
 pub fn write_config_schema() -> std::io::Result<()> {
@@ -98,31 +98,6 @@ pub fn read_app_file(name: &str) -> Option<String> {
     std::fs::read_to_string(data_dir().join(name)).ok()
 }
 
-pub fn write_app_file(name: &str, contents: &str) -> std::io::Result<()> {
-    crate::background::assert_worker();
-    if !is_valid_name(name) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "invalid file name",
-        ));
-    }
-    let dir = data_dir();
-    std::fs::create_dir_all(&dir)?;
-    // Atomic write: stage into a unique temp file, then rename over the target. Several fire-and-
-    // forget savers can hit the same JSON at once (e.g. edits.json from both persist_edit and
-    // remove_item) and the process can exit mid-write; a plain truncating `write` would leave a torn
-    // file, and since load parses with `unwrap_or_default` that silently wipes the whole store.
-    // `rename` replaces atomically (on Windows too), so every reader sees the old or the new complete
-    // file — never a partial one. Last writer wins, which is fine: each map is a full recent snapshot.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!("{name}.{}.{seq}.tmp", std::process::id()));
-    std::fs::write(&tmp, contents)?;
-    std::fs::rename(&tmp, dir.join(name)).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
-}
-
 fn has_video_ext(path: &Path, extensions: &[String]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -130,30 +105,58 @@ fn has_video_ext(path: &Path, extensions: &[String]) -> bool {
         .unwrap_or(false)
 }
 
-/// Recursively collect video files, skipping symlinks/junctions (not followed), like `scan_folders`.
-pub fn scan_folders(folders: &[String], extensions: &[String]) -> Vec<String> {
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    pub paths: Vec<String>,
+    /// Only complete scans can prove that an earlier recording has disappeared.
+    pub complete_roots: Vec<String>,
+}
+
+/// Recursively collect video files, skipping symlinks/junctions.
+pub fn scan_folders(folders: &[String], extensions: &[String]) -> ScanResult {
     crate::background::assert_worker();
     let mut found = Vec::new();
-    let mut stack: Vec<PathBuf> = folders.iter().map(PathBuf::from).collect();
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
+    let mut complete_roots = Vec::new();
+    for root in folders {
+        let mut complete = true;
+        let mut stack = vec![PathBuf::from(root)];
+        while let Some(dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => {
+                    complete = false;
+                    continue;
+                }
             };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                stack.push(entry.path());
-            } else if file_type.is_file() && has_video_ext(&entry.path(), extensions) {
-                found.push(to_posix(&entry.path().to_string_lossy()));
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    complete = false;
+                    continue;
+                };
+                let Ok(file_type) = entry.file_type() else {
+                    complete = false;
+                    continue;
+                };
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
+                    stack.push(entry.path());
+                } else if file_type.is_file() && has_video_ext(&entry.path(), extensions) {
+                    found.push(to_posix(&entry.path().to_string_lossy()));
+                }
             }
         }
+        if complete {
+            complete_roots.push(to_posix(root));
+        }
     }
-    found
+    found.sort();
+    found.dedup();
+    ScanResult {
+        paths: found,
+        complete_roots,
+    }
 }
 
 /// One recording's on-disk stats paired with a still-valid cached probe, if any. `cached` is `Some`
@@ -200,6 +203,30 @@ pub fn resolve_media(paths: &[String], cache: &MediaCache) -> Vec<MediaResolutio
 pub fn file_exists(path: &str) -> bool {
     crate::background::assert_worker();
     Path::new(path).is_file()
+}
+
+pub fn same_path(left: &str, right: &str) -> bool {
+    let left = to_posix(left);
+    let right = to_posix(right);
+    if cfg!(windows) { left.eq_ignore_ascii_case(&right) } else { left == right }
+}
+
+pub fn same_file(left: &str, right: &str) -> bool {
+    crate::background::assert_worker();
+    let equal = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    if equal(&to_posix(left), &to_posix(right)) {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(a), Ok(b)) => equal(&a.to_string_lossy(), &b.to_string_lossy()),
+        _ => false,
+    }
 }
 
 /// Rename a file on disk; returns the new path. Cross-device moves fall back to copy+delete.
@@ -308,44 +335,35 @@ pub fn detect_capture_presets() -> CapturePresets {
     presets
 }
 
-/// Holds the live notify watcher and a buffer of newly-created video paths, drained by the UI tick.
+/// Marks the library dirty after filesystem mutations, including directory moves and removals.
 pub struct Watcher {
     _watcher: notify::RecommendedWatcher,
-    buffer: Arc<Mutex<Vec<String>>>,
+    dirty: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Watcher {
-    /// Drain and return the paths discovered since the last call.
-    pub fn drain(&self) -> Vec<String> {
-        self.buffer
-            .try_lock()
-            .map(|mut b| std::mem::take(&mut *b))
-            .unwrap_or_default()
+    pub fn drain(&self) -> bool {
+        self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
-/// Start watching `folders` (recursively) for new video files. Hold the returned [`Watcher`]
+/// Start watching `folders` recursively for changes. Hold the returned [`Watcher`]
 /// for the app's lifetime; dropping it stops watching.
-pub fn start_watch(folders: &[String], extensions: &[String]) -> Option<Watcher> {
+pub fn start_watch(folders: &[String], _extensions: &[String]) -> Option<Watcher> {
     crate::background::assert_worker();
     use notify::{EventKind, RecursiveMode, Watcher as _};
 
-    let buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let exts: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
-    let sink = Arc::clone(&buffer);
+    let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sink = Arc::clone(&dirty);
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        let Ok(event) = res else { return };
-        if !matches!(event.kind, EventKind::Create(_)) {
+        if res
+            .as_ref()
+            .is_ok_and(|event| !event.need_rescan() && matches!(event.kind, EventKind::Access(_)))
+        {
             return;
         }
-        for path in event.paths {
-            if path.is_file() && has_video_ext(&path, &exts) {
-                if let Ok(mut b) = sink.lock() {
-                    b.push(to_posix(&path.to_string_lossy()));
-                }
-            }
-        }
+        sink.store(true, std::sync::atomic::Ordering::Relaxed);
     })
     .ok()?;
 
@@ -355,7 +373,7 @@ pub fn start_watch(folders: &[String], extensions: &[String]) -> Option<Watcher>
 
     Some(Watcher {
         _watcher: watcher,
-        buffer,
+        dirty,
     })
 }
 
@@ -465,12 +483,6 @@ pub fn load_edit_store() -> EditStore {
         .unwrap_or_default()
 }
 
-pub fn save_edit_store(store: &EditStore) {
-    if let Ok(json) = serde_json::to_string(store) {
-        let _ = write_app_file("edits.json", &json);
-    }
-}
-
 /// A cached probe result for one recording, persisted to `media-cache.json` so the queue's durations
 /// (and other parsed metadata) survive restarts without re-probing every file. `size_bytes` +
 /// `modified_ms` invalidate the entry when the file changes on disk, so a replaced/re-encoded
@@ -512,12 +524,115 @@ pub fn load_media_cache() -> MediaCache {
         .unwrap_or_default()
 }
 
-pub fn save_media_cache(cache: &MediaCache) {
+pub(crate) fn serialize_media_cache(cache: &MediaCache) -> serde_json::Result<String> {
     let file = MediaCacheFileRef {
         version: MEDIA_CACHE_VERSION,
         entries: cache,
     };
-    if let Ok(json) = serde_json::to_string(&file) {
-        let _ = write_app_file("media-cache.json", &json);
+    serde_json::to_string(&file)
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "qlipq-discovery-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn existing_recording_changes_invalidate_cached_metadata() {
+        let dir = TestDir::new();
+        let path = dir.0.join("recording.mp4");
+        std::fs::write(&path, "early").unwrap();
+        let path = to_posix(&path.to_string_lossy());
+        let initial = resolve_media(std::slice::from_ref(&path), &MediaCache::new()).remove(0);
+        let cache = MediaCache::from([(
+            path.clone(),
+            CachedMedia {
+                size_bytes: initial.size,
+                modified_ms: initial.modified_ms,
+                media: MediaInfo {
+                    duration_sec: 1.0,
+                    width: 16,
+                    height: 16,
+                    video_codec: "h264".into(),
+                    fps: 30.0,
+                    audio_streams: vec![],
+                    size_bytes: None,
+                    encoder: None,
+                },
+                is_hdr: false,
+            },
+        )]);
+        assert!(resolve_media(std::slice::from_ref(&path), &cache)[0]
+            .cached
+            .is_some());
+        std::fs::write(&path, "complete recording").unwrap();
+        let refreshed = resolve_media(std::slice::from_ref(&path), &cache).remove(0);
+        assert_eq!(refreshed.size, 18);
+        assert!(refreshed.cached.is_none());
+    }
+
+    #[test]
+    fn completed_scans_reconcile_removals_but_failed_roots_do_not() {
+        let dir = TestDir::new();
+        let root = to_posix(&dir.0.to_string_lossy());
+        let path = dir.0.join("recording.mp4");
+        std::fs::write(&path, "recording").unwrap();
+        let before = scan_folders(std::slice::from_ref(&root), &["mp4".into()]);
+        assert_eq!(before.paths.len(), 1);
+        std::fs::remove_file(&path).unwrap();
+        let after = scan_folders(std::slice::from_ref(&root), &["mp4".into()]);
+        assert_eq!(
+            crate::discovery::missing_paths(
+                before.paths.iter(),
+                &after.paths,
+                &after.complete_roots
+            ),
+            before.paths,
+        );
+        std::fs::write(&path, "not a directory").unwrap();
+        let failed = scan_folders(&[to_posix(&path.to_string_lossy())], &["mp4".into()]);
+        assert!(failed.complete_roots.is_empty());
+    }
+
+    #[test]
+    fn unavailable_roots_preserve_their_recordings() {
+        let dir = TestDir::new();
+        let path = dir.0.join("temporarily-unavailable");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("recording.mp4"), "recording").unwrap();
+        let root = to_posix(&path.to_string_lossy());
+        let before = scan_folders(std::slice::from_ref(&root), &["mp4".into()]);
+        assert_eq!(before.paths.len(), 1);
+        std::fs::rename(&path, dir.0.join("available-elsewhere")).unwrap();
+        let missing = scan_folders(std::slice::from_ref(&root), &["mp4".into()]);
+        assert!(missing.complete_roots.is_empty());
+        assert!(crate::discovery::missing_paths(
+            before.paths.iter(),
+            &missing.paths,
+            &missing.complete_roots,
+        )
+        .is_empty());
     }
 }
