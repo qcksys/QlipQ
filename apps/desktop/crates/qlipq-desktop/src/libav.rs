@@ -1094,6 +1094,7 @@ fn audio_segment(
     // Reset the master clock for this segment (the audio thread owns it when audio is playing).
     shared.clock.use_audio.store(use_audio, Ordering::Relaxed);
     *shared.clock.base.lock().unwrap() = start;
+    *shared.clock.wall.lock().unwrap() = (!use_audio).then(|| (Instant::now(), start));
     shared
         .clock
         .rate
@@ -1742,6 +1743,58 @@ fn frame_to_rgba(frame: &AVFrame) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_without_audio_device_advances_from_segment_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recording.mkv");
+        crate::test_media::recording(&path);
+        let path = CString::new(path.to_str().unwrap()).unwrap();
+        let mut input = AVFormatContextInput::open(&path).unwrap();
+        let mut tracks: Vec<_> = (1..=2)
+            .map(|index| {
+                let (dec, tb) = build_audio_decoder(&input, index).unwrap();
+                MixTrack {
+                    abs_idx: index as i32,
+                    dec,
+                    tb_secs: rational_secs(tb),
+                    gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+                    swr: None,
+                    pending: Vec::new(),
+                    seeking: true,
+                }
+            })
+            .collect();
+        let shared = Arc::new(Shared {
+            video: Mutex::new(VecDeque::new()),
+            ended: AtomicBool::new(false),
+            video_ready: AtomicBool::new(false),
+            gamma: 1.0,
+            video_pix_fmt: 0,
+            stats: Arc::new(PlayerStats::default()),
+            clock: Clock {
+                use_audio: AtomicBool::new(true),
+                base: Mutex::new(0.0),
+                played: Arc::new(AtomicU64::new(0)),
+                rate: AtomicU64::new(0),
+                wall: Mutex::new(None),
+            },
+        });
+        let (_commands, receive) = channel();
+
+        for start in [3.0, 1.0] {
+            let began = Instant::now();
+            assert!(matches!(
+                audio_segment(&mut input, &mut tracks, start, &shared, None, &receive),
+                SegEnd::Eof
+            ));
+            std::thread::sleep(Duration::from_millis(20));
+            let position = shared.clock.now();
+            assert!(!shared.clock.use_audio.load(Ordering::Relaxed));
+            assert!(position >= start + 0.01, "playback stalled at {position}");
+            assert!(position <= start + began.elapsed().as_secs_f64());
+        }
+    }
 
     #[test]
     fn player_shutdown_stops_decoders_while_ui_handle_is_retained() {

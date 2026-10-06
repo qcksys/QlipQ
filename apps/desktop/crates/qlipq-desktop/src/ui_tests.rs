@@ -371,9 +371,7 @@ impl Ui {
     }
 }
 
-#[path = "test_media.rs"]
-mod test_media;
-use test_media::recording;
+use crate::test_media::{self, recording};
 
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();

@@ -75,6 +75,8 @@ The selected recording's card shows **Rename**, **Open**, **Dismiss**, and **Del
 
 When you rename, move, or delete a recording, its queue entry and saved edits are updated too. QlipQ waits for its preview to close before changing the file. Settings and edits are saved in order, and save failures appear in a dialog.
 
+If no audio output device is available or QlipQ cannot open it, the video preview continues playing silently. Exported audio still follows your enabled tracks and levels.
+
 > **Preview vs. export.** The preview decodes frames in-process and tonemaps HDR sources to SDR for display — it's a visual guide, and **exports use the original media as their input**. Its sharpness is set by **Settings → Preview → Preview quality** (720p / 1080p / 1440p / Source; default 1080p) — higher is sharper but costs more decode/GPU work, so lower it if playback stutters. If an HDR clip (especially a Windows HDR _desktop_ recording) previews too dark, **Settings → Preview → HDR preview → Brightness** lifts it with an adjustable gamma (higher = brighter; `1.0` = off; **Reset** restores the default). Both affect the preview only.
 
 > **Diagnosing preview stutter.** If the preview stutters or the audio drops out, enable **Settings → Preview → Show debug panel in the editor**. The panel adds a **Debug** card under the editor showing the clip's details, whether it's decoding on the **GPU (hardware)** or in **software**, and — while playing — live **video/audio buffer** levels, dropped frames, and audio underruns. Use **Copy** to copy the diagnostics. Software decoding of heavy 1440p/4K AV1/HEVC is the usual cause; it never affects exports.
