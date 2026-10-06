@@ -8,13 +8,17 @@
 //! (HDR→SDR tonemap) with synced cpal audio ([`libav`]); export decodes → edits → hardware-encodes →
 //! muxes ([`export`]).
 
+mod background;
 mod discovery;
 mod export;
+mod highlight;
 mod host;
 mod iso;
 mod jobs;
 mod libav;
 mod log_ctx;
+mod queue_preview;
+mod queue_sort;
 mod persistence;
 mod preview;
 mod seeker;
@@ -22,18 +26,26 @@ mod seeker;
 mod startup;
 mod theme;
 mod video;
+#[cfg(test)]
+mod ui_tests;
 
 // The in-process libav preview player (libplacebo HDR tonemap + synced cpal audio), exposing
 // `poll`/`dimensions`/`fps`/`position`/`try_seek` for the editor below.
+use background::Delivery;
 use jobs::{AfterExport, ExportRequest, Exports, FileMutation, FileOperation};
 use libav::PlayerHandle as PreviewPlayer;
 
-use std::collections::HashSet;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use iced::widget::{
     button, center, checkbox, column, container, mouse_area, opaque, pick_list, progress_bar,
-    responsive, row, rule, scrollable, shader, slider, stack, text, text_input, tooltip, Space,
+    responsive, row, rule, scrollable, sensor, shader, slider, stack, text, text_input, tooltip,
+    Space,
 };
 use iced::{Element, Font, Length, Size, Subscription, Task, Theme};
 
@@ -43,10 +55,11 @@ use qlipq_core::media::{audio_stream_label, format_bytes, MediaInfo};
 use qlipq_core::{datetimes, queue::*, rename};
 use qlipq_ffmpeg::args::output_settings_to_encode;
 use qlipq_ffmpeg::estimate::estimate_export_size;
+use queue_sort::QueueSort;
 
 const DISMISSED_TAG: &str = "dismissed";
 const TICK: Duration = Duration::from_millis(250);
-const SIDEBAR_WIDTH: f32 = 360.0;
+const SIDEBAR_WIDTH: f32 = 340.0;
 /// Sentinel "no filter" entries for the game/tag `pick_list`s (their reset option).
 const ALL_GAMES: &str = "All games";
 const ALL_TAGS_LABEL: &str = "All tags";
@@ -284,6 +297,23 @@ enum View {
     Settings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    Library,
+    Export,
+    Preview,
+    Shortcuts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum EditorTab {
+    #[default]
+    Trim,
+    AudioCrop,
+    Output,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum PickPurpose {
     WatchedFolder,
@@ -351,14 +381,21 @@ struct Editor {
     awaiting_loop: bool,
     /// Owns the worker that opens, drives and closes this editor's media handles.
     preview: preview::Session,
+    highlight_query: String,
+    highlight_job: Option<highlight::HighlightJob>,
+    highlight_suggestion: Option<qlipq_core::highlight::HighlightSuggestion>,
+    highlight_status: Option<String>,
 }
 
 struct RenameState {
     id: String,
     value: String,
+    error: Option<String>,
 }
 
 struct App {
+    loading: bool,
+    watch_generation: u64,
     config: AppConfig,
     startup_error: Option<String>,
     persistence: persistence::Persistence,
@@ -372,7 +409,14 @@ struct App {
     media_cache_dirty: bool,
     selected_id: Option<String>,
     view: View,
+    settings_tab: SettingsTab,
+    editor_tab: EditorTab,
     filter: QueueFilter,
+    queue_sort: QueueSort,
+    thumbnails: HashMap<String, Option<iced::widget::image::Handle>>,
+    visible_cards: HashSet<String>,
+    hover_since: Option<Instant>,
+    queue_preview: Option<queue_preview::HoverPreview>,
     presets: host::CapturePresets,
     watcher: Option<host::Watcher>,
     discovery: discovery::Discovery,
@@ -399,10 +443,16 @@ struct App {
 
 #[derive(Debug, Clone)]
 enum Message {
+    Ignore,
+    Initialized(Delivery<(AppConfig, host::EditStore, host::MediaCache, Option<String>)>),
+    WatchStarted(u64, Delivery<Option<host::Watcher>>),
+    ExportPathChecked(ExportRequest, bool),
     Tick,
     PlaybackTick,
     ShowQueue,
     ShowSettings,
+    SettingsTab(SettingsTab),
+    EditorTab(EditorTab),
     OpenRepo,
     RescanAll,
     Scanned(u64, host::ScanResult),
@@ -427,6 +477,10 @@ enum Message {
     PreviewZoom(f32),
     HoverCard(String),
     HoverLeave(String),
+    QueueSortChanged(QueueSort),
+    CardVisible(String, bool),
+    ThumbnailLoaded(String, u64, Option<iced::widget::image::Handle>),
+    QueuePreviewTick,
     RevealItem(String),
     TimestampEdited(String),
     TimestampSubmit,
@@ -443,6 +497,16 @@ enum Message {
     InSubmit,
     OutEdited(String),
     OutSubmit,
+    HighlightQuery(String),
+    SuggestHighlight,
+    CancelHighlight,
+    HighlightFinished(
+        String,
+        Arc<AtomicBool>,
+        Result<Option<qlipq_core::highlight::HighlightSuggestion>, String>,
+    ),
+    ApplyHighlight,
+    DismissHighlight,
     ToggleCrop(bool),
     CropEdited(u8, String),
     AudioToggle(i64, bool),
@@ -508,10 +572,13 @@ enum Message {
     SetPreviewRes(PreviewResChoice),
     #[cfg(windows)]
     ToggleStartWithWindows(bool),
+    #[cfg(windows)]
+    StartupUpdated(bool, Result<(), String>),
     ToggleStartMinimized(bool),
     ToggleAutoplay(bool),
     ToggleDebug(bool),
     ToggleHideHighlights(bool),
+    HighlightModelChanged(String),
     /// Copy the given text (the debug panel's diagnostics) to the system clipboard.
     CopyText(String),
     SetAfter(AfterChoice),
@@ -534,36 +601,25 @@ where
 
 impl App {
     fn new() -> (Self, Task<Message>) {
-        host::migrate_legacy_data();
-        let _ = host::write_config_schema();
-        let config = host::load_config();
-        #[cfg(windows)]
-        let startup_error = startup::set_enabled(config.start_with_windows)
-            .err()
-            .map(|error| format!("Couldn't update Windows startup: {error}"));
-        #[cfg(not(windows))]
-        let startup_error = None;
-        let minimize = if config.start_minimized {
-            iced::window::latest().and_then(|id| iced::window::minimize(id, true))
-        } else {
-            Task::none()
-        };
-        let edit_store = host::load_edit_store();
-        let media_cache = host::load_media_cache();
         let mut app = Self::with_data(
-            config,
-            edit_store,
-            media_cache,
+            AppConfig::default(),
+            host::EditStore::default(),
+            host::MediaCache::default(),
             persistence::Persistence::new(),
         );
-        app.startup_error = startup_error;
-        app.watcher = host::start_watch(&app.config.watched_folders, &app.config.video_extensions);
-        let folders = app.config.watched_folders.clone();
-        let scan = app.request_scan(folders);
-        let presets = Task::perform(blocking(host::detect_capture_presets), |p| {
-            Message::PresetsDetected(p.obs, p.nvidia_share)
-        });
-        (app, Task::batch([minimize, scan, presets]))
+        app.loading = true;
+        let load = Task::perform(blocking(|| {
+            host::migrate_legacy_data();
+            let _ = host::write_config_schema();
+            let config = host::load_config();
+            #[cfg(windows)]
+            let startup_error = startup::set_enabled(config.start_with_windows)
+                .err().map(|error| format!("Couldn't update Windows startup: {error}"));
+            #[cfg(not(windows))]
+            let startup_error = None;
+            Delivery::new((config, host::load_edit_store(), host::load_media_cache(), startup_error))
+        }), Message::Initialized);
+        (app, load)
     }
 
     fn with_data(
@@ -577,6 +633,8 @@ impl App {
             ..Default::default()
         };
         App {
+            loading: false,
+            watch_generation: 0,
             config,
             startup_error: None,
             persistence,
@@ -588,7 +646,14 @@ impl App {
             media_cache_dirty: false,
             selected_id: None,
             view: View::Queue,
+            settings_tab: SettingsTab::default(),
+            editor_tab: EditorTab::default(),
             filter,
+            queue_sort: QueueSort::default(),
+            thumbnails: HashMap::new(),
+            visible_cards: HashSet::new(),
+            hover_since: None,
+            queue_preview: None,
             presets: host::CapturePresets::default(),
             watcher: None,
             discovery: discovery::Discovery::default(),
@@ -620,7 +685,7 @@ impl App {
             || self.delete_error.is_some()
             || self.pending_export.is_some()
             || self.after_prompt.is_some();
-        if self.editor.is_some() && !modal {
+        if self.editor.is_some() && matches!(self.view, View::Queue) && !modal {
             subs.push(iced::event::listen_with(editor_key_event));
         }
         // Escape dismisses a modal; otherwise it exits fullscreen.
@@ -643,6 +708,11 @@ impl App {
             let dt = Duration::from_secs_f64(1.0 / player.fps().clamp(1.0, 60.0));
             subs.push(iced::time::every(dt).map(|_| Message::PlaybackTick));
         }
+        if self.queue_preview.is_some() {
+            subs.push(
+                iced::time::every(Duration::from_millis(33)).map(|_| Message::QueuePreviewTick),
+            );
+        }
         Subscription::batch(subs)
     }
 
@@ -658,10 +728,16 @@ impl App {
     }
 
     fn restart_watch_and_scan(&mut self) -> Task<Message> {
-        self.watcher =
-            host::start_watch(&self.config.watched_folders, &self.config.video_extensions);
+        self.watch_generation += 1;
+        let generation = self.watch_generation;
+        let old = self.watcher.take();
+        let folders = self.config.watched_folders.clone();
+        let exts = self.config.video_extensions.clone();
         self.discovery.reset(self.config.watched_folders.clone());
-        self.scan_pending(true)
+        Task::perform(blocking(move || {
+            drop(old);
+            Delivery::new(host::start_watch(&folders, &exts))
+        }), move |watcher| Message::WatchStarted(generation, watcher))
     }
 
     fn request_scan(&mut self, roots: Vec<String>) -> Task<Message> {
@@ -731,10 +807,10 @@ impl App {
             return Task::none();
         }
         // Newest first.
-        for item in new_items.into_iter().rev() {
-            self.items.insert(0, item);
-        }
-        // Existing recordings are re-statted too: a create event can arrive before recording ends.
+        new_items.append(&mut self.items);
+        self.items = new_items;
+        // Stat the fresh files and pair each with its cached probe when unchanged; only misses are
+        // probed (see `Message::MediaResolved`), so a full backlog isn't re-probed on every launch.
         let cache = self.media_cache.clone();
         Task::perform(
             blocking(move || host::resolve_media(&refresh, &cache)),
@@ -809,6 +885,44 @@ impl App {
         self.commit_spec();
     }
 
+    fn suggest_highlight(&mut self) -> Task<Message> {
+        let Some(ed) = &mut self.editor else {
+            return Task::none();
+        };
+        if ed.highlight_job.is_some() || self.exports.contains(&ed.item_id) {
+            return Task::none();
+        }
+        let Some(media) = ed.media.clone() else {
+            return Task::none();
+        };
+        let Some(item) = self.items.iter().find(|i| i.id == ed.item_id) else {
+            return Task::none();
+        };
+        let request = highlight::HighlightRequest {
+            path: item.path.clone(),
+            media: media.clone(),
+            is_hdr: ed.is_hdr,
+            gamma: self.config.hdr_preview_gamma,
+            model: self.config.highlight_model.clone(),
+            query: ed.highlight_query.clone(),
+        };
+        let job = highlight::HighlightJob::new(media.duration_sec);
+        let token = job.cancel.clone();
+        let progress = job.section.clone();
+        let id = ed.item_id.clone();
+        ed.highlight_job = Some(job);
+        ed.highlight_suggestion = None;
+        ed.highlight_status = None;
+        ed.playing = false;
+        ed.player = None;
+        ed.preview.stop();
+        ed.extracting = false;
+        Task::perform(
+            highlight::detect(request, token.clone(), progress),
+            move |result| Message::HighlightFinished(id.clone(), token.clone(), result),
+        )
+    }
+
     /// Whether the clip at `path` is an auto-captured highlight, per its cached `encoder` tag (NVIDIA
     /// App tags highlights `"NVIDIA APP (Highlights)"`). Used to hide auto-saves from the queue.
     fn is_highlight(&self, path: &str) -> bool {
@@ -827,13 +941,99 @@ impl App {
         self.persist_edit(&id);
     }
 
+    fn sorted_queue(&self) -> Vec<&QueueItem> {
+        let mut items = self
+            .items
+            .iter()
+            .filter(|item| self.filter.matches(item, self.is_highlight(&item.path)))
+            .collect();
+        self.queue_sort.sort(&mut items);
+        items
+    }
+
+    fn queue_preview_source(&self, id: &str) -> Option<queue_preview::Source> {
+        let item = self.items.iter().find(|item| item.id == id)?;
+        let cached = self.media_cache.get(&item.path)?;
+        Some(queue_preview::Source {
+            path: item.path.clone(),
+            media: cached.media.clone(),
+            is_hdr: cached.is_hdr,
+            gamma: self.config.hdr_preview_gamma,
+        })
+    }
+
+    fn request_thumbnail(&mut self, id: &str) -> Task<Message> {
+        if self.thumbnails.contains_key(id) {
+            return Task::none();
+        }
+        let Some(source) = self.queue_preview_source(id) else {
+            return Task::none();
+        };
+        if self.thumbnails.len() >= 128 {
+            self.thumbnails
+                .retain(|id, _| self.visible_cards.contains(id));
+        }
+        self.thumbnails.insert(id.to_string(), None);
+        let id = id.to_string();
+        let gamma = source.gamma.to_bits();
+        Task::perform(queue_preview::thumbnail(source), move |result| {
+            Message::ThumbnailLoaded(id.clone(), gamma, result)
+        })
+    }
+
+    fn stop_queue_preview(&mut self) {
+        self.hovered_card = None;
+        self.hover_since = None;
+        self.queue_preview = None;
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Initialized(data) => {
+                if let Some((config, edits, cache, startup_error)) = data.take() {
+                    self.config = config;
+                    self.edit_store = edits;
+                    self.media_cache = cache;
+                    self.filter.highlights = HighlightFilter::from_hidden(self.config.hide_highlights);
+                    self.loading = false;
+                    self.startup_error = startup_error;
+                    let minimize = if self.config.start_minimized {
+                        iced::window::latest().and_then(|id| iced::window::minimize(id, true))
+                    } else { Task::none() };
+                    let watch = self.restart_watch_and_scan();
+                    let presets = Task::perform(blocking(host::detect_capture_presets), |p| Message::PresetsDetected(p.obs, p.nvidia_share));
+                    return Task::batch([minimize, watch, presets]);
+                }
+            }
+            Message::WatchStarted(generation, watcher) => {
+                if let Some(watcher) = watcher.take() {
+                    if generation == self.watch_generation {
+                        self.watcher = watcher;
+                        return self.scan_pending(true);
+                    }
+                    return Task::perform(blocking(move || drop(watcher)), |_| Message::Ignore);
+                }
+            }
+            Message::ExportPathChecked(request, exists) => {
+                if self.exports.active().is_none() && self.pending_export.is_none() {
+                    if exists { self.pending_export = Some(request); }
+                    else { return self.run_export_to(request); }
+                }
+            }
             Message::Tick => return self.on_tick(),
+            Message::QueuePreviewTick => {}
             Message::PlaybackTick => self.on_playback_tick(),
             Message::ShowQueue => self.view = View::Queue,
-            Message::ShowSettings => self.view = View::Settings,
-            Message::ToggleFullscreen => self.fullscreen = !self.fullscreen,
+            Message::SettingsTab(tab) => self.settings_tab = tab,
+            Message::EditorTab(tab) => self.editor_tab = tab,
+            Message::ShowSettings => {
+                self.stop_queue_preview();
+                self.view = View::Settings;
+            }
+            Message::ToggleFullscreen => {
+                self.stop_queue_preview();
+                self.fullscreen = !self.fullscreen;
+            }
             Message::PreviewZoom(delta) => {
                 self.preview_scale = (self.preview_scale + delta).clamp(0.5, 2.5)
             }
@@ -976,10 +1176,8 @@ impl App {
                     .editor
                     .as_ref()
                     .map_or(false, |e| e.load_error.is_none() && e.media.is_some());
-                if self.config.autoplay && ready {
-                    return self.play_from_current();
-                }
-                return self.request_frame();
+                if !ready { return Task::none(); }
+                return if self.config.autoplay { self.play_from_current() } else { self.request_frame() };
             }
             Message::PreviewReady(event) => {
                 let mut redo = false;
@@ -1180,6 +1378,70 @@ impl App {
                     self.apply_trim_in(t);
                 }
             }
+            Message::HighlightQuery(query) => {
+                if let Some(ed) = &mut self.editor {
+                    if ed.highlight_job.is_none() {
+                        ed.highlight_query = query;
+                        ed.highlight_suggestion = None;
+                        ed.highlight_status = None;
+                    }
+                }
+            }
+            Message::SuggestHighlight => return self.suggest_highlight(),
+            Message::CancelHighlight => {
+                if let Some(ed) = &mut self.editor {
+                    ed.highlight_job = None;
+                    ed.highlight_status = Some("Highlight detection cancelled.".into());
+                }
+            }
+            Message::HighlightFinished(id, token, result) => {
+                if let Some(ed) = &mut self.editor {
+                    if ed.item_id == id
+                        && ed
+                            .highlight_job
+                            .as_ref()
+                            .is_some_and(|job| job.matches(&token))
+                    {
+                        ed.highlight_job = None;
+                        match result {
+                            Ok(Some(suggestion)) => ed.highlight_suggestion = Some(suggestion),
+                            Ok(None) => ed.highlight_status = Some("No clear highlight found. Try a more specific description or trim manually.".into()),
+                            Err(error) => ed.highlight_status = Some(error),
+                        }
+                    }
+                }
+            }
+            Message::ApplyHighlight => {
+                let Some(ed) = &mut self.editor else {
+                    return Task::none();
+                };
+                if self.exports.contains(&ed.item_id) {
+                    return Task::none();
+                }
+                let Some(suggestion) = ed.highlight_suggestion.take() else {
+                    return Task::none();
+                };
+                ed.trim_start = suggestion.trim.start_sec;
+                ed.trim_end = suggestion.trim.end_sec;
+                ed.current_time = ed.trim_start;
+                ed.editing_time = false;
+                ed.playing = false;
+                ed.player = None;
+                ed.preview.stop();
+                ed.extracting = false;
+                ed.highlight_status =
+                    Some("Highlight trim applied. Adjust the In/Out points as needed.".into());
+                sync_inout_inputs(ed);
+                sync_time_input(ed);
+                self.commit_spec();
+                return self.request_frame();
+            }
+            Message::DismissHighlight => {
+                if let Some(ed) = &mut self.editor {
+                    ed.highlight_suggestion = None;
+                    ed.highlight_status = None;
+                }
+            }
             Message::SetOut => {
                 if let Some(t) = self.editor.as_ref().map(|e| e.current_time) {
                     self.apply_trim_out(t);
@@ -1367,22 +1629,52 @@ impl App {
                     }
                 }
             }
-            Message::HoverCard(id) => self.hovered_card = Some(id),
+            Message::HoverCard(id) => {
+                if self.hovered_card.as_deref() != Some(&id) {
+                    self.stop_queue_preview();
+                    self.hover_since = Some(Instant::now());
+                    self.hovered_card = Some(id);
+                }
+            }
             Message::HoverLeave(id) => {
                 if self.hovered_card.as_deref() == Some(id.as_str()) {
-                    self.hovered_card = None;
+                    self.stop_queue_preview();
+                }
+            }
+            Message::QueueSortChanged(sort) => {
+                self.stop_queue_preview();
+                self.queue_sort = sort;
+            }
+            Message::CardVisible(id, visible) => {
+                if visible {
+                    self.visible_cards.insert(id.clone());
+                    return self.request_thumbnail(&id);
+                }
+                self.visible_cards.remove(&id);
+                if self.hovered_card.as_deref() == Some(&id) {
+                    self.stop_queue_preview();
+                }
+            }
+            Message::ThumbnailLoaded(id, gamma, thumbnail) => {
+                if gamma == self.config.hdr_preview_gamma.to_bits()
+                    && self.items.iter().any(|item| item.id == id)
+                    && self.thumbnails.contains_key(&id)
+                {
+                    self.thumbnails.insert(id, thumbnail);
                 }
             }
             Message::RevealItem(path) => host::reveal(&path),
             Message::RenameOpen(id) => {
-                if let Some(item) = self.items.iter().find(|i| i.id == id) {
+                self.stop_queue_preview();
+                if let Some(item) = self.items.iter().find(|i| i.id == id && i.status != QueueStatus::Exporting) {
                     let (name, _) = rename::split_file_name(&item.file_name);
-                    self.rename = Some(RenameState { id, value: name });
+                    self.rename = Some(RenameState { id, value: name, error: None });
                 }
             }
             Message::RenameValue(v) => {
                 if let Some(r) = &mut self.rename {
                     r.value = v;
+                    r.error = None;
                 }
             }
             Message::RenameTemplate => {
@@ -1404,7 +1696,13 @@ impl App {
             }
             Message::RenameConfirm => return self.confirm_rename(),
             Message::RenameCancel => self.rename = None,
-            Message::RequestDelete(id) => self.delete_confirm = Some(id),
+            Message::RequestDelete(id) => {
+                if self.items.iter().any(|item| item.id == id && item.status == QueueStatus::Exporting) {
+                    return Task::none();
+                }
+                self.stop_queue_preview();
+                self.delete_confirm = Some(id);
+            }
             Message::DeleteConfirm => {
                 if let Some(id) = self.delete_confirm.take() {
                     return self.delete_now(id);
@@ -1438,6 +1736,10 @@ impl App {
                 }
             }
             Message::Dismiss(id) => {
+                if self.items.iter().any(|item| item.id == id && item.status == QueueStatus::Exporting) {
+                    return Task::none();
+                }
+                self.stop_queue_preview();
                 if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
                     let tags = item.tags.get_or_insert_with(Vec::new);
                     if let Some(pos) = tags.iter().position(|t| t == DISMISSED_TAG) {
@@ -1452,12 +1754,28 @@ impl App {
                 }
                 self.persist_edit(&id);
             }
-            Message::SetTagFilter(t) => self.filter.tag = t,
-            Message::FilterSearch(s) => self.filter.search = s,
-            Message::SetStatusFilter(s) => self.filter.status = s,
-            Message::SetGameFilter(g) => self.filter.game = g,
-            Message::SetHighlightFilter(h) => self.filter.highlights = h,
+            Message::SetTagFilter(t) => {
+                self.stop_queue_preview();
+                self.filter.tag = t;
+            }
+            Message::FilterSearch(s) => {
+                self.stop_queue_preview();
+                self.filter.search = s;
+            }
+            Message::SetStatusFilter(s) => {
+                self.stop_queue_preview();
+                self.filter.status = s;
+            }
+            Message::SetGameFilter(g) => {
+                self.stop_queue_preview();
+                self.filter.game = g;
+            }
+            Message::SetHighlightFilter(h) => {
+                self.stop_queue_preview();
+                self.filter.highlights = h;
+            }
             Message::ClearFilters => {
+                self.stop_queue_preview();
                 self.filter = QueueFilter {
                     highlights: HighlightFilter::from_hidden(self.config.hide_highlights),
                     ..Default::default()
@@ -1465,12 +1783,7 @@ impl App {
             }
             Message::PickFolder(purpose) => {
                 return Task::perform(
-                    async {
-                        rfd::AsyncFileDialog::new()
-                            .pick_folder()
-                            .await
-                            .map(|h| host::to_posix(&h.path().to_string_lossy()))
-                    },
+                    host::pick_folder(),
                     move |opt| Message::FolderPicked(purpose, opt),
                 );
             }
@@ -1493,6 +1806,10 @@ impl App {
             }
             Message::NamingChanged(s) => {
                 self.config.naming_template = s;
+                return self.save_config_task();
+            }
+            Message::HighlightModelChanged(model) => {
+                self.config.highlight_model = model;
                 return self.save_config_task();
             }
             Message::SetQm(c) => {
@@ -1541,6 +1858,7 @@ impl App {
             }
             Message::SetHdrPreviewGamma(v) => self.config.hdr_preview_gamma = v.clamp(1.0, 3.0),
             Message::ApplyHdrPreviewGamma => {
+                self.thumbnails.clear();
                 // Rebuild the scrub graph with the new gamma, persist, and refresh what's on screen
                 // (restart playback if playing, else re-extract the current frame).
                 self.reopen_scrubber();
@@ -1553,6 +1871,7 @@ impl App {
                 return Task::batch([save, refresh]);
             }
             Message::ResetHdrPreviewGamma => {
+                self.thumbnails.clear();
                 self.config.hdr_preview_gamma = AppConfig::default().hdr_preview_gamma;
                 self.reopen_scrubber();
                 let save = self.save_config_task();
@@ -1577,7 +1896,12 @@ impl App {
                 return Task::batch([save, refresh]);
             }
             #[cfg(windows)]
-            Message::ToggleStartWithWindows(on) => match startup::set_enabled(on) {
+            Message::ToggleStartWithWindows(on) => {
+                return Task::perform(blocking(move || startup::set_enabled(on).map_err(|error| error.to_string())),
+                    move |result| Message::StartupUpdated(on, result));
+            }
+            #[cfg(windows)]
+            Message::StartupUpdated(on, result) => match result {
                 Ok(()) => {
                     self.startup_error = None;
                     self.config.start_with_windows = on;
@@ -1625,12 +1949,55 @@ impl App {
                 Ok(id) => self.reveal_config_after_save = Some(id),
                 Err(error) => self.delete_error = Some(error),
             },
+            Message::Ignore => {}
         }
         Task::none()
     }
 
     fn on_tick(&mut self) -> Task<Message> {
         let mut tasks = Vec::new();
+        if matches!(self.view, View::Queue) && !self.fullscreen {
+            let visible: Vec<_> = self
+                .visible_cards
+                .iter()
+                .filter(|id| {
+                    self.items.iter().any(|item| {
+                        &item.id == *id && self.filter.matches(item, self.is_highlight(&item.path))
+                    })
+                })
+                .cloned()
+                .collect();
+            self.visible_cards = visible.iter().cloned().collect();
+            if self
+                .hovered_card
+                .as_ref()
+                .is_some_and(|id| !self.visible_cards.contains(id))
+            {
+                self.stop_queue_preview();
+            }
+            for id in visible {
+                tasks.push(self.request_thumbnail(&id));
+            }
+            if self.queue_preview.is_none()
+                && self
+                    .hover_since
+                    .is_some_and(|since| since.elapsed() >= Duration::from_millis(250))
+                && self.rename.is_none()
+                && self.delete_confirm.is_none()
+                && self.delete_error.is_none()
+            {
+                if let Some(id) = self
+                    .hovered_card
+                    .clone()
+                    .filter(|id| self.visible_cards.contains(id))
+                {
+                    if let Some(source) = self.queue_preview_source(&id) {
+                        self.queue_preview = Some(queue_preview::HoverPreview::start(id, source));
+                    }
+                }
+            }
+        }
+        // Drain the folder watcher.
         if let Some(w) = &self.watcher {
             if w.drain() {
                 self.discovery.request(self.config.watched_folders.clone());
@@ -1872,6 +2239,11 @@ impl App {
             playing: false,
             player: None,
             awaiting_loop: false,
+            highlight_query: "A multi-kill, clutch, impressive play, or funny gameplay moment"
+                .into(),
+            highlight_job: None,
+            highlight_suggestion: None,
+            highlight_status: None,
             preview: preview::Session::new(),
         });
         let path = item.path.clone();
@@ -2019,6 +2391,7 @@ impl App {
         };
         if qlipq_core::edit_spec::validate_edit_spec(&editor_spec(ed), media).is_some()
             || self.config.output_folder.is_empty()
+            || self.exports.contains(&ed.item_id)
         {
             return Task::none();
         }
@@ -2043,17 +2416,15 @@ impl App {
                 .map(|s| vec![("game".into(), s)])
                 .unwrap_or_default(),
         };
-        let exists = host::file_exists(&output_path);
-        if exists {
-            self.pending_export = Some(request);
-            return Task::none();
-        }
-        self.run_export_to(request)
+        Task::perform(blocking(move || {
+            let exists = host::file_exists(&request.output_path);
+            (request, exists)
+        }), |(request, exists)| Message::ExportPathChecked(request, exists))
     }
 
     fn run_export_to(&mut self, request: ExportRequest) -> Task<Message> {
         let id = request.source.item_id.clone();
-        if host::same_file(&request.source.input, &request.output_path) {
+        if host::same_path(&request.source.input, &request.output_path) {
             self.delete_error = Some("Choose a different output folder or filename; an export cannot replace its source recording.".into());
             return Task::none();
         }
@@ -2153,12 +2524,7 @@ impl App {
                 let folder = source.settings.move_folder.clone();
                 if folder.is_empty() {
                     Task::perform(
-                        async move {
-                            rfd::AsyncFileDialog::new()
-                                .pick_folder()
-                                .await
-                                .map(|h| host::to_posix(&h.path().to_string_lossy()))
-                        },
+                        host::pick_folder(),
                         move |opt| Message::MoveFolderPicked(source.clone(), opt),
                     )
                 } else {
@@ -2195,7 +2561,8 @@ impl App {
     }
 
     fn confirm_rename(&mut self) -> Task<Message> {
-        let Some(r) = self.rename.take() else {
+        self.stop_queue_preview();
+        let Some(r) = self.rename.as_ref() else {
             return Task::none();
         };
         let Some(item) = self.items.iter().find(|i| i.id == r.id) else {
@@ -2213,7 +2580,7 @@ impl App {
         };
         let new_path = host::join_path(&host::dir_name(&item.path), &new_name);
         self.start_file_operation(FileOperation {
-            item_id: r.id,
+            item_id: r.id.clone(),
             path: item.path.clone(),
             mutation: FileMutation::Rename(new_path),
         })
@@ -2279,6 +2646,8 @@ impl App {
     }
 
     fn delete_now(&mut self, id: String) -> Task<Message> {
+        if self.items.iter().any(|item| item.id == id && item.status == QueueStatus::Exporting) { return Task::none(); }
+        self.stop_queue_preview();
         let Some(path) = self
             .items
             .iter()
@@ -2302,6 +2671,7 @@ impl App {
     }
 
     fn start_file_operation(&mut self, operation: FileOperation) -> Task<Message> {
+        self.stop_queue_preview();
         let id = &operation.item_id;
         if self.exports.contains(id) || self.file_operations.contains(id) {
             self.delete_error = Some(
@@ -2364,13 +2734,20 @@ impl App {
         match result {
             Ok(()) => match operation.mutation {
                 FileMutation::Delete => self.remove_item(&operation.item_id),
-                FileMutation::Rename(path) => self.apply_rename(&operation.item_id, &path),
+                FileMutation::Rename(path) => {
+                    self.rename = None;
+                    self.apply_rename(&operation.item_id, &path);
+                }
             },
             Err(error) => {
-                self.delete_error = Some(format!(
-                    "Couldn't change {}.\n\n{error}",
-                    host::base_name(&operation.path)
-                ))
+                if let Some(rename) = self.rename.as_mut().filter(|rename| rename.id == operation.item_id) {
+                    rename.error = Some(error);
+                } else {
+                    self.delete_error = Some(format!(
+                        "Couldn't change {}.\n\n{error}",
+                        host::base_name(&operation.path)
+                    ));
+                }
             }
         }
         if self.selected_id.as_deref() == Some(&operation.item_id) {
@@ -2380,6 +2757,11 @@ impl App {
     }
 
     fn remove_item(&mut self, id: &str) {
+        self.thumbnails.remove(id);
+        self.visible_cards.remove(id);
+        if self.hovered_card.as_deref() == Some(id) {
+            self.stop_queue_preview();
+        }
         if let Some(pos) = self.items.iter().position(|i| i.id == id) {
             let path = self.items[pos].path.clone();
             self.discovery.remove(&path);
@@ -2404,6 +2786,7 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if self.loading { return empty_state("Loading your recordings…"); }
         let fullscreen = self.fullscreen
             && matches!(self.view, View::Queue)
             && self.editor.as_ref().map_or(false, |e| e.media.is_some());
@@ -3030,6 +3413,213 @@ mod tests {
             .contains("source recording"));
     }
     use iced::keyboard::{key::Named, Key, Modifiers};
+
+    fn highlight_test_app() -> App {
+        let mut app = App::with_data(AppConfig::default(), Default::default(), Default::default(), persistence::Persistence::new());
+        app.items = vec![qi("test.mp4", QueueStatus::Ready, None, &[])];
+        drop(app.select_item("test.mp4".into()));
+        // Exercise editor messages without persisting to the user's edits.json or decoding a file.
+        app.items.clear();
+        let ed = app.editor.as_mut().unwrap();
+        ed.trim_start = 2.0;
+        ed.trim_end = 20.0;
+        ed.crop_enabled = true;
+        ed.crop = CropSpec {
+            x: 2,
+            y: 4,
+            width: 100,
+            height: 100,
+        };
+        ed.audio.push(AudioRow {
+            index: 0,
+            label: "Audio".into(),
+            detail: String::new(),
+            enabled: false,
+            volume: 0.5,
+        });
+        ed.highlight_job = Some(highlight::HighlightJob::new(30.0));
+        app
+    }
+
+    fn suggestion() -> qlipq_core::highlight::HighlightSuggestion {
+        qlipq_core::highlight::HighlightSuggestion {
+            trim: TrimSpec {
+                start_sec: 5.0,
+                end_sec: 12.0,
+            },
+            score: 80,
+            reason: "A clutch".into(),
+        }
+    }
+
+    #[test]
+    fn an_old_probe_cannot_replace_a_new_session_of_the_same_clip() {
+        let mut app = highlight_test_app();
+        let old = app.editor.as_ref().unwrap().preview.id();
+        app.editor.as_mut().unwrap().preview = preview::Session::new();
+        drop(app.update(Message::MediaProbed(old, "test.mp4".into(), Err("stale failure".into()))));
+        assert!(app.editor.as_ref().unwrap().load_error.is_none());
+    }
+
+    #[test]
+    fn queue_sort_and_filters_preserve_selection_and_edits() {
+        let mut app = highlight_test_app();
+        app.items = vec![
+            qi("zulu.mp4", QueueStatus::Ready, None, &[]),
+            qi("alpha.mp4", QueueStatus::Ready, None, &[]),
+            qi("bravo.mp4", QueueStatus::Done, None, &[]),
+        ];
+        let selected = app.selected_id.clone();
+        drop(app.update(Message::SetStatusFilter(Some(QueueStatus::Ready))));
+        drop(app.update(Message::QueueSortChanged(QueueSort::NameAsc)));
+        assert_eq!(
+            app.sorted_queue()
+                .iter()
+                .map(|item| item.file_name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha.mp4", "zulu.mp4"]
+        );
+        assert_eq!(app.selected_id, selected);
+        assert_eq!(app.editor.as_ref().unwrap().trim_start, 2.0);
+        drop(app.update(Message::ClearFilters));
+        assert_eq!(app.queue_sort, QueueSort::NameAsc);
+        assert_eq!(app.sorted_queue().len(), 3);
+    }
+
+    #[test]
+    fn stale_hover_exit_does_not_cancel_new_hover_and_hidden_cards_stop_it() {
+        let mut app = highlight_test_app();
+        let selected = app.selected_id.clone();
+        drop(app.update(Message::HoverCard("one".into())));
+        drop(app.update(Message::HoverCard("two".into())));
+        drop(app.update(Message::HoverLeave("one".into())));
+        assert_eq!(app.hovered_card.as_deref(), Some("two"));
+        drop(app.update(Message::CardVisible("two".into(), false)));
+        assert!(app.hovered_card.is_none());
+        assert!(app.hover_since.is_none());
+        drop(app.update(Message::HoverCard("one".into())));
+        drop(app.update(Message::ShowSettings));
+        assert!(app.hovered_card.is_none());
+        assert_eq!(app.selected_id, selected);
+        assert_eq!(app.editor.as_ref().unwrap().current_time, 0.0);
+    }
+
+    #[test]
+    fn thumbnail_results_for_deleted_clips_and_old_brightness_are_ignored() {
+        let mut app = highlight_test_app();
+        let gamma = app.config.hdr_preview_gamma.to_bits();
+        let image = iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]);
+        drop(app.update(Message::ThumbnailLoaded(
+            "deleted".into(),
+            gamma,
+            Some(image.clone()),
+        )));
+        assert!(app.thumbnails.is_empty());
+        app.items
+            .push(qi("test.mp4", QueueStatus::Ready, None, &[]));
+        app.thumbnails.insert("test.mp4".into(), None);
+        drop(app.update(Message::ThumbnailLoaded(
+            "test.mp4".into(),
+            0,
+            Some(image.clone()),
+        )));
+        assert!(app.thumbnails["test.mp4"].is_none());
+        drop(app.update(Message::ThumbnailLoaded(
+            "test.mp4".into(),
+            gamma,
+            Some(image),
+        )));
+        assert!(app.thumbnails["test.mp4"].is_some());
+    }
+
+    #[test]
+    fn highlight_result_only_changes_trim_when_applied_and_keeps_other_edits() {
+        let mut app = highlight_test_app();
+        let token = app
+            .editor
+            .as_ref()
+            .unwrap()
+            .highlight_job
+            .as_ref()
+            .unwrap()
+            .cancel
+            .clone();
+        drop(app.update(Message::HighlightFinished(
+            "test.mp4".into(),
+            token,
+            Ok(Some(suggestion())),
+        )));
+        let ed = app.editor.as_ref().unwrap();
+        assert_eq!((ed.trim_start, ed.trim_end), (2.0, 20.0));
+        assert!(ed.highlight_suggestion.is_some());
+        drop(app.update(Message::ApplyHighlight));
+        let ed = app.editor.as_ref().unwrap();
+        assert_eq!((ed.trim_start, ed.trim_end), (5.0, 12.0));
+        assert_eq!(ed.current_time, 5.0);
+        assert_eq!(ed.in_input, format_timestamp(5.0, ed_fps(ed)));
+        assert_eq!(ed.out_input, format_timestamp(12.0, ed_fps(ed)));
+        assert!(ed.crop_enabled);
+        assert_eq!(ed.crop.x, 2);
+        assert!(!ed.audio[0].enabled);
+        assert_eq!(ed.audio[0].volume, 0.5);
+    }
+
+    #[test]
+    fn cancelled_and_stale_highlight_results_do_not_change_the_editor() {
+        let mut app = highlight_test_app();
+        let token = app
+            .editor
+            .as_ref()
+            .unwrap()
+            .highlight_job
+            .as_ref()
+            .unwrap()
+            .cancel
+            .clone();
+        drop(app.update(Message::HighlightFinished(
+            "another.mp4".into(),
+            token.clone(),
+            Ok(Some(suggestion())),
+        )));
+        assert!(app.editor.as_ref().unwrap().highlight_suggestion.is_none());
+        drop(app.update(Message::CancelHighlight));
+        app.editor.as_mut().unwrap().highlight_job = Some(highlight::HighlightJob::new(30.0));
+        drop(app.update(Message::HighlightFinished(
+            "test.mp4".into(),
+            token,
+            Ok(Some(suggestion())),
+        )));
+        let ed = app.editor.as_ref().unwrap();
+        assert!(ed.highlight_suggestion.is_none());
+        assert!(ed.highlight_job.is_some());
+        assert_eq!((ed.trim_start, ed.trim_end), (2.0, 20.0));
+    }
+
+    #[test]
+    fn dismissing_suggestion_and_finishing_with_error_preserve_trim() {
+        let mut app = highlight_test_app();
+        app.editor.as_mut().unwrap().highlight_suggestion = Some(suggestion());
+        drop(app.update(Message::DismissHighlight));
+        assert!(app.editor.as_ref().unwrap().highlight_suggestion.is_none());
+        let token = app
+            .editor
+            .as_ref()
+            .unwrap()
+            .highlight_job
+            .as_ref()
+            .unwrap()
+            .cancel
+            .clone();
+        drop(app.update(Message::HighlightFinished(
+            "test.mp4".into(),
+            token,
+            Err("Model unavailable".into()),
+        )));
+        let ed = app.editor.as_ref().unwrap();
+        assert!(ed.highlight_job.is_none());
+        assert_eq!(ed.highlight_status.as_deref(), Some("Model unavailable"));
+        assert_eq!((ed.trim_start, ed.trim_end), (2.0, 20.0));
+    }
 
     #[test]
     fn timecode_formats_as_frames() {

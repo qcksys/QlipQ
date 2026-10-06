@@ -26,6 +26,7 @@ impl Snapshot {
     }
 
     fn write(self, dir: &Path) -> io::Result<()> {
+        crate::background::assert_worker();
         let name = self.file();
         let contents = match self {
             Self::Config(config) => config_json::serialize(&config),
@@ -51,6 +52,8 @@ pub struct Persistence {
     results: Receiver<SaveResult>,
     worker: Option<JoinHandle<()>>,
     stopped_reported: bool,
+    #[cfg(test)]
+    last_completed: u64,
 }
 
 impl Persistence {
@@ -83,6 +86,8 @@ impl Persistence {
             results,
             worker: Some(worker),
             stopped_reported: false,
+            #[cfg(test)]
+            last_completed: 0,
         }
     }
 
@@ -113,7 +118,11 @@ impl Persistence {
         let mut results = Vec::new();
         loop {
             match self.results.try_recv() {
-                Ok(result) => results.push(result),
+                Ok(result) => {
+                    #[cfg(test)]
+                    { self.last_completed = result.id.unwrap_or(self.last_completed); }
+                    results.push(result);
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if !self.stopped_reported {
@@ -131,6 +140,11 @@ impl Persistence {
             }
         }
         results
+    }
+
+    #[cfg(test)]
+    pub fn is_idle(&self) -> bool {
+        self.last_completed + 1 == self.next_receipt.load(Ordering::Relaxed)
     }
 }
 

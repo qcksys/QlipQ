@@ -199,6 +199,8 @@ pub struct AppConfig {
     /// Hide auto-captured highlight clips (files whose `encoder` tag is NVIDIA App's
     /// `"NVIDIA APP (Highlights)"`) from the queue, so only deliberate recordings show.
     pub hide_highlights: bool,
+    /// Installed local Ollama vision model used for suggested highlight trims.
+    pub highlight_model: String,
     pub after_export: AfterExportSettings,
     pub output: OutputSettings,
     pub keybinds: Keybinds,
@@ -218,6 +220,7 @@ impl Default for AppConfig {
             autoplay: true,
             debug: false,
             hide_highlights: false,
+            highlight_model: "qwen3-vl:4b-instruct".into(),
             after_export: AfterExportSettings::default(),
             output: OutputSettings::default(),
             keybinds: Keybinds::default(),

@@ -11,6 +11,7 @@
 //! Size the widget to the frame's aspect ratio to avoid stretching.
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use iced::mouse;
@@ -29,9 +30,16 @@ pub struct FrameSlot {
 }
 
 pub type SharedFrame = Arc<Mutex<FrameSlot>>;
+static FRAME_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub fn new_shared_frame() -> SharedFrame {
     Arc::new(Mutex::new(FrameSlot::default()))
+}
+
+#[cfg(test)]
+pub fn frame_sample(frame: &SharedFrame) -> (u64, u8) {
+    let slot = frame.lock().unwrap();
+    (slot.generation, slot.data.first().copied().unwrap_or(0))
 }
 
 /// Store a new RGBA frame (`width * height * 4` bytes); bumps the generation to trigger re-upload.
@@ -40,54 +48,59 @@ pub fn push_frame(slot: &SharedFrame, width: u32, height: u32, data: Vec<u8>) {
         s.width = width;
         s.height = height;
         s.data = data;
-        s.generation = s.generation.wrapping_add(1);
+        s.generation = FRAME_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// `shader::Program` that renders the current frame from a [`SharedFrame`].
-pub struct VideoProgram {
+pub struct VideoProgram<const HOVER: bool> {
     frame: SharedFrame,
 }
 
-impl VideoProgram {
+impl<const HOVER: bool> VideoProgram<HOVER> {
     pub fn new(frame: SharedFrame) -> Self {
         Self { frame }
     }
 }
 
-impl<Message> shader::Program<Message> for VideoProgram {
+impl<Message, const HOVER: bool> shader::Program<Message> for VideoProgram<HOVER> {
     type State = ();
-    type Primitive = VideoPrimitive;
+    type Primitive = VideoPrimitive<HOVER>;
 
-    fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> VideoPrimitive {
+    fn draw(
+        &self,
+        _state: &(),
+        _cursor: mouse::Cursor,
+        _bounds: Rectangle,
+    ) -> VideoPrimitive<HOVER> {
         VideoPrimitive {
             frame: self.frame.clone(),
         }
     }
 }
 
-pub struct VideoPrimitive {
+pub struct VideoPrimitive<const HOVER: bool> {
     frame: SharedFrame,
 }
 
-impl std::fmt::Debug for VideoPrimitive {
+impl<const HOVER: bool> std::fmt::Debug for VideoPrimitive<HOVER> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VideoPrimitive").finish_non_exhaustive()
     }
 }
 
-impl shader::Primitive for VideoPrimitive {
-    type Pipeline = VideoPipeline;
+impl<const HOVER: bool> shader::Primitive for VideoPrimitive<HOVER> {
+    type Pipeline = VideoPipeline<HOVER>;
 
     fn prepare(
         &self,
-        pipeline: &mut VideoPipeline,
+        pipeline: &mut VideoPipeline<HOVER>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _bounds: &Rectangle,
         _viewport: &Viewport,
     ) {
-        if let Ok(slot) = self.frame.lock() {
+        if let Ok(slot) = self.frame.try_lock() {
             let expected = (slot.width as usize) * (slot.height as usize) * 4;
             if slot.width > 0 && slot.height > 0 && slot.data.len() >= expected {
                 pipeline.upload(
@@ -102,23 +115,28 @@ impl shader::Primitive for VideoPrimitive {
         }
     }
 
-    fn draw(&self, pipeline: &VideoPipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
+    fn draw(
+        &self,
+        pipeline: &VideoPipeline<HOVER>,
+        render_pass: &mut wgpu::RenderPass<'_>,
+    ) -> bool {
         pipeline.draw(render_pass)
     }
 }
 
-/// Long-lived GPU state, created once and stored by the GUI runtime for all [`VideoPrimitive`]s.
-pub struct VideoPipeline {
+/// Separate pipeline types give the editor and hover preview independent persistent textures.
+pub struct VideoPipeline<const HOVER: bool> {
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     texture_layout: wgpu::BindGroupLayout,
+    texture_format: wgpu::TextureFormat,
     texture: Option<wgpu::Texture>,
     bind_group: Option<wgpu::BindGroup>,
     size: (u32, u32),
     uploaded: Option<u64>,
 }
 
-impl VideoPipeline {
+impl<const HOVER: bool> VideoPipeline<HOVER> {
     fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -140,7 +158,7 @@ impl VideoPipeline {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: self.texture_format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
@@ -204,7 +222,7 @@ impl VideoPipeline {
     }
 }
 
-impl shader::Pipeline for VideoPipeline {
+impl<const HOVER: bool> shader::Pipeline for VideoPipeline<HOVER> {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -283,11 +301,35 @@ impl shader::Pipeline for VideoPipeline {
             pipeline,
             sampler,
             texture_layout,
+            // Decode sRGB only when the render target will encode it again on output.
+            texture_format: if format.is_srgb() { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm },
             texture: None,
             bind_group: None,
             size: (0, 0),
             uploaded: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simultaneous_previews_and_replacement_clips_have_distinct_uploads() {
+        assert_ne!(
+            std::any::TypeId::of::<VideoPipeline<false>>(),
+            std::any::TypeId::of::<VideoPipeline<true>>()
+        );
+        let editor = new_shared_frame();
+        let hover = new_shared_frame();
+        let next_hover = new_shared_frame();
+        push_frame(&editor, 1, 1, vec![10, 0, 0, 255]);
+        push_frame(&hover, 1, 1, vec![20, 0, 0, 255]);
+        push_frame(&next_hover, 1, 1, vec![30, 0, 0, 255]);
+        assert_ne!(frame_sample(&editor).0, frame_sample(&hover).0);
+        assert_ne!(frame_sample(&hover).0, frame_sample(&next_hover).0);
+        assert_eq!(frame_sample(&editor).1, 10);
     }
 }
 

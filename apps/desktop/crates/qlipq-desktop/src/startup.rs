@@ -2,18 +2,33 @@ use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 
-use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+use winreg::enums::HKEY_CURRENT_USER;
+#[cfg(not(test))]
+use winreg::enums::KEY_SET_VALUE;
 use winreg::RegKey;
 
+#[cfg(not(test))]
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "QlipQ";
 
 pub fn set_enabled(enabled: bool) -> io::Result<()> {
+    crate::background::assert_worker();
+    #[cfg(test)]
+    {
+        TEST_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
     let executable = std::env::current_exe()?;
     let (key, _) =
         RegKey::predef(HKEY_CURRENT_USER).create_subkey_with_flags(RUN_KEY, KEY_SET_VALUE)?;
     update_run_key(&key, enabled, &executable)
+    }
 }
+
+#[cfg(test)]
+pub static TEST_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn update_run_key(key: &RegKey, enabled: bool, executable: &Path) -> io::Result<()> {
     if enabled {

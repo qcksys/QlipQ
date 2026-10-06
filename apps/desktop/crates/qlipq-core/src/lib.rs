@@ -6,6 +6,7 @@ pub mod config_json;
 pub mod datetimes;
 pub mod detect;
 pub mod edit_spec;
+pub mod highlight;
 pub mod ids;
 pub mod media;
 pub mod obs;

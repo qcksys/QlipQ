@@ -81,7 +81,7 @@ D:\Clips\Apex Legends\26-06-30\2026-06-30 21-14-02.mkv
 
 QlipQ scans each watched folder **including subfolders**, so the tidied clips still land in your queue. It also recovers the **game name** and surfaces it as the `{source}` token in your [naming template](/guide/getting-started). The script can drive that two ways:
 
-- **From the folder.** When a clip sits in a per-game subfolder under a watched folder — exactly what this script creates — QlipQ uses that folder name as the source, the same convention it reads from NVIDIA Share. Just add your OBS recording folder under **Settings → Watched folders** (QlipQ can auto-detect it). In the example above, the queue shows the two `.mkv` clips with `{source}` = _Apex Legends_ and _Counter Strike 2_.
+- **From the folder.** When a clip sits in a per-game subfolder under a watched folder — exactly what this script creates — QlipQ uses that folder name as the source, the same convention it reads from NVIDIA Share. Just add your OBS recording folder under **Settings → Library → Watched folders** (QlipQ can auto-detect it). In the example above, the queue shows the two `.mkv` clips with `{source}` = _Apex Legends_ and _Counter Strike 2_.
 - **From the filename.** Turn on **Prefix filenames with the game title** and the script names files `Apex Legends - 2026-06-30 21-14-02.mkv`. QlipQ reads the leading label as the source, so the game name rides along even if the clip is later moved out of its folder.
 
 A filename label takes precedence over the folder when both are present, so it is safe to use either or both.
@@ -94,7 +94,7 @@ For a clean capture-to-clip pipeline:
 
 1. Set OBS to record in **mkv** and, ideally, run the **replay buffer** — see [OBS replay buffer setup](/guide/obs-replay-buffer).
 2. Load `qlipq-renamer.lua` and leave the defaults (per-game folders; replays and screenshots organized).
-3. In QlipQ, add your OBS recording folder under **Settings → Watched folders**.
+3. In QlipQ, add your OBS recording folder under **Settings → Library → Watched folders**.
 4. That's it: press your save-replay hotkey mid-game, the script files the clip under the game, and QlipQ queues it with the game already set as `{source}`.
 
 Prefer the game name baked into the filenames (e.g. you sync clips elsewhere)? Also enable **Prefix filenames with the game title**.

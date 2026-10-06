@@ -28,6 +28,9 @@ use qlipq_core::media::MediaInfo;
 use qlipq_ffmpeg::args::output_settings_to_encode;
 use qlipq_ffmpeg::hw::plan_hw_video;
 
+#[cfg(test)]
+pub static TEST_PAUSE: Mutex<Option<(String, std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = Mutex::new(None);
+
 /// The partial-file path the muxer writes to before the atomic rename onto `output_path`. It must
 /// carry the container's real extension: libav picks the muxer from the file name, so a fixed
 /// `.part.mp4` suffix silently forces MP4 muxing even for an `.mkv` target (ignoring the configured
@@ -51,6 +54,22 @@ pub fn run_export(
     progress: Arc<Mutex<f32>>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    crate::background::assert_worker();
+    if crate::host::same_file(input_path, output_path) {
+        return Err("Choose a different output folder or filename; an export cannot replace its source recording.".into());
+    }
+    #[cfg(test)]
+    {
+        let pause = {
+            let mut pause = TEST_PAUSE.lock().unwrap();
+            if pause.as_ref().is_some_and(|(path, _, _)| path == input_path) { pause.take() } else { None }
+        };
+        if let Some((_, entered, resume)) = pause { entered.send(()).unwrap(); resume.recv().unwrap(); }
+    }
+    let _lease = crate::background::read_media(input_path);
+    if let Some(parent) = std::path::Path::new(output_path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create output folder: {e}"))?;
+    }
     let _log = crate::log_ctx::enter(input_path);
     let temp_path = temp_export_path(output_path, settings.container);
     // Stream-copy (remux) the video when nothing forces a re-encode (Original quality, no crop /

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
 use std::process::Command;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -20,8 +21,16 @@ pub fn to_posix(path: &str) -> String {
 
 /// `~/.com.qcksys.qlipq` — keep this exact location for config/edits continuity.
 pub fn data_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".com.qcksys.qlipq")
+    #[cfg(test)]
+    {
+        static DATA: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        DATA.get_or_init(|| tempfile::tempdir().unwrap()).path().to_owned()
+    }
+    #[cfg(not(test))]
+    {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        home.join(".com.qcksys.qlipq")
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -30,6 +39,7 @@ pub fn config_path() -> PathBuf {
 
 /// One-time copy of config.json + edits.json from the old Roaming AppData location.
 pub fn migrate_legacy_data() {
+    if cfg!(test) { return; }
     let Some(old_dir) = dirs::config_dir().map(|d| d.join("com.qcksys.qlipq")) else {
         return;
     };
@@ -48,15 +58,26 @@ pub fn migrate_legacy_data() {
 }
 
 pub fn load_config() -> AppConfig {
+    crate::background::assert_worker();
     match std::fs::read_to_string(config_path()) {
         Ok(text) => config_json::parse(&text),
         Err(_) => AppConfig::default(),
     }
 }
 
+#[cfg(test)]
+pub fn save_config(cfg: &AppConfig) -> std::io::Result<()> {
+    crate::background::assert_worker();
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, config_json::serialize(cfg))
+}
 /// Write the JSON Schema for `config.json` next to it, so editors validate the config against the
 /// relative `$schema` ref the app stamps. Called on startup; cheap to refresh.
 pub fn write_config_schema() -> std::io::Result<()> {
+    crate::background::assert_worker();
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
     std::fs::write(
@@ -70,6 +91,7 @@ fn is_valid_name(name: &str) -> bool {
 }
 
 pub fn read_app_file(name: &str) -> Option<String> {
+    crate::background::assert_worker();
     if !is_valid_name(name) {
         return None;
     }
@@ -92,6 +114,7 @@ pub struct ScanResult {
 
 /// Recursively collect video files, skipping symlinks/junctions.
 pub fn scan_folders(folders: &[String], extensions: &[String]) -> ScanResult {
+    crate::background::assert_worker();
     let mut found = Vec::new();
     let mut complete_roots = Vec::new();
     for root in folders {
@@ -150,6 +173,7 @@ pub struct MediaResolution {
 /// Runs on the blocking pool; the caller probes only the misses (`cached == None`), so a whole
 /// backlog isn't re-probed on every launch.
 pub fn resolve_media(paths: &[String], cache: &MediaCache) -> Vec<MediaResolution> {
+    crate::background::assert_worker();
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
         let Ok(meta) = std::fs::metadata(path) else {
@@ -177,10 +201,18 @@ pub fn resolve_media(paths: &[String], cache: &MediaCache) -> Vec<MediaResolutio
 }
 
 pub fn file_exists(path: &str) -> bool {
+    crate::background::assert_worker();
     Path::new(path).is_file()
 }
 
+pub fn same_path(left: &str, right: &str) -> bool {
+    let left = to_posix(left);
+    let right = to_posix(right);
+    if cfg!(windows) { left.eq_ignore_ascii_case(&right) } else { left == right }
+}
+
 pub fn same_file(left: &str, right: &str) -> bool {
+    crate::background::assert_worker();
     let equal = |a: &str, b: &str| {
         if cfg!(windows) {
             a.eq_ignore_ascii_case(b)
@@ -199,6 +231,7 @@ pub fn same_file(left: &str, right: &str) -> bool {
 
 /// Rename a file on disk; returns the new path. Cross-device moves fall back to copy+delete.
 pub fn rename_file(from: &str, to: &str) -> Result<String, String> {
+    let _exclusive = crate::background::write_media(from);
     if from == to {
         return Ok(to.to_string());
     }
@@ -219,6 +252,7 @@ pub fn rename_file(from: &str, to: &str) -> Result<String, String> {
 }
 
 pub fn delete_file(path: &str) -> Result<(), String> {
+    let _exclusive = crate::background::write_media(path);
     std::fs::remove_file(path).map_err(|e| e.to_string())
 }
 
@@ -290,6 +324,7 @@ fn detect_nvidia_recording_dir() -> Option<String> {
 }
 
 pub fn detect_capture_presets() -> CapturePresets {
+    crate::background::assert_worker();
     let mut presets = CapturePresets::default();
     if let Some(obs) = detect_obs_recording_folder(&read_obs_config()) {
         presets.obs = Some(to_posix(&obs));
@@ -315,6 +350,7 @@ impl Watcher {
 /// Start watching `folders` recursively for changes. Hold the returned [`Watcher`]
 /// for the app's lifetime; dropping it stops watching.
 pub fn start_watch(folders: &[String], _extensions: &[String]) -> Option<Watcher> {
+    crate::background::assert_worker();
     use notify::{EventKind, RecursiveMode, Watcher as _};
 
     let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -343,11 +379,28 @@ pub fn start_watch(folders: &[String], _extensions: &[String]) -> Option<Watcher
 
 /// Open a file/URL in its default handler.
 pub fn open_external(target: &str) {
-    let _ = open::that(target);
+    #[cfg(test)]
+    { test_os::OPENED.lock().unwrap().push(target.to_owned()); }
+    #[cfg(not(test))]
+    {
+        let target = target.to_owned();
+        std::thread::spawn(move || { let _ = open::that(target); });
+    }
 }
 
 /// Reveal a file in the platform file manager (selecting it where supported).
 pub fn reveal(path: &str) {
+    #[cfg(test)]
+    { test_os::OPENED.lock().unwrap().push(path.to_owned()); }
+    #[cfg(not(test))]
+    {
+        let path = path.to_owned();
+        std::thread::spawn(move || reveal_blocking(&path));
+    }
+}
+
+#[cfg(not(test))]
+fn reveal_blocking(path: &str) {
     #[cfg(windows)]
     {
         // explorer's `/select,` parsing breaks when Rust quotes the whole argument (which it does as
@@ -371,6 +424,21 @@ pub fn reveal(path: &str) {
             .unwrap_or_else(|| ".".to_string());
         let _ = open::that(dir);
     }
+}
+
+pub async fn pick_folder() -> Option<String> {
+    #[cfg(test)]
+    { test_os::FOLDERS.lock().unwrap().pop_front().expect("Supply a test folder dialog result") }
+    #[cfg(not(test))]
+    { rfd::AsyncFileDialog::new().pick_folder().await.map(|h| to_posix(&h.path().to_string_lossy())) }
+}
+
+#[cfg(test)]
+pub mod test_os {
+    use std::sync::Mutex;
+    use std::collections::VecDeque;
+    pub static FOLDERS: Mutex<VecDeque<Option<String>>> = Mutex::new(VecDeque::new());
+    pub static OPENED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 }
 
 /// Forward-slash path helpers (matching the web app's queue.ts).

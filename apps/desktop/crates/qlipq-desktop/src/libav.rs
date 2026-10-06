@@ -62,6 +62,7 @@ pub struct PlayerStats {
 /// binary: it opens the container, reads codec parameters off the streams, and reports the same
 /// fields the editor/queue consume. Audio-relative `index` matches ffmpeg's `0:a:N` selector.
 pub fn probe(path: &str) -> Result<(MediaInfo, bool), String> {
+    let _lease = crate::background::read_media(path);
     let _log = crate::log_ctx::enter(path);
     let cpath = CString::new(path).map_err(|e| e.to_string())?;
     let input =
@@ -323,7 +324,7 @@ impl PlayerHandle {
     /// the queue has drained.
     pub fn poll(&self) -> FramePoll {
         let clock = self.shared.clock.now();
-        let mut q = self.shared.video.lock().unwrap();
+        let Ok(mut q) = self.shared.video.try_lock() else { return FramePoll::Empty; };
         let mut chosen = None;
         let mut popped = 0u64;
         while let Some((pts, _)) = q.front() {
@@ -379,6 +380,7 @@ impl PlayerHandle {
 
 impl Drop for Player {
     fn drop(&mut self) {
+        crate::background::assert_worker();
         // UI handles may still hold sender clones; explicitly stop before joining the decoders.
         if let Some(tx) = self.handle.video_cmd.take() {
             let _ = tx.send(Command::Stop);
@@ -409,6 +411,7 @@ pub fn start_player(
     gamma: f64,
     max_h: i64,
 ) -> Option<Player> {
+    crate::background::assert_worker();
     let _log = crate::log_ctx::enter(path);
     let cpath = CString::new(path).ok()?;
     let input = AVFormatContextInput::open(&cpath).ok()?;
@@ -535,6 +538,13 @@ pub struct ScrubDecoder {
     path: String,
 }
 
+#[cfg(test)]
+impl Drop for ScrubDecoder {
+    fn drop(&mut self) {
+        crate::background::assert_worker();
+    }
+}
+
 impl ScrubDecoder {
     /// Open the file and build the video decoder once (the filter graph is built lazily on first use).
     /// `None` if the file/decoder can't open.
@@ -546,6 +556,7 @@ impl ScrubDecoder {
         gamma: f64,
         max_h: i64,
     ) -> Option<Self> {
+        crate::background::assert_worker();
         let _log = crate::log_ctx::enter(path);
         let cpath = CString::new(path).ok()?;
         let input = AVFormatContextInput::open(&cpath).ok()?;
@@ -586,6 +597,7 @@ impl ScrubDecoder {
     /// `realized_sec` is the PTS of the frame actually returned (≈ `sec`, within one frame) so the
     /// caller can snap the playhead to the real frame (frame-accurate scrubber). `None` on decode end.
     pub fn frame_at(&mut self, sec: f64) -> Option<(u32, u32, Vec<u8>, f64)> {
+        crate::background::assert_worker();
         let _log = crate::log_ctx::enter(&self.path);
         let target = sec.max(0.0);
         let (w, h) = self.dims;

@@ -40,10 +40,14 @@ pub struct Event {
 struct Media {
     player: Option<Player>,
     scrubber: Option<ScrubDecoder>,
+    lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
 }
 
 impl Media {
     fn open_scrubber(&mut self, settings: &Settings) {
+        if self.lease.is_none() {
+            self.lease = Some(crate::background::read_media(&settings.path));
+        }
         if self.scrubber.is_none() {
             self.scrubber = ScrubDecoder::open(
                 &settings.path,
@@ -220,6 +224,7 @@ fn run_worker(
                 media.player = None;
                 if reset {
                     media.scrubber = None;
+                    media.lease = None;
                 }
             }
             Command::Release(reply) => {
@@ -257,6 +262,38 @@ fn run_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_mutation_waits_for_preview_worker_release_without_blocking_ui() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.mkv").to_string_lossy().into_owned();
+        let mut session = Session::new();
+        let (entered, started) = mpsc::channel();
+        let (finish, wait) = mpsc::channel();
+        let read_path = path.clone();
+        let _pending = session.submit(Box::new(move |media| {
+            media.lease = Some(crate::background::read_media(&read_path));
+            entered.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            Outcome::Started(None)
+        }));
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let released = {
+            let _ui = crate::background::UiThread::enter();
+            session.release()
+        };
+        let (mutated, mutation) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _exclusive = crate::background::write_media(&path);
+            mutated.send(()).unwrap();
+        });
+        assert!(mutation.recv_timeout(Duration::from_millis(50)).is_err());
+        finish.send(()).unwrap();
+        released.blocking_recv().unwrap();
+        mutation.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+    }
 
     #[test]
     fn slow_initialization_does_not_block_ui_and_release_waits_for_it() {

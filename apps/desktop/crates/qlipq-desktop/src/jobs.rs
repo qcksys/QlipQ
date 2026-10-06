@@ -33,7 +33,7 @@ pub struct ExportJob {
 
 impl ExportJob {
     pub fn progress(&self) -> f32 {
-        self.progress.lock().map(|p| *p).unwrap_or(0.0)
+        self.progress.try_lock().map(|p| *p).unwrap_or(0.0)
     }
 }
 
