@@ -26,6 +26,7 @@ try {
         $content = Get-Content -LiteralPath $file.FullName -Raw
         Assert-Contains $content 'PackageIdentifier: qcksys.qlipq'
         Assert-Contains $content 'PackageVersion: "1.2.3"'
+        Assert-Contains $content 'ManifestVersion: 1.28.0'
         if ($content -match '\{\{') { throw "Unresolved placeholder in $($file.Name)." }
     }
 
