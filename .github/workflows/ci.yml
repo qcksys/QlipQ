@@ -48,7 +48,8 @@ jobs:
         shell: pwsh
         run: |
           Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery
-          Repair-WinGetPackageManager -AllUsers
+          Repair-WinGetPackageManager -Latest
+          winget --version
       - name: Test and validate WinGet manifests
         shell: pwsh
         run: |
