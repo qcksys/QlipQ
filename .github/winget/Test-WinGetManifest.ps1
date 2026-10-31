@@ -73,6 +73,10 @@ try {
         $localePath = Join-Path $output 'qcksys.qlipq.locale.en-US.yaml'
         $content = (Get-Content -LiteralPath $localePath -Raw).Replace('Publisher: qcksys', 'Publisher: Accepted publisher')
         Set-Content -LiteralPath $localePath -Value $content
+        foreach ($file in Get-ChildItem -LiteralPath $output -Filter '*.yaml') {
+            $content = (Get-Content -LiteralPath $file.FullName -Raw).Replace('1.28.0', '1.12.0')
+            Set-Content -LiteralPath $file.FullName -Value $content
+        }
         if ($wingetTest.WrongHash) {
             $installerManifest = Join-Path $output 'qcksys.qlipq.installer.yaml'
             Set-Content -LiteralPath $installerManifest -Value 'InstallerSha256: incorrect'
@@ -91,6 +95,12 @@ try {
     if (($wingetTest.Arguments -join "`n") -cne ($expectedArguments -join "`n")) { throw 'Incorrect WingetCreate update arguments.' }
     if ($updated -isnot [string] -or -not (Test-Path -LiteralPath $updated)) { throw 'Update must return only the manifest directory.' }
     Assert-Contains (Get-Content -LiteralPath (Join-Path $updated 'qcksys.qlipq.locale.en-US.yaml') -Raw) 'Publisher: Accepted publisher'
+    foreach ($file in Get-ChildItem -LiteralPath $updated -Filter '*.yaml') {
+        $content = Get-Content -LiteralPath $file.FullName -Raw
+        Assert-Contains $content 'ManifestVersion: 1.28.0'
+        Assert-Contains $content '.1.28.0.schema.json'
+        if ($content.Contains('1.12.0')) { throw "Stale manifest version in $($file.Name)." }
+    }
     if ($ValidateWithWinGet) {
         winget validate --manifest $updated --disable-interactivity
         if ($LASTEXITCODE -ne 0) { throw "Updated manifest validation failed: $LASTEXITCODE" }

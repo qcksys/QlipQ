@@ -31,6 +31,13 @@ if ($Update) {
     if ($LASTEXITCODE -ne 0) { throw "WingetCreate update failed: $LASTEXITCODE" }
     $installer = Get-Content -LiteralPath (Join-Path $manifestDirectory 'qcksys.qlipq.installer.yaml') -Raw
     if ($installer -notmatch $hash) { throw 'WingetCreate manifest does not match the published installer hash.' }
+    # WingetCreate 1.12.13 writes schema 1.12.0, older than the 1.28.0 winget-pkgs asks for.
+    foreach ($manifest in Get-ChildItem -LiteralPath $manifestDirectory -Filter '*.yaml') {
+        $content = (Get-Content -LiteralPath $manifest.FullName -Raw) `
+            -replace '(?m)(?<=^ManifestVersion: )\d+\.\d+\.\d+', '1.28.0' `
+            -replace '(?<=winget-manifest\.\w+\.)\d+\.\d+\.\d+(?=\.schema\.json)', '1.28.0'
+        Set-Content -LiteralPath $manifest.FullName -Value $content -Encoding utf8NoBOM -NoNewline
+    }
     return $manifestDirectory
 }
 

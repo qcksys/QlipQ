@@ -67,7 +67,8 @@ jobs:
       - name: Set up WinGet
         run: |
           Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery
-          Repair-WinGetPackageManager -AllUsers
+          Repair-WinGetPackageManager -AllUsers -Latest -Force
+          winget --version
 
       - name: Set up WingetCreate
         run: |
