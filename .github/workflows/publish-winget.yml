@@ -65,6 +65,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not download the Windows installer.' }
 
       - name: Set up WinGet
+        # Repair-WinGetPackageManager -Latest queries the GitHub API; unauthenticated calls hit the runner IP's rate limit.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery
           Repair-WinGetPackageManager -Latest
