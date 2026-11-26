@@ -107,8 +107,13 @@ jobs:
         if: inputs.submit && steps.publication.outputs.submit == 'true'
         env:
           WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
           MANIFEST_DIRECTORY: ${{ steps.manifest.outputs.directory }}
         run: |
           if (-not $env:WINGET_CREATE_GITHUB_TOKEN) { throw 'Set the WINGET_TOKEN repository secret to a classic PAT with public_repo scope.' }
+          # wingetcreate also syncs the fork, but hides GitHub's error when that fails.
+          $fork = "$(gh api user --jq .login)/winget-pkgs"
+          gh api --method POST "repos/$fork/merge-upstream" -f branch=master
+          if ($LASTEXITCODE -ne 0) { throw "Could not sync $fork with microsoft/winget-pkgs. Run 'gh repo sync $fork --branch master' and re-run this workflow." }
           ./dist/winget/wingetcreate.exe submit $env:MANIFEST_DIRECTORY --no-open
           if ($LASTEXITCODE -ne 0) { throw "WinGet submission failed: $LASTEXITCODE" }
