@@ -48,6 +48,19 @@ jobs:
       - name: Test desktop workspace
         run: cargo test --workspace -- --skip ui_e2e
 
+      # Catches manifest problems before a release tries to pack the plugin (qlipq-desktop-release.yml),
+      # running the same `pack` as the release without writing a package.
+      - name: Validate the Stream Deck plugin
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build -p qlipq-streamdeck
+          $bundle = "crates/qlipq-streamdeck/com.qcksys.qlipq.meters.sdPlugin"
+          New-Item -ItemType Directory -Force -Path "$bundle/bin" | Out-Null
+          Copy-Item target/debug/qlipq-streamdeck.exe "$bundle/bin/"
+          npx --yes --package @elgato/cli@1.10.5 streamdeck validate $bundle --no-update-check
+          npx --yes --package @elgato/cli@1.10.5 streamdeck pack $bundle --dry-run --version 0.0.0 --no-update-check
+
       - name: Test native UI end to end
         timeout-minutes: 5
         run: cargo test -p qlipq-desktop --bin qlipq ui_e2e

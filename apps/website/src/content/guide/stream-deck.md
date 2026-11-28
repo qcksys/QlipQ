@@ -8,7 +8,10 @@ QlipQ Live Meters runs on Windows. Its OBS controls, [QlipQ editor keys](#contro
 
 ## Install the plugin
 
-The plugin isn't in the release downloads yet. To build and install it from the repository, follow the steps in [`apps/desktop/crates/qlipq-streamdeck/README.md`](https://github.com/qcksys/qlipq/tree/main/apps/desktop/crates/qlipq-streamdeck).
+1. Download **com.qcksys.qlipq.meters.streamDeckPlugin** from the [latest release](https://github.com/qcksys/qlipq/releases/latest).
+2. Open the file. Stream Deck asks to install QlipQ Live Meters; confirm, and its actions appear under **QlipQ**.
+
+To update, install the newer file the same way. To build the plugin from the repository instead, follow the steps in [`apps/desktop/crates/qlipq-streamdeck/README.md`](https://github.com/qcksys/qlipq/tree/main/apps/desktop/crates/qlipq-streamdeck).
 
 ## Switch on OBS's WebSocket server
 
