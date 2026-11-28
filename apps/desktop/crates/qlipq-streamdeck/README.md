@@ -87,7 +87,15 @@ configured in the plugin, and it reconnects every 3 seconds while OBS is closed.
 | `com.qcksys.qlipq.meters.sdPlugin/pi/`           | Settings pages, one per action, sharing `pi.js` and `pi.css` |
 | `com.qcksys.qlipq.meters.sdPlugin/bin/`          | The built binary (gitignored; copied in by the steps below)  |
 
-## Build and install (Windows)
+## Release package
+
+Each QlipQ release attaches `com.qcksys.qlipq.meters.streamDeckPlugin`, built by the
+`streamdeck-plugin` job in `.github/workflows/qlipq-desktop-release.yml`: a release build of the
+plugin, packed with Elgato's CLI (`streamdeck pack --version <release version>`), which validates the
+manifest. The Desktop workflow runs the same validation and a dry-run pack on every pull request.
+Opening the file installs the plugin in Stream Deck.
+
+## Build and install from source (Windows)
 
 From the repo root:
 
