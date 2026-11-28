@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="pi.css" />
+  </head>
+  <body>
+    <label>
+      <span>Output device</span>
+      <select id="deviceId"><option value="">Choose a device…</option></select>
+    </label>
+    <label><span>Key label</span><input id="label" maxlength="18" placeholder="From the device name" /></label>
+    <p>
+      Press to make this device both the Default and the Communications output. The left half of the
+      key lights up while it's the Default output (DEF), the right half while it's the Communications
+      output (COM).
+    </p>
+    <script src="pi.js"></script>
+    <script>
+      const field = (id) => document.getElementById(id);
+
+      /** Selects the saved device, keeping an entry for it while it's unplugged. */
+      function selectDevice(id) {
+        const select = field("deviceId");
+        if (id && ![...select.options].some((option) => option.value === id)) {
+          select.append(Object.assign(document.createElement("option"), { value: id, text: "Saved device (not connected)" }));
+        }
+        select.value = id;
+      }
+
+      pi.onSettings = (settings) => {
+        selectDevice(settings.deviceId ?? "");
+        field("label").value = settings.label ?? "";
+      };
+
+      pi.onPluginMessage = (payload) => {
+        if (!Array.isArray(payload.devices)) return;
+        field("deviceId").replaceChildren(
+          Object.assign(document.createElement("option"), { value: "", text: "Choose a device…" }),
+          ...payload.devices.map(({ id, name }) => Object.assign(document.createElement("option"), { value: id, text: name })),
+        );
+        selectDevice(pi.settings.deviceId ?? "");
+      };
+
+      const save = () => pi.save({ deviceId: field("deviceId").value, label: field("label").value.trim() });
+      field("deviceId").addEventListener("change", save);
+      field("label").addEventListener("change", save);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="pi.css" />
+  </head>
+  <body>
+    <label><span>Key label</span><input id="label" maxlength="18" placeholder="The action's name" /></label>
+    <div id="exportOnly" hidden>
+      <label>
+        <span>During an export</span>
+        <select id="whileExporting">
+          <option value="cancel">A press cancels it</option>
+          <option value="nothing">A press does nothing</option>
+        </select>
+      </label>
+    </div>
+    <p>Controls the QlipQ desktop app, which must be running. Keys grey out and show "QlipQ off" while it's closed.</p>
+    <script src="pi.js"></script>
+    <script>
+      const field = (id) => document.getElementById(id);
+
+      pi.onSettings = (settings) => {
+        field("exportOnly").hidden = pi.action !== "com.qcksys.qlipq.meters.qlipq-export";
+        field("label").value = settings.label ?? "";
+        field("whileExporting").value = settings.whileExporting ?? "cancel";
+      };
+
+      const save = () =>
+        pi.save({ label: field("label").value.trim(), whileExporting: field("whileExporting").value });
+      field("label").addEventListener("change", save);
+      field("whileExporting").addEventListener("change", save);
+    </script>
+  </body>
+</html>

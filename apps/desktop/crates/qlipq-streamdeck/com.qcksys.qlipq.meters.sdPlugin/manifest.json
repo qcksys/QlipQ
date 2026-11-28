@@ -1,0 +1,356 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "UUID": "com.qcksys.qlipq.meters",
+  "Name": "QlipQ Live Meters",
+  "Version": "0.3.0.0",
+  "Author": "Quick Systems",
+  "Description": "Control OBS scenes, recording, chapter markers, replay buffer and input mute from your keys. Monitor audio and PC stats on Stream Deck + dials.",
+  "URL": "https://qlipq.com/",
+  "Icon": "imgs/plugin-icon",
+  "Category": "QlipQ",
+  "CategoryIcon": "imgs/category",
+  "CodePath": "bin/qlipq-streamdeck.exe",
+  "CodePathWin": "bin/qlipq-streamdeck.exe",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.6"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Actions": [
+    {
+      "UUID": "com.qcksys.qlipq.meters.scene",
+      "Name": "OBS Scene",
+      "Tooltip": "Select a scene in preview in Studio Mode, or on the main output outside Studio Mode",
+      "Icon": "imgs/scene",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/target.html",
+      "DisableAutomaticStates": true,
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "imgs/key-idle"
+        },
+        {
+          "Image": "imgs/key-active"
+        }
+      ]
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.record",
+      "Name": "OBS Record",
+      "Tooltip": "Start or stop recording",
+      "Icon": "imgs/record",
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "imgs/key-idle"
+        },
+        {
+          "Image": "imgs/key-active"
+        }
+      ]
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.pause",
+      "Name": "OBS Pause Recording",
+      "Tooltip": "Pause or resume recording",
+      "Icon": "imgs/pause",
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "imgs/key-idle"
+        },
+        {
+          "Image": "imgs/key-active"
+        }
+      ]
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.chapter",
+      "Name": "OBS Add Chapter",
+      "Tooltip": "Add an automatically numbered marker to the current recording",
+      "Icon": "imgs/chapter",
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "imgs/key-idle"
+        },
+        {
+          "Image": "imgs/key-active"
+        }
+      ]
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.buffer",
+      "Name": "OBS Replay Buffer",
+      "Tooltip": "Start or stop the replay buffer on a single press",
+      "Icon": "imgs/buffer",
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "imgs/key-idle"
+        },
+        {
+          "Image": "imgs/key-active"
+        }
+      ]
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.mute",
+      "Name": "OBS Mute Input",
+      "Tooltip": "Mute or unmute one OBS audio input",
+      "Icon": "imgs/mute",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/target.html",
+      "DisableAutomaticStates": true,
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "imgs/key-idle"
+        },
+        {
+          "Image": "imgs/key-active"
+        }
+      ]
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.input",
+      "Name": "OBS Input Meter",
+      "Tooltip": "Live level meter, volume and mute for an OBS audio input",
+      "Icon": "imgs/action",
+      "Controllers": [
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "layouts/meter.json",
+        "TriggerDescription": {
+          "Rotate": "Volume",
+          "Push": "Mute",
+          "Touch": "Mute"
+        }
+      },
+      "PropertyInspectorPath": "pi/index.html",
+      "States": [
+        {
+          "Image": "imgs/action"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.replay",
+      "Name": "OBS Save Replay",
+      "Tooltip": "Press to save OBS's replay buffer; hold to start or stop it",
+      "Icon": "imgs/replay-action",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/replay.html",
+      "States": [
+        {
+          "Image": "imgs/replay-off"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.stats",
+      "Name": "PC Stats",
+      "Tooltip": "Live CPU, GPU and memory use on the touch strip",
+      "Icon": "imgs/stats-action",
+      "Controllers": [
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "layouts/stats.json"
+      },
+      "PropertyInspectorPath": "pi/stats.html",
+      "States": [
+        {
+          "Image": "imgs/stats-action"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.output",
+      "Name": "Set Output Device",
+      "Tooltip": "Make a device the Default and Communications output; each half of the key shows one role",
+      "Icon": "imgs/output-action",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/output.html",
+      "States": [
+        {
+          "Image": "imgs/output-action"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.qlipq-play",
+      "Name": "QlipQ Play/Pause",
+      "Tooltip": "Play or pause the clip open in QlipQ's editor",
+      "Icon": "imgs/qlipq-play",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/qlipq-key.html",
+      "States": [
+        {
+          "Image": "imgs/qlipq-play"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.qlipq-in",
+      "Name": "QlipQ Set In",
+      "Tooltip": "Set the trim's in point at QlipQ's playhead",
+      "Icon": "imgs/qlipq-in",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/qlipq-key.html",
+      "States": [
+        {
+          "Image": "imgs/qlipq-in"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.qlipq-out",
+      "Name": "QlipQ Set Out",
+      "Tooltip": "Set the trim's out point at QlipQ's playhead",
+      "Icon": "imgs/qlipq-out",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/qlipq-key.html",
+      "States": [
+        {
+          "Image": "imgs/qlipq-out"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.qlipq-export",
+      "Name": "QlipQ Export",
+      "Tooltip": "Export the clip open in QlipQ; shows progress, and a press during an export cancels it",
+      "Icon": "imgs/qlipq-export",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/qlipq-key.html",
+      "States": [
+        {
+          "Image": "imgs/qlipq-export"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.qlipq-rescan",
+      "Name": "QlipQ Rescan",
+      "Tooltip": "Rescan QlipQ's recording folders",
+      "Icon": "imgs/qlipq-rescan",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/qlipq-key.html",
+      "States": [
+        {
+          "Image": "imgs/qlipq-rescan"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.qlipq-scrub",
+      "Name": "QlipQ Scrub",
+      "Tooltip": "Step QlipQ's playhead by frames or seconds; press to play or pause",
+      "Icon": "imgs/qlipq-scrub",
+      "Controllers": [
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "layouts/qlipq-scrub.json",
+        "TriggerDescription": {
+          "Rotate": "Step",
+          "Push": "Play/Pause",
+          "Touch": "Play/Pause"
+        }
+      },
+      "PropertyInspectorPath": "pi/qlipq-scrub.html",
+      "States": [
+        {
+          "Image": "imgs/qlipq-scrub"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    },
+    {
+      "UUID": "com.qcksys.qlipq.meters.qlipq-picker",
+      "Name": "QlipQ Clip Picker",
+      "Tooltip": "Turn through QlipQ's queue; press to open the clip",
+      "Icon": "imgs/qlipq-picker",
+      "Controllers": [
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "layouts/qlipq-picker.json",
+        "TriggerDescription": {
+          "Rotate": "Choose clip",
+          "Push": "Open",
+          "Touch": "Open"
+        }
+      },
+      "PropertyInspectorPath": "pi/qlipq-picker.html",
+      "States": [
+        {
+          "Image": "imgs/qlipq-picker"
+        }
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false
+    }
+  ]
+}

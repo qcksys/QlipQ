@@ -1,0 +1,90 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "id": "qlipq-stats",
+  "items": [
+    {
+      "key": "row1Label",
+      "type": "text",
+      "rect": [12, 6, 40, 24],
+      "value": "CPU",
+      "font": { "size": 14, "weight": 600 },
+      "alignment": "left",
+      "color": "#9fabbb"
+    },
+    {
+      "key": "row1Bar",
+      "type": "bar",
+      "rect": [54, 13, 94, 10],
+      "value": 0,
+      "subtype": 0,
+      "border_w": 0,
+      "bar_bg_c": "#1d2430",
+      "bar_fill_c": "#4fb3ff"
+    },
+    {
+      "key": "row1Value",
+      "type": "text",
+      "rect": [150, 6, 40, 24],
+      "value": "–",
+      "font": { "size": 14, "weight": 600 },
+      "alignment": "right",
+      "color": "#ffffff"
+    },
+    {
+      "key": "row2Label",
+      "type": "text",
+      "rect": [12, 38, 40, 24],
+      "value": "GPU",
+      "font": { "size": 14, "weight": 600 },
+      "alignment": "left",
+      "color": "#9fabbb"
+    },
+    {
+      "key": "row2Bar",
+      "type": "bar",
+      "rect": [54, 45, 94, 10],
+      "value": 0,
+      "subtype": 0,
+      "border_w": 0,
+      "bar_bg_c": "#1d2430",
+      "bar_fill_c": "#49d17d"
+    },
+    {
+      "key": "row2Value",
+      "type": "text",
+      "rect": [150, 38, 40, 24],
+      "value": "–",
+      "font": { "size": 14, "weight": 600 },
+      "alignment": "right",
+      "color": "#ffffff"
+    },
+    {
+      "key": "row3Label",
+      "type": "text",
+      "rect": [12, 70, 40, 24],
+      "value": "RAM",
+      "font": { "size": 14, "weight": 600 },
+      "alignment": "left",
+      "color": "#9fabbb"
+    },
+    {
+      "key": "row3Bar",
+      "type": "bar",
+      "rect": [54, 77, 94, 10],
+      "value": 0,
+      "subtype": 0,
+      "border_w": 0,
+      "bar_bg_c": "#1d2430",
+      "bar_fill_c": "#b48cff"
+    },
+    {
+      "key": "row3Value",
+      "type": "text",
+      "rect": [150, 70, 40, 24],
+      "value": "–",
+      "font": { "size": 14, "weight": 600 },
+      "alignment": "right",
+      "color": "#ffffff"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+# The plugin binary is copied in from target/ by the build step in README.md
+/com.qcksys.qlipq.meters.sdPlugin/bin/

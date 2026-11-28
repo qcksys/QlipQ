@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "id": "qlipq-scrub",
+  "items": [
+    {
+      "key": "title",
+      "type": "text",
+      "rect": [12, 4, 176, 20],
+      "font": { "size": 13, "weight": 600 },
+      "alignment": "left",
+      "text-overflow": "ellipsis",
+      "color": "#9fabbb"
+    },
+    {
+      "key": "time",
+      "type": "text",
+      "rect": [12, 26, 176, 26],
+      "font": { "size": 18, "weight": 600 },
+      "alignment": "left",
+      "color": "#ffffff"
+    },
+    {
+      "key": "position",
+      "type": "bar",
+      "rect": [12, 56, 176, 8],
+      "value": 0,
+      "subtype": 0,
+      "border_w": 0,
+      "bar_bg_c": "#1d2430",
+      "bar_fill_c": "#8676ff"
+    },
+    {
+      "key": "trim",
+      "type": "text",
+      "rect": [12, 70, 176, 24],
+      "font": { "size": 13, "weight": 500 },
+      "alignment": "left",
+      "text-overflow": "ellipsis",
+      "color": "#9fabbb"
+    }
+  ]
+}

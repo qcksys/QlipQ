@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="pi.css" />
+  </head>
+  <body>
+    <label><span>Key label</span><input id="label" maxlength="18" placeholder="Save Replay" /></label>
+    <h3>Hold</h3>
+    <label>
+      <span>Holding the key</span>
+      <select id="holdAction">
+        <option value="toggle">Starts or stops the buffer</option>
+        <option value="none">Does nothing (every press saves)</option>
+      </select>
+    </label>
+    <label><span>Hold time (s)</span><input id="hold" type="number" min="0.2" max="3" step="0.1" /></label>
+    <h3>Checkmark</h3>
+    <label>
+      <span>Show it for</span>
+      <select id="confirm">
+        <option value="all">Every replay save</option>
+        <option value="own">Saves from this key only</option>
+      </select>
+    </label>
+    <p>
+      "Every replay save" includes saves from OBS's hotkey and other keys. Needs OBS's replay buffer
+      (Settings → Output → Replay Buffer) and its WebSocket server.
+    </p>
+    <script src="pi.js"></script>
+    <script>
+      const field = (id) => document.getElementById(id);
+      const fields = ["label", "holdAction", "hold", "confirm"].map(field);
+      const syncHold = () => {
+        field("hold").disabled = field("holdAction").value === "none";
+      };
+
+      pi.onSettings = (settings) => {
+        field("label").value = settings.label ?? "Save Replay";
+        field("holdAction").value = settings.holdAction ?? "toggle";
+        field("hold").value = settings.hold ?? 0.5;
+        field("confirm").value = settings.confirm ?? "all";
+        syncHold();
+      };
+
+      const save = () => {
+        syncHold();
+        pi.save({
+          label: field("label").value.trim() || "Save Replay",
+          holdAction: field("holdAction").value,
+          hold: pi.number(field("hold"), 0.5),
+          confirm: field("confirm").value,
+        });
+      };
+      for (const element of fields) element.addEventListener("change", save);
+    </script>
+  </body>
+</html>

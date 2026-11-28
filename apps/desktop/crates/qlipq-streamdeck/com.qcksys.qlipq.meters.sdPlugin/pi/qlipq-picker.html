@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="pi.css" />
+  </head>
+  <body>
+    <label>
+      <span>At the ends</span>
+      <select id="wrap">
+        <option value="false">Stop at the first and last clip</option>
+        <option value="true">Wrap around</option>
+      </select>
+    </label>
+    <p>
+      Turn to move through QlipQ's queue in its current filter and sort order, then press or tap to
+      open the clip. The strip starts on the clip that's open.
+    </p>
+    <script src="pi.js"></script>
+    <script>
+      const field = (id) => document.getElementById(id);
+      pi.onSettings = (settings) => {
+        field("wrap").value = String(settings.wrap === true);
+      };
+      field("wrap").addEventListener("change", () => pi.save({ wrap: field("wrap").value === "true" }));
+    </script>
+  </body>
+</html>
