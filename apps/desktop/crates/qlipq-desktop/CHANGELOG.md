@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4](https://github.com/qcksys/QlipQ/compare/v0.1.3...v0.1.4) (2026-11-28)
+
+
+### Features
+
+* add the QlipQ Stream Deck plugin and a control pipe in QlipQ ([#29](https://github.com/qcksys/QlipQ/issues/29)) ([fa594e7](https://github.com/qcksys/QlipQ/commit/fa594e7f1385f0020c9fccf55e0516c6e87606a3))
+
 ## [0.1.3](https://github.com/qcksys/QlipQ/compare/v0.1.2...v0.1.3) (2026-10-06)
 
 
