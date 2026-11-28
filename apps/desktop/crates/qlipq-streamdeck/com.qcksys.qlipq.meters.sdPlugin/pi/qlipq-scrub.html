@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="pi.css" />
+  </head>
+  <body>
+    <h3>Each click moves</h3>
+    <label>
+      <span>Unit</span>
+      <select id="unit">
+        <option value="frames">Frames</option>
+        <option value="seconds">Seconds</option>
+      </select>
+    </label>
+    <label><span>Amount</span><input id="amount" type="number" min="0.1" max="120" step="1" /></label>
+    <h3>Press or tap</h3>
+    <label>
+      <span>Action</span>
+      <select id="press">
+        <option value="play">Play or pause</option>
+        <option value="none">Nothing</option>
+      </select>
+    </label>
+    <p>Steps the playhead of the clip open in QlipQ's editor. The strip shows the clip, the playhead and the trim.</p>
+    <script src="pi.js"></script>
+    <script>
+      const field = (id) => document.getElementById(id);
+      const syncAmount = () => {
+        const seconds = field("unit").value === "seconds";
+        field("amount").step = seconds ? "0.1" : "1";
+        field("amount").max = seconds ? "60" : "120";
+      };
+
+      pi.onSettings = (settings) => {
+        field("unit").value = settings.unit ?? "frames";
+        field("amount").value = settings.amount ?? 1;
+        field("press").value = settings.press ?? "play";
+        syncAmount();
+      };
+
+      const save = () => {
+        syncAmount();
+        pi.save({
+          unit: field("unit").value,
+          amount: pi.number(field("amount"), 1),
+          press: field("press").value,
+        });
+      };
+      for (const id of ["unit", "amount", "press"]) field(id).addEventListener("change", save);
+    </script>
+  </body>
+</html>

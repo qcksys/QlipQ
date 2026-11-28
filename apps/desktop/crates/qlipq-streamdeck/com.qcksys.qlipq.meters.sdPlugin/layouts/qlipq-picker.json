@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "id": "qlipq-picker",
+  "items": [
+    {
+      "key": "title",
+      "type": "text",
+      "rect": [12, 4, 176, 20],
+      "font": { "size": 13, "weight": 600 },
+      "alignment": "left",
+      "color": "#9fabbb"
+    },
+    {
+      "key": "name",
+      "type": "text",
+      "rect": [12, 28, 176, 28],
+      "font": { "size": 16, "weight": 600 },
+      "alignment": "left",
+      "text-overflow": "ellipsis",
+      "color": "#ffffff"
+    },
+    {
+      "key": "detail",
+      "type": "text",
+      "rect": [12, 62, 176, 24],
+      "font": { "size": 13, "weight": 500 },
+      "alignment": "left",
+      "color": "#9fabbb"
+    }
+  ]
+}

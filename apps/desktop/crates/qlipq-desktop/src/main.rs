@@ -9,6 +9,7 @@
 //! muxes ([`export`]).
 
 mod background;
+mod control;
 mod discovery;
 mod export;
 mod highlight;
@@ -441,6 +442,10 @@ struct App {
     /// Multiplier on the preview pane height (zoom control).
     preview_scale: f32,
     theme: Theme,
+    /// The Stream Deck plugin connected to the control pipe (`control.rs`), if any.
+    control: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// The state and queue lines last sent to it, so only changes are sent.
+    control_sent: (String, String),
 }
 
 #[derive(Debug, Clone)]
@@ -488,6 +493,8 @@ enum Message {
     TimestampSubmit,
     EditorKey(iced::keyboard::Key, iced::keyboard::Modifiers),
     SetKeybind(KbField, String),
+    /// The Stream Deck plugin connected, sent a command, or disconnected (`control.rs`).
+    Control(control::Event),
     TogglePlay,
     SetIn,
     SetOut,
@@ -674,11 +681,16 @@ impl App {
             fullscreen: false,
             preview_scale: 1.0,
             theme: theme::dark(),
+            control: None,
+            control_sent: Default::default(),
         }
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let mut subs = vec![iced::time::every(TICK).map(|_| Message::Tick)];
+        let mut subs = vec![
+            iced::time::every(TICK).map(|_| Message::Tick),
+            control::subscription().map(Message::Control),
+        ];
         // Editor keyboard shortcuts — active only with a clip open and no modal in front. A focused
         // text field captures the key (Status::Captured), so `editor_key_event` ignores it; here we
         // just avoid binding over the queue/settings or a dialog.
@@ -1164,6 +1176,7 @@ impl App {
                 };
             }
             Message::SelectItem(id) => return self.select_item(id),
+            Message::Control(event) => return self.on_control(event),
             Message::MediaProbed(session, id, result) => {
                 if self
                     .editor
@@ -1956,7 +1969,111 @@ impl App {
         Task::none()
     }
 
+    fn on_control(&mut self, event: control::Event) -> Task<Message> {
+        match event {
+            control::Event::Connected(status) => {
+                self.control = Some(status);
+                self.control_sent = Default::default();
+                self.send_control_status();
+                Task::none()
+            }
+            control::Event::Disconnected => {
+                self.control = None;
+                Task::none()
+            }
+            control::Event::Command(command) => {
+                let task = self.control_command(command);
+                self.send_control_status();
+                task
+            }
+        }
+    }
+
+    /// Runs a Stream Deck command as the matching shortcut or button would. Playback and in/out
+    /// commands need a clip open in the editor, like the shortcuts; `start_export` makes its own checks.
+    fn control_command(&mut self, command: control::Command) -> Task<Message> {
+        let fps = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.media.as_ref())
+            .map(|media| media.fps.max(1.0));
+        let message = match command {
+            control::Command::TogglePlay => fps.map(|_| Message::TogglePlay),
+            control::Command::SetIn => fps.map(|_| Message::SetIn),
+            control::Command::SetOut => fps.map(|_| Message::SetOut),
+            control::Command::StepFrames { frames } => {
+                fps.map(|fps| Message::Skip(f64::from(frames) / fps))
+            }
+            control::Command::Skip { seconds } => fps.map(|_| Message::Skip(seconds)),
+            control::Command::Export => Some(Message::Export),
+            control::Command::CancelExport => Some(Message::CancelExport),
+            control::Command::Rescan => Some(Message::RescanAll),
+            control::Command::Select { id } => self
+                .items
+                .iter()
+                .any(|item| item.id == id)
+                .then_some(Message::SelectItem(id)),
+        };
+        message.map_or_else(Task::none, |message| self.update(message))
+    }
+
+    fn control_state(&self) -> control::StateMessage {
+        let clip = self.editor.as_ref().and_then(|editor| {
+            let item = self.items.iter().find(|item| item.id == editor.item_id)?;
+            Some(control::Clip {
+                id: item.id.clone(),
+                name: item.file_name.clone(),
+                duration: editor.media.as_ref().map(|media| media.duration_sec),
+                position: editor.current_time,
+                trim_in: editor.trim_start,
+                trim_out: editor.trim_end,
+                playing: editor.playing,
+            })
+        });
+        control::StateMessage {
+            clip,
+            exporting: self.exports.active().map(|job| job.progress()),
+        }
+    }
+
+    fn control_queue(&self) -> control::QueueMessage {
+        control::QueueMessage {
+            items: self
+                .sorted_queue()
+                .into_iter()
+                .map(|item| control::QueueEntry {
+                    id: item.id.clone(),
+                    name: item.file_name.clone(),
+                    duration: item.duration_sec,
+                })
+                .collect(),
+            selected: self.selected_id.clone(),
+        }
+    }
+
+    /// Sends the plugin whichever of the state and queue lines changed since it last heard.
+    fn send_control_status(&mut self) {
+        let Some(status) = &self.control else {
+            return;
+        };
+        let state = control::line(&self.control_state());
+        let queue = control::line(&self.control_queue());
+        let mut connected = true;
+        if state != self.control_sent.0 {
+            connected &= status.send(state.clone()).is_ok();
+            self.control_sent.0 = state;
+        }
+        if queue != self.control_sent.1 {
+            connected &= status.send(queue.clone()).is_ok();
+            self.control_sent.1 = queue;
+        }
+        if !connected {
+            self.control = None;
+        }
+    }
+
     fn on_tick(&mut self) -> Task<Message> {
+        self.send_control_status();
         let mut tasks = Vec::new();
         if matches!(self.view, View::Queue) && !self.fullscreen {
             let visible: Vec<_> = self
@@ -3713,6 +3830,66 @@ mod tests {
             none
         )); // wrong key
         assert!(!binding_matches("", &Key::Named(Named::Space), none)); // unbound never matches
+    }
+
+    fn control_lines(
+        lines: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Vec<serde_json::Value> {
+        std::iter::from_fn(|| lines.try_recv().ok())
+            .map(|line| serde_json::from_str(&line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn control_pipe_reports_state_and_queue_changes_once() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        let (status, mut lines) = tokio::sync::mpsc::unbounded_channel();
+        drop(app.update(Message::Control(control::Event::Connected(status))));
+        let sent = control_lines(&mut lines);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0]["type"], "state");
+        assert!(sent[0]["clip"].is_null(), "no clip is open");
+        assert_eq!(sent[1]["type"], "queue");
+        assert_eq!(sent[1]["items"].as_array().unwrap().len(), 2);
+        assert_eq!(sent[1]["selected"], "b.mp4");
+
+        app.send_control_status();
+        assert!(control_lines(&mut lines).is_empty(), "nothing changed");
+
+        drop(app.update(Message::FilterSearch("a.mp4".into())));
+        app.send_control_status();
+        let sent = control_lines(&mut lines);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["items"][0]["id"], "a.mp4");
+        assert_eq!(sent[0]["items"].as_array().unwrap().len(), 1);
+
+        drop(app.update(Message::Control(control::Event::Disconnected)));
+        assert!(app.control.is_none());
+    }
+
+    #[test]
+    fn control_commands_need_an_open_clip_or_a_known_item() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        let (status, mut lines) = tokio::sync::mpsc::unbounded_channel();
+        drop(app.update(Message::Control(control::Event::Connected(status))));
+        control_lines(&mut lines);
+        for command in [
+            control::Command::TogglePlay,
+            control::Command::SetIn,
+            control::Command::SetOut,
+            control::Command::StepFrames { frames: 1 },
+            control::Command::Skip { seconds: 5.0 },
+            control::Command::Select {
+                id: "missing.mp4".into(),
+            },
+        ] {
+            drop(app.update(Message::Control(control::Event::Command(command.clone()))));
+            assert!(app.editor.is_none(), "{command:?} opened nothing");
+            assert_eq!(app.selected_id.as_deref(), Some("b.mp4"), "{command:?}");
+        }
+        assert!(control_lines(&mut lines).is_empty());
     }
 
     fn qi(file_name: &str, status: QueueStatus, source: Option<&str>, tags: &[&str]) -> QueueItem {

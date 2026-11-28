@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "id": "qlipq-meter",
+  "items": [
+    {
+      "key": "title",
+      "type": "text",
+      "rect": [12, 4, 118, 24],
+      "font": { "size": 15, "weight": 600 },
+      "alignment": "left",
+      "text-overflow": "ellipsis",
+      "color": "#ffffff"
+    },
+    {
+      "key": "value",
+      "type": "text",
+      "rect": [130, 4, 58, 24],
+      "font": { "size": 15, "weight": 500 },
+      "alignment": "right",
+      "color": "#ffffff"
+    },
+    {
+      "key": "meterL",
+      "type": "bar",
+      "rect": [12, 34, 176, 10],
+      "value": 0,
+      "subtype": 0,
+      "border_w": 0,
+      "bar_bg_c": "#1d2430",
+      "bar_fill_c": "0:#3ddc84,0.75:#3ddc84,0.88:#ffd34d,1:#ff5f5f"
+    },
+    {
+      "key": "meterR",
+      "type": "bar",
+      "rect": [12, 48, 176, 10],
+      "value": 0,
+      "subtype": 0,
+      "border_w": 0,
+      "bar_bg_c": "#1d2430",
+      "bar_fill_c": "0:#3ddc84,0.75:#3ddc84,0.88:#ffd34d,1:#ff5f5f"
+    },
+    {
+      "key": "fader",
+      "type": "gbar",
+      "rect": [12, 66, 176, 28],
+      "value": 0,
+      "subtype": 4,
+      "bar_h": 10,
+      "border_w": 0,
+      "bar_bg_c": "0:#2b3341,1:#7b95ff"
+    }
+  ]
+}

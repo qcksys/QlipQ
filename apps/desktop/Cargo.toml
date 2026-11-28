@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/qlipq-core", "crates/qlipq-ffmpeg", "crates/qlipq-desktop"]
+members = ["crates/qlipq-core", "crates/qlipq-ffmpeg", "crates/qlipq-desktop", "crates/qlipq-streamdeck"]
 
 [workspace.package]
 edition = "2021"

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#202835"/><stop offset="1" stop-color="#0f141b"/></linearGradient></defs>
+<rect width="144" height="144" fill="#0f141b"/><rect width="144" height="144" fill="url(#bg)"/><rect width="144" height="6" fill="#ff5f5f"/>
+<g transform="translate(39 14) scale(0.66)"><g fill="none" stroke="#ff5f5f" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 12 H72 L88 28 V88 H14 Z"/><path d="M30 12 V34 H66 V12"/><rect x="30" y="54" width="40" height="34" rx="3"/></g></g>
+<text x="72" y="103" text-anchor="middle" font-family="Segoe UI" font-weight="600" font-size="17" fill="#f2f5f8">Save Replay</text>
+<text x="72" y="130" text-anchor="middle" font-family="Segoe UI" font-size="15" fill="#9fabbb">Buffer off</text></svg>

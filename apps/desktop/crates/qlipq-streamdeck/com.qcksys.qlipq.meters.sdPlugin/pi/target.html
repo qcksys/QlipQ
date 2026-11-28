@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="pi.css" />
+  </head>
+  <body>
+    <label><span id="label"></span><input id="target" list="targets" /></label>
+    <datalist id="targets"></datalist>
+    <script src="pi.js"></script>
+    <script>
+      const target = document.getElementById("target");
+      const field = () => pi.action.endsWith(".scene") ? "scene" : "input";
+      pi.onSettings = (settings) => {
+        document.getElementById("label").textContent = field() === "scene" ? "OBS scene" : "OBS input";
+        target.value = settings[field()] ?? "";
+      };
+      pi.onConnected = () => pi.socket.send(JSON.stringify({
+        event: "sendToPlugin", action: pi.action, context: pi.context, payload: { listTargets: true },
+      }));
+      pi.onPluginMessage = (payload) => {
+        const names = payload.scenes ?? payload.inputs;
+        if (!Array.isArray(names)) return;
+        document.getElementById("targets").replaceChildren(
+          ...names.map((name) => Object.assign(document.createElement("option"), { value: name })),
+        );
+      };
+      target.addEventListener("change", () => pi.save({ [field()]: target.value }));
+    </script>
+  </body>
+</html>
