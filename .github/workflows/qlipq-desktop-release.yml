@@ -112,6 +112,47 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # The Stream Deck plugin (crates/qlipq-streamdeck), packed with Elgato's CLI into a
+  # .streamDeckPlugin that installs with a double-click. A separate job, so a packing problem can't
+  # keep the app's assets off the release. It needs no FFmpeg: the plugin doesn't link it.
+  streamdeck-plugin:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop -> target
+
+      - name: Build the plugin
+        run: cargo build --release -p qlipq-streamdeck
+
+      # `pack` validates the manifest and writes the release version into it before packing.
+      - name: Pack the plugin
+        shell: pwsh
+        run: |
+          $bundle = "crates/qlipq-streamdeck/com.qcksys.qlipq.meters.sdPlugin"
+          New-Item -ItemType Directory -Force -Path "$bundle/bin" | Out-Null
+          Copy-Item target/release/qlipq-streamdeck.exe "$bundle/bin/"
+          $ver = ("${{ github.event.inputs.tag || github.ref_name }}").TrimStart('v')
+          npx --yes --package @elgato/cli@1.10.5 streamdeck pack $bundle --version $ver --output . --force --no-update-check
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: apps/desktop/*.streamDeckPlugin
+          fail_on_unmatched_files: true
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   winget:
     needs: release
     if: github.repository == 'qcksys/QlipQ' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
