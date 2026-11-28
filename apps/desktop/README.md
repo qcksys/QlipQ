@@ -15,6 +15,7 @@ encode-planning logic and are covered by unit tests.
 | `crates/qlipq-core`                   | Domain model + pure logic — config (+ lenient JSON), edit spec, media info, OBS filename parsing, rename templating, INI/OBS detection, datetimes.                           |
 | `crates/qlipq-ffmpeg`                 | Pure encode planning — resolve output settings (`output_settings_to_encode`), the HW encoder + rate-control model (`plan_hw_video`), size estimate (`estimate_export_size`). |
 | `crates/qlipq-desktop` (`bin: qlipq`) | The GUI + host layer: in-process libav decode / preview / probe / export, folder scan/watch, config/edits persistence, OBS/NVIDIA detection.                                 |
+| `crates/qlipq-streamdeck`             | Stream Deck + plugin: live OBS audio meters on the dials, with volume and mute (see its [README](crates/qlipq-streamdeck/README.md)). No FFmpeg link.                         |
 
 The `cargo test` suites assert exact behaviour, including the encode-planning + rate-control model.
 
@@ -143,6 +144,24 @@ to the expected event's first/last seconds, then run
 This opt-in test requires Ollama and the default model. It checks that the selected trim contains
 the labelled event without passing simply by selecting the whole recording; it does not validate
 the model's prose or establish accuracy on other clips.
+
+## Stream Deck control pipe
+
+On Windows the app serves a named pipe, `\\.\pipe\qlipq-control` (`control.rs`), for the QlipQ actions
+in the Stream Deck plugin (`crates/qlipq-streamdeck`). It is a subscription in `App::subscription`,
+so commands arrive as `Message::Control` and run through the same handlers as the keyboard
+shortcuts and buttons:
+
+- **In:** one JSON command per line: `togglePlay`, `setIn`, `setOut`, `stepFrames {frames}`,
+  `skip {seconds}`, `export`, `cancelExport`, `rescan`, `select {id}`. Playback and in/out commands
+  need a clip open in the editor, as the shortcuts do; `export` makes the same checks as the button.
+- **Out:** a `state` line (the open clip, its playhead, in/out points and play state, plus export
+  progress) and a `queue` line (the visible queue in its current filter and sort order, plus the
+  selection). Each is sent when it changes, checked on the 250 ms tick.
+
+The pipe accepts one client at a time and refuses remote clients. Windows' default pipe security
+lets only the signed-in user's programs (and administrators) write to it. The first QlipQ instance
+owns the pipe; a second instance doesn't serve it. On Linux the subscription does nothing.
 
 ## Data compatibility
 
